@@ -1,8 +1,18 @@
 > **Idioma:** [English](README.md) · Español
 
-# NIDO PC
+<p align="center">
+  <img src="app/public/mascot-nido.png" alt="Mascota de NIDO" width="120">
+</p>
 
-**Tu agente, tu mundo, en tu computadora.**
+<h1 align="center">NIDO PC</h1>
+
+<p align="center"><b>Tu agente, tu mundo, en tu computadora.</b><br>
+Un asistente de IA privado para escritorio que funciona 100 % fuera de línea en tu propia máquina.</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="Licencia: MIT" src="https://img.shields.io/badge/licencia-MIT-green"></a>
+  <img alt="Plataforma: Windows" src="https://img.shields.io/badge/plataforma-Windows-3A563F">
+</p>
 
 NIDO PC es un asistente personal privado para escritorio que corre
 modelos de lenguaje grandes en tu propia máquina, 100 % fuera de
@@ -160,6 +170,14 @@ para contribuir están en
   con el que sale la app.
 - `docs/`: la constitución y los principios del proyecto, y la
   arquitectura.
+
+## Contribuir
+
+Lo más útil ahora mismo son los reportes de errores y los comentarios de
+quienes prueban la app. Usa las plantillas de issues: el propio «Reportar un
+problema» de la app abre la misma puerta. Para código, lee antes
+[CONTRIBUTING.es.md](CONTRIBUTING.es.md) y el
+[código de conducta](CODE_OF_CONDUCT.es.md).
 
 ## Créditos y licencia
 
