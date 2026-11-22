@@ -59,7 +59,16 @@ export default {
             "node_modules/tesseract.js/**/*",
             "node_modules/tesseract.js-core/**/*",
             "node_modules/wasm-feature-detect",
-            "node_modules/pdfjs-dist"
+            "node_modules/pdfjs-dist",
+            // E9 paso 1: el runtime de voz (sherpa-onnx-node y su
+            // paquete de plataforma) carga su .node y sus
+            // bibliotecas ONNX por dlopen desde el proceso de
+            // utilidad: no pueden abrirse desde dentro del asar.
+            // El filtrado de binarios de otras plataformas de
+            // estos paquetes es la pierna P-7 de E12, no de esta
+            // etapa.
+            "node_modules/sherpa-onnx-node",
+            "node_modules/sherpa-onnx-*"
         ]
     },
     productName: productName,
@@ -193,7 +202,15 @@ export default {
             // cifrada (cazado en la primera build del instalador,
             // 2026-11-21). En Linux la línea de la macro basta
             // porque allí ${os} y el nombre del fichero coinciden.
-            "node_modules/better-sqlite3-multiple-ciphers/prebuilds/win32-${arch}.node"
+            // La línea va CONDICIONADA al destino Windows
+            // (cura E9, 2026-11-22): sin condicionar, re-incluía
+            // el prebuild win32 en las builds de Linux y la
+            // verificación de binarios nativos rechazaba el
+            // paquete entero del banco (medido en la puerta de
+            // la escucha: win32-x64.node PE en el paquete linux).
+            ...(process.argv.includes("--win")
+                ? ["node_modules/better-sqlite3-multiple-ciphers/prebuilds/win32-${arch}.node"]
+                : [])
         ]
     },
     mac: {

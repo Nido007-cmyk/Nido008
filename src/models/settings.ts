@@ -35,8 +35,18 @@ interface Settings {
   voiceInputEnabled?: boolean;
   /** 0.1.79: permitir capturas de pantalla (FLAG_SECURE fuera). Default false. */
   screenCaptureAllowed?: boolean;
-  /** Dictation only with the phone's on-device recognizer (default true). */
-  voiceOnDeviceOnly?: boolean;
+  /**
+   * E9 paso 5 (D-1 forma C): ofrecer la voz del sistema
+   * operativo como reserva de LECTURA cuando la voz de la
+   * casa no está. Es clave propia de PC: la heredada
+   * voiceOnDeviceOnly se retiró entera en este paso (su
+   * mecanismo, el dictado por el reconocedor del sistema,
+   * no existe en PC, donde el dictado es local por
+   * construcción). Default true: la reserva se ofrece
+   * cuando existe, enseñada como voz del sistema, nunca
+   * como voz de NIDO (H-5).
+   */
+  voiceSystemReserveEnabled?: boolean;
   readAloudEnabled?: boolean;
   /** 0.1.60: resumen diario de las 8:00. Opt-in (constitución §9). */
   dailySummaryEnabled?: boolean;
@@ -436,19 +446,19 @@ export async function setVoiceInputEnabled(enabled: boolean): Promise<void> {
 }
 
 /**
- * Auditoría 2026-10-29 (y lección de Briar: un solo canal fuera del
- * perímetro rompe la promesa entera): el dictado solo usa el reconocedor que
- * funciona EN el teléfono. El servicio del sistema puede mandar el audio a
- * internet; usarlo es una decisión de la persona. Default true.
+ * E9 paso 5 (D-1 forma C): la oferta de la voz del sistema
+ * como reserva de lectura. La voz del sistema suena en la
+ * propia máquina y se enseña con su nombre (H-5); apagarla
+ * deja la lectura solo con la voz de la casa. Default true.
  */
-export async function getVoiceOnDeviceOnly(): Promise<boolean> {
+export async function getVoiceSystemReserveEnabled(): Promise<boolean> {
   const s = await readSettings();
-  return s.voiceOnDeviceOnly ?? true;
+  return s.voiceSystemReserveEnabled ?? true;
 }
 
-export async function setVoiceOnDeviceOnly(onDeviceOnly: boolean): Promise<void> {
+export async function setVoiceSystemReserveEnabled(enabled: boolean): Promise<void> {
   return mutateSettings((s) => {
-    s.voiceOnDeviceOnly = onDeviceOnly;
+    s.voiceSystemReserveEnabled = enabled;
   });
 }
 

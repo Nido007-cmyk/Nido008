@@ -757,21 +757,23 @@
     "minutesAgo": "hace {{count}} min"
   },
   "usageStatsScreen": {},
-  "voiceSettings": {
-    "checking": "Verificando…",
-    "enabledLabel": "Entrada de voz",
-    "enabledValue": "Muestra el botón del micrófono en el chat para dictar mensajes.",
-    "speechEngineLabel": "Motor de voz a texto",
-    "title": "Entrada de voz",
-    "unavailable": "No disponible en este dispositivo",
-    "unavailableNote": "No se encontró ningún servicio de reconocimiento de voz del sistema, común en GrapheneOS / versiones sin Google. Un modelo whisper.cpp integrado eliminaría esta dependencia, pero es un proyecto aparte de la escala de la propia integración de llama.rn; no está implementado en esta versión.",
-    "readAloudLabel": "Lectura en voz alta",
-    "readAloudValue": "Lee las respuestas del asistente usando la voz del sistema (sin internet).",
-    "engineOnDevice": "Reconocedor en el teléfono: el audio no sale de aquí",
-    "engineSystem": "Solo el servicio de voz del sistema (de Google o del fabricante): puede mandar el audio a internet",
-    "onDeviceOnlyLabel": "Solo reconocimiento en el teléfono",
-    "onDeviceOnlyValue": "Encendido, el dictado solo funciona si tu teléfono puede reconocer la voz sin internet (Android 12 o posterior con reconocedor en el teléfono). Si lo apagas, NIDO puede usar el servicio de voz del sistema, que puede mandar tu audio a internet.",
-    "onlineOnlyNote": "Este teléfono no tiene reconocedor de voz en el teléfono, así que el dictado está apagado. Si aceptas que el servicio del sistema pueda mandar tu audio a internet, apaga «Solo reconocimiento en el teléfono»."
+  "voiceSettings":   {
+      "title": "Voz",
+      "stateLocal": "La voz de NIDO está en este PC: el dictado y la lectura funcionan sin conexión.",
+      "stateReserve": "Estás usando la voz de tu sistema operativo, no la de NIDO. Suena distinta y depende de tu sistema.",
+      "stateNone": "En este PC aún no hay voz: falta descargar el modelo de voz de NIDO. Abajo tienes la descarga.",
+      "dictateLabel": "Dictado por voz",
+      "dictateBody": "Escribe hablando, con el micrófono del PC. El reconocimiento es local: tu voz no sale del equipo.",
+      "readAloudLabel": "Leer las respuestas en voz alta",
+      "readAloudBody": "NIDO lee cada respuesta cuando termina de escribirla. Puedes pararla en cualquier momento.",
+      "reserveLabel": "Voz del sistema como reserva",
+      "reserveBody": "Si la voz de NIDO no está descargada, la lectura puede sonar con la voz de tu sistema operativo.",
+      "assetsTitle": "Modelos de voz",
+      "assetsNote": "Modelo de escucha: 487 MB. Modelo de voz: 350 MB. Se descargan una sola vez y funcionan sin conexión.",
+      "installed": "Instalado",
+      "memoryNote": "Al terminar de dictar o de leer, los modelos se sueltan para dejar libre la memoria; parte de ella la retiene el sistema y se libera del todo al cerrar NIDO.",
+      "provisionalNote": "Las voces en español y portugués son provisionales: las definitivas se eligen cuando las escuches y des tu veredicto.",
+      "ptChainNote": "El portugués se entiende y se lee, pero su calidad es menor que la del español y el inglés por ahora."
   },
   "lockScreen": {
     "title": "NIDO bloqueado",
@@ -1151,12 +1153,12 @@
     "offerHeldUnverified": "La oferta de {{name}} queda en pausa: todavía no has comparado la huella. Cuando la compares, pídele que la envíe otra vez.",
     "offerHeldUnverifiedGeneric": "Una oferta quedó en pausa: todavía no has comparado la huella con ese contacto. Cuando la compares, pídele que la envíe otra vez."
   },
-  "voiceInputAlert": {
-    "unavailableTitle": "Entrada de voz no disponible",
-    "unavailableMessage": "No se encontró un servicio de reconocimiento de voz en este dispositivo (común en GrapheneOS / builds sin Google). Escribe tu pregunta en su lugar.",
-    "onlineOnlyMessage": "Este teléfono no puede reconocer la voz sin internet, y NIDO está configurado para no mandar tu audio fuera. Escribe tu pregunta, o permite el servicio de voz del sistema en Ajustes › Voz (puede mandar el audio a internet).",
-    "startLabel": "Dictar por voz",
-    "stopLabel": "Detener el dictado"
+  "voiceInputAlert":   {
+      "title": "Dictado por voz",
+      "onDeviceTitle": "Dictado local",
+      "onDeviceMessage": "NIDO reconoce tu voz en este PC, sin conexión y sin que el audio salga del equipo.",
+      "systemMessage": "Sin el modelo de escucha descargado, el dictado no está disponible: en Ajustes, sección Voz, puedes descargarlo. El dictado de NIDO nunca usa servicios de terceros.",
+      "cancel": "Cancelar"
   },
   "tasks": {
     "approvalTitle": "Solicitud de tarea",
@@ -1567,6 +1569,19 @@
             ],
             "examples": [],
             "tip": "Pausar una tarea no la borra: apágala con su interruptor y vuelve a encenderla cuando quieras. Su historial se queda en la tarjeta."
+          },
+          {
+            "id": "hablar-y-escuchar",
+            "title": "Hablar y escuchar",
+            "what": "NIDO puede escucharte y leerte en voz alta, todo en este PC y sin conexión. El dictado convierte tu voz en texto dentro del cuadro de escritura: lo ves antes de enviarlo y nunca se envía solo. La lectura lee las respuestas con la voz de NIDO; en Emergencia, el botón de altavoz lee la guía de reanimación paso a paso.",
+            "steps": [
+              "Si es la primera vez, abre Ajustes, sección Voz, y descarga los modelos de voz: el de escucha ocupa 487 MB y el de voz 350 MB, una sola vez.",
+              "Para dictar, toca Dictar por voz, el micrófono junto al cuadro de escritura, y habla por frases: cada frase aparece como texto y puedes seguir hablando o corregirla antes de enviar.",
+              "Para escuchar una respuesta, toca Leer en voz alta, el altavoz bajo la respuesta; toca de nuevo para parar la lectura en el acto.",
+              "En Ajustes, sección Voz, puedes encender la lectura automática de cada respuesta y apagar el dictado si no lo usas."
+            ],
+            "examples": [],
+            "tip": "Si la voz de NIDO no está descargada, la lectura puede sonar con la voz de tu sistema operativo si dejas encendida la reserva: suena distinta y la sección Voz te dice siempre cuál está sonando."
           }
         ]
       },
@@ -1987,6 +2002,11 @@
     "securityBody": "Tu bóveda se bloquea con tu contraseña. Mientras está abierta, tus datos solo viven en este dispositivo.",
     "passwordFixedNote": "La contraseña se fija al crear la bóveda: no se puede cambiar ni recuperar.",
     "send": "Enviar",
+    "dictate": "Dictar por voz",
+    "listening": "Escuchando…",
+    "readAloud": "Leer en voz alta",
+    "stopReading": "Detener la lectura",
+    "readCprGuide": "Escuchar la guía de RCP",
     "settingsEmpty": "Ningún ajuste coincide.",
     "settingsSearch": "Buscar un ajuste",
     "sourceRelevance": "relevancia {{pct}} %",

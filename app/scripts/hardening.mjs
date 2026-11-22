@@ -465,12 +465,17 @@ async function main() {
             `bloqueado: ${probe.fileFetch?.blocked}, error: ${probe.fileFetch?.errorName}`);
         const query = probe.permissions?.query ?? {};
         const permissionNames = ["microphone", "camera", "geolocation", "notifications", "midi", "clipboard-read"];
-        check("S-PERM: ningún permiso consultado se lee granted",
-            permissionNames.every((name) => query[name] != null && query[name] !== "granted"),
+        // E9 paso 1: «media» es el único permiso de la allowlist
+        // (para el dictado, y solo desde su gesto); el micrófono
+        // puede leerse granted y es el único que puede. Todo lo
+        // demás sigue denegado por defecto.
+        check("S-PERM: ningún permiso consultado se lee granted salvo el micrófono (media, E9)",
+            permissionNames.every((name) => query[name] != null && (name === "microphone" || query[name] !== "granted")),
             permissionNames.map((name) => `${name}=${query[name]}`).join(", "));
-        check("S-PERM: notificaciones denegadas y getUserMedia rechazado por permiso (NotAllowedError)",
+        check("S-PERM: notificaciones denegadas y getUserMedia ya no muere por permiso (media concedido; en el banco sin micrófono muere por dispositivo)",
             probe.permissions?.notificationRequest === "denied" &&
-            probe.permissions?.getUserMediaError === "NotAllowedError",
+            probe.permissions?.getUserMediaError != null &&
+            probe.permissions?.getUserMediaError !== "NotAllowedError",
             `notificación: ${probe.permissions?.notificationRequest}, getUserMedia: ${probe.permissions?.getUserMediaError}`);
         check("S-DEVTOOLS: DevTools no se abre con Ctrl+Shift+I ni con F12",
             probe.devTools?.afterCtrlShiftI === false && probe.devTools?.afterF12 === false,

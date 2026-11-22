@@ -16,10 +16,11 @@
  *  - Permisos denegados por defecto (CARCASA-PERMISOS, C-ATQ-2):
  *    sin manejador, Chromium concede todos los permisos en
  *    silencio; aquí los dos manejadores (petición y comprobación)
- *    deniegan todo lo que no esté en PERMISSION_ALLOWLIST, que
- *    nace vacía: la app pide solo lo que usa, al usarlo
- *    (SEGURIDAD-PC §5.7), y E9 añadirá «media» para el dictado,
- *    con su gesto, en esta constante y en ninguna otra parte. Las
+ *    deniegan todo lo que no esté en PERMISSION_ALLOWLIST: la
+ *    app pide solo lo que usa, al usarlo (SEGURIDAD-PC §5.7).
+ *    La lista nació vacía y su único contenido es «media»,
+ *    añadido por E9 (paso 1) para el dictado, con su gesto, en
+ *    esta constante y en ninguna otra parte. Las
  *    ventanas de la casa usan la sesión por defecto; si una etapa
  *    futura trajera una segunda sesión, hereda la obligación de
  *    instalar estos mismos manejadores sobre ella.
@@ -215,10 +216,13 @@ export function isAppUrl(rawUrl: string): boolean {
 // ---------------------------------------------------------------------
 // Permisos (CARCASA-PERMISOS): denegar por defecto, en petición y
 // en comprobación. La lista nace vacía; su único sitio es esta
-// constante y su primer contenido llegará con E9 (media, con su
-// gesto), nunca antes de usarse.
+// constante. Su primer y único contenido llega con E9 (paso 1):
+// «media», para el dictado por voz, y solo se pide desde su
+// gesto — el botón de dictado del composer, que es el único
+// sitio de la app que llama a getUserMedia, al pulsarlo y
+// nunca antes.
 // ---------------------------------------------------------------------
-export const PERMISSION_ALLOWLIST: ReadonlySet<string> = new Set();
+export const PERMISSION_ALLOWLIST: ReadonlySet<string> = new Set(["media"]);
 
 function installPermissionHandlers() {
     session.defaultSession.setPermissionRequestHandler(

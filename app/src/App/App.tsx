@@ -15,6 +15,18 @@ import { exampleTap } from "../../../src/guide/exampleTap.js";
 import { lessons as GUIDE_LESSONS } from "../../../src/guide/catalog.js";
 import { ScheduledTasksCard } from "./ScheduledTasksCard.tsx";
 import { LOCAL_TOOLS } from "../../../src/agent/tools/manifest.js";
+import { startListening, stopListening } from "../../../src/voice/voiceInput.js";
+import { speakText, stopSpeaking } from "../../../src/voice/tts.js";
+import { CPR_GUIDE } from "../../../src/cpr/cprCoach.js";
+import {
+  installTtsPort,
+  installVoicePort,
+  releaseSpeechEngine,
+  setReserveOffered,
+  stopVoiceCapture,
+  systemVoicePresent,
+} from "./voicePort.ts";
+import { voiceSurfaceState } from "../../../src/voice/voiceSurface.js";
 
 // ---------------------------------------------------------------------
 // El puente, tipado en su forma
@@ -260,6 +272,9 @@ interface Boot {
   personality?: string | null;
   customSystemPrompt?: string;
   noticesPermissionAsked?: boolean;
+  voiceInputEnabled?: boolean;
+  readAloudEnabled?: boolean;
+  voiceSystemReserveEnabled?: boolean;
   noticesShowText?: boolean;
   noticesResident?: boolean | null;
   noticesAutostart?: boolean;
@@ -394,6 +409,42 @@ interface NidoBridge {
   onVaultLocked(cb: () => void): () => void;
   onNoticesShow(cb: (p: { target?: string }) => void): () => void;
   checkForUpdates(): Promise<unknown>;
+  // La voz (E9 paso 1): el dictado, por su proceso propio.
+  voiceEngineState(): Promise<{ ok: boolean; state?: string }>;
+  voiceDictationStart(): Promise<{ ok: boolean; reason?: string }>;
+  voiceDictationStop(): Promise<{ ok: boolean }>;
+  voiceDictationAudio(samples: ArrayBuffer): void;
+  onVoiceEvent(cb: (p: VoiceSessionPayload) => void): () => void;
+  // La lectura (E9 paso 2): Kokoro, en el mismo proceso de voz.
+  voiceSpeakState(): Promise<{ ok: boolean; state?: string }>;
+  voiceSynth(
+    text: string,
+    lang: string,
+  ): Promise<{ ok: boolean; reason?: string; samples?: ArrayBuffer; sampleRate?: number }>;
+  voiceSpeakRelease(): Promise<{ ok: boolean }>;
+  // La tarjeta de activos de voz (E9 paso 5).
+  voiceAssets(): Promise<{ ok: boolean; rows?: VoiceAssetRow[] }>;
+  voiceAssetInstall(id: string): Promise<{ ok: boolean; reason?: string; error?: string }>;
+  onVoiceAssetProgress(cb: (p: { id: string; done: number; total: number }) => void): () => void;
+}
+
+/** Una fila de la tarjeta de activos de voz. */
+export interface VoiceAssetRow {
+  id: string;
+  label: string;
+  kind: string;
+  license: string;
+  archiveBytes: number;
+  state: string;
+  verified: boolean;
+}
+
+/** El evento de sesión de dictado que llega del proceso de voz. */
+export interface VoiceSessionPayload {
+  type: "start" | "end" | "result" | "error";
+  text?: string;
+  code?: string;
+  message?: string;
 }
 
 interface ConfirmPayload {
@@ -665,6 +716,12 @@ export function App() {
     void refresh();
   }, [refresh]);
 
+  // E9 (paso 5): la oferta de la reserva del sistema gobierna
+  // el adaptador de lectura desde el bootstrap.
+  useEffect(() => {
+    setReserveOffered(boot?.voiceSystemReserveEnabled ?? true);
+  }, [boot?.voiceSystemReserveEnabled]);
+
   useEffect(() => {
     const off = window.nido?.onVaultLocked(() => {
       setPaletteOpen(false);
@@ -789,6 +846,7 @@ export function App() {
               guideDraft={guideDraft}
               goModels={() => setSection("modelos")}
               goTone={() => { setSettingsTab("tone"); setSection("settings"); }}
+              goVoice={() => { setSettingsTab("voice"); setSection("settings"); }}
             />
           ))}
         {section === "emergency" && (
@@ -1133,6 +1191,12 @@ function EmergencyView({
     });
     return off;
   }, []);
+  // La guía de RCP se puede escuchar entera (paso 2 de E9):
+  // el texto es el de la guía del porte (CPR_GUIDE, palabra
+  // por palabra la de NIDO Esencial), leído con la voz del
+  // idioma por el mismo camino de lectura que todo lo demás.
+  const speechAvailable = useSpeechAvailable();
+  const { readingId, toggleRead } = useReading(boot.prefs.lang);
   // El orden de la superficie sigue el de la tabla fija sellada:
   // autolesión primero, monóxido después, el número al final.
   // §1 pieza A del bloque del loop: cada tema que depende de
@@ -1176,6 +1240,37 @@ function EmergencyView({
               <Icon name="warning" size={20} /> {t.label}
             </button>
           ))}
+          {speechAvailable && (
+            <button
+              className="btn"
+              onClick={() => {
+                const guide = CPR_GUIDE[boot.prefs.lang];
+                void toggleRead(
+                  "cpr-guide",
+                  [
+                    guide.title,
+                    guide.headings.before,
+                    ...guide.before,
+                    guide.headings.compressions,
+                    ...guide.compressions,
+                    guide.headings.breaths,
+                    ...guide.breaths,
+                    guide.headings.stop,
+                    ...guide.stop,
+                  ]
+                    .map((piece) => {
+                      const t = piece.trim();
+                      return /[.!?…:]$/.test(t) ? t : `${t}.`;
+                    })
+                    .join(" "),
+                );
+              }}
+              aria-pressed={readingId === "cpr-guide"}
+            >
+              <Icon name="speaker" size={20} />{" "}
+              {readingId === "cpr-guide" ? P("stopReading") : P("readCprGuide")}
+            </button>
+          )}
           <div className="field">
             <label htmlFor="emergency-free">{P("emergencyFreeLabel")}</label>
             <input
@@ -1256,6 +1351,61 @@ function DeclaredView({
   );
 }
 
+/**
+ * La lectura en voz alta (E9 paso 2), compartida por las
+ * superficies que leen: un solo identificador de lectura en
+ * curso por vista; pulsar el mismo control detiene, pulsar
+ * otro cambia de texto (speakText corta lo anterior). Al
+ * terminar o detenerse, el motor de lectura se suelta en su
+ * proceso. Lo que se lee es siempre texto ya asentado (la
+ * respuesta tras el juez, la lección entera, la guía de
+ * RCP del porte): esta casa no lee borradores.
+ */
+function useReading(lang: string) {
+  const [readingId, setReadingId] = useState<string | null>(null);
+  const readingRef = useRef<string | null>(null);
+  const toggleRead = useCallback(
+    async (id: string, text: string) => {
+      if (readingRef.current === id) {
+        stopSpeaking();
+        return;
+      }
+      installTtsPort();
+      readingRef.current = id;
+      setReadingId(id);
+      try {
+        await speakText(text, lang);
+      } finally {
+        if (readingRef.current === id) {
+          readingRef.current = null;
+          setReadingId(null);
+          releaseSpeechEngine();
+        }
+      }
+    },
+    [lang],
+  );
+  return { readingId, toggleRead };
+}
+
+/** La presencia de la voz de lectura, cobrada al montar la vista. */
+function useSpeechAvailable() {
+  const [available, setAvailable] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void window.nido
+      .voiceSpeakState()
+      .then((r) => {
+        if (live) setAvailable(r?.ok === true && r.state === "onDevice");
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+  return available;
+}
+
 // ---------------------------------------------------------------------
 // S-2 a S-6 · El chat
 // ---------------------------------------------------------------------
@@ -1270,6 +1420,7 @@ function ChatView({
   guideDraft,
   goModels,
   goTone,
+  goVoice,
 }: {
   boot: Boot;
   currentId: string | null;
@@ -1280,6 +1431,7 @@ function ChatView({
   guideDraft: { text: string; seq: number } | null;
   goModels: () => void;
   goTone: () => void;
+  goVoice: () => void;
 }) {
   const s = boot.strings as Strings;
   const P = (k: string) => lookup(s, "pcSurface", k);
@@ -1300,6 +1452,16 @@ function ChatView({
     pageText?: string;
   } | null>(null);
   const [noModelTurn, setNoModelTurn] = useState(false);
+  // El dictado por voz (E9 paso 1): el botón vive solo si la
+  // escucha local está presente (el estado del motor se cobra
+  // al montar la vista), y el texto dictado aterriza en el
+  // borrador para que la persona lo revise antes de enviar.
+  const [voiceAvailable, setVoiceAvailable] = useState(false);
+  const [dictating, setDictating] = useState(false);
+  // La lectura (paso 2): su botón vive solo si Kokoro está
+  // presente, y lee los turnos ya asentados del asistente.
+  const speechAvailable = useSpeechAvailable();
+  const { readingId, toggleRead } = useReading(boot.prefs.lang);
   const activeTurnConv = useRef<string | null>(null);
   const [showGoEnd, setShowGoEnd] = useState(false);
   const [loadError, setLoadError] = useState(false);
@@ -1323,6 +1485,68 @@ function ChatView({
     const items = (s as Record<string, { items?: { category: string; prompt: string }[] }>).promptIdeasCarousel?.items;
     return Array.isArray(items) ? items.slice(0, 6) : [];
   }, [s]);
+
+  // La presencia de la escucha local, al montar la vista: sin
+  // motor presente no hay botón (oferta y UI, siempre juntas).
+  useEffect(() => {
+    let live = true;
+    void window.nido
+      .voiceEngineState()
+      .then((r) => {
+        if (live) setVoiceAvailable(r?.ok === true && r.state === "onDevice");
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  // La lectura automática (readAloudEnabled, la forma del
+  // móvil): al asentarse una respuesta NUEVA se lee; abrir
+  // una conversación vieja no lee su última respuesta (la
+  // primera observación solo registra la marca).
+  const autoReadKey = useRef<string | null>(null);
+  useEffect(() => {
+    const lastIdx = turns.length - 1;
+    const last = turns[lastIdx];
+    const key = `${currentId}:${lastIdx}`;
+    if (autoReadKey.current === null) {
+      autoReadKey.current = key;
+      return;
+    }
+    if (!(boot.readAloudEnabled ?? false) || sending) return;
+    if (!last || last.role !== "assistant" || last.text.trim() === "") return;
+    if (autoReadKey.current === key) return;
+    autoReadKey.current = key;
+    void toggleRead(`turn:${currentId}:${lastIdx}`, last.text);
+  }, [sending, turns, currentId, boot.readAloudEnabled, toggleRead]);
+
+  // El gesto del dictado: al pulsar se abre la sesión (la
+  // escucha se carga en su proceso y el micrófono se abre
+  // tras la carga); el VAD corta la frase; el texto llega al
+  // borrador y NO se envía: lo revisa la persona y lo manda
+  // con el mismo envío de siempre, por el mismo cauce. Al
+  // pulsar otra vez, la sesión se para y vale lo oído.
+  const toggleDictation = useCallback(async () => {
+    if (dictating) {
+      await stopListening();
+      return;
+    }
+    // Hablar interrumpe la lectura: quien dicta, manda.
+    stopSpeaking();
+    installVoicePort();
+    setDictating(true);
+    try {
+      const text = await startListening();
+      if (text) {
+        setDraft((d) => (d.trim() ? `${d.replace(/\s+$/, "")} ${text}` : text));
+        composerRef.current?.focus();
+      }
+    } finally {
+      stopVoiceCapture();
+      setDictating(false);
+    }
+  }, [dictating]);
 
   // La semilla de la guía: un ejemplo tocado en «Aprende» se
   // escribe en el compositor al llegar a esta vista, sin enviar.
@@ -1519,6 +1743,17 @@ function ChatView({
                     <div className="bubble">{t.text}</div>
                   )}
                   <div className="meta-row">
+                    {speechAvailable && t.text.trim() !== "" && (
+                      <button
+                        className="read-btn"
+                        onClick={() => void toggleRead(`turn:${currentId}:${i}`, t.text)}
+                        title={readingId === `turn:${currentId}:${i}` ? P("stopReading") : P("readAloud")}
+                        aria-label={readingId === `turn:${currentId}:${i}` ? P("stopReading") : P("readAloud")}
+                        aria-pressed={readingId === `turn:${currentId}:${i}`}
+                      >
+                        <Icon name="speaker" size={16} />
+                      </button>
+                    )}
                     {t.judgeMode && (
                       <span>{t.judgeMode === "full" ? P("judgeFull") : P("judgeLexical")}</span>
                     )}
@@ -1705,6 +1940,29 @@ function ChatView({
                 if (e.key === "End" && e.ctrlKey) scrollToEnd();
               }}
             />
+            {(boot.voiceInputEnabled ?? true) && voiceAvailable ? (
+              <button
+                className={`send-box voice${dictating ? " on" : ""}`}
+                onClick={() => void toggleDictation()}
+                title={dictating ? P("listening") : P("dictate")}
+                aria-label={dictating ? P("listening") : P("dictate")}
+                aria-pressed={dictating}
+              >
+                <Icon name="mic" size={20} />
+              </button>
+            ) : (boot.voiceInputEnabled ?? true) ? (
+              // H-1: sin el modelo de escucha descargado, el
+              // botón no promete un dictado que no hay: lleva
+              // al estado honesto de la sección Voz (H-5).
+              <button
+                className="send-box voice"
+                onClick={() => goVoice()}
+                title={P("dictate")}
+                aria-label={P("dictate")}
+              >
+                <Icon name="mic" size={20} />
+              </button>
+            ) : null}
             {sending ? (
               <button className="send-box stop" onClick={() => void window.nido.turnStop()} title={P("stop")}>
                 <Icon name="stop" size={20} />
@@ -2159,6 +2417,9 @@ function LearnSection({
   useEffect(() => {
     setOpenId(null);
   }, [learnSignal]);
+  // La lectura de la lección entera (paso 2 de E9).
+  const speechAvailable = useSpeechAvailable();
+  const { readingId, toggleRead } = useReading(boot.prefs.lang);
   if (!guide) return null;
   const flat = guide.modules.flatMap((m) => m.lessons.map((lesson) => ({ module: m, lesson })));
   const total = flat.length;
@@ -2197,6 +2458,28 @@ function LearnSection({
           <button className="btn" onClick={() => setOpenId(null)}>
             {guide.back}
           </button>
+          {speechAvailable && (
+            <button
+              className="btn"
+              onClick={() =>
+                void toggleRead(
+                  `guide:${open.lesson.id}`,
+                  [open.lesson.title, open.lesson.what, ...open.lesson.steps, open.lesson.tip]
+                    .map((piece) => {
+                      const t = piece.trim();
+                      return /[.!?…]$/.test(t) ? t : `${t}.`;
+                    })
+                    .join(" "),
+                )
+              }
+              aria-pressed={readingId === `guide:${open.lesson.id}`}
+            >
+              <Icon name="speaker" size={16} />{" "}
+              {readingId === `guide:${open.lesson.id}`
+                ? lookup(s, "pcSurface", "stopReading")
+                : lookup(s, "pcSurface", "readAloud")}
+            </button>
+          )}
           <h3>{open.lesson.title}</h3>
           <p>{open.lesson.what}</p>
           {open.lesson.steps.length > 0 && (
@@ -3210,9 +3493,181 @@ function MemoryView({ boot }: { boot: Boot }) {
 // S-9 · Ajustes de dos paneles y el Acerca de
 // ---------------------------------------------------------------------
 
-const SETTINGS_TABS = ["security", "tone", "models", "knowledge", "appearance", "language", "memory", "notices", "about"] as const;
+const SETTINGS_TABS = ["security", "tone", "models", "knowledge", "appearance", "language", "voice", "memory", "notices", "about"] as const;
 
 const PERSONALITY_IDS = ["succinct", "detailed", "summary", "custom"] as const;
+
+/**
+ * La sección Voz de Ajustes (E9 paso 5): los tres gobiernos
+ * (dictado, lectura en voz alta, oferta de la reserva del
+ * sistema), el estado honesto de la voz con su nombre
+ * (H-5) y la tarjeta de activos de voz (firma 3) con la
+ * cuenta antes de descargar (H-7). La reserva es solo de
+ * lectura: el dictado de PC es local por construcción y no
+ * tiene reserva del sistema en ninguna forma (D-1 forma C).
+ */
+function VoiceSection({ boot, refresh }: { boot: Boot; refresh: () => Promise<void> }) {
+  const s = boot.strings as Strings;
+  const V = (k: string) => lookup(s, "voiceSettings", k);
+  const P = (k: string) => lookup(s, "pcSurface", k);
+  const [dictate, setDictate] = useState(boot.voiceInputEnabled ?? true);
+  const [readAloud, setReadAloud] = useState(boot.readAloudEnabled ?? false);
+  const [reserve, setReserve] = useState(boot.voiceSystemReserveEnabled ?? true);
+  const [speechLocal, setSpeechLocal] = useState(false);
+  const [systemPresent, setSystemPresent] = useState(false);
+  const [rows, setRows] = useState<VoiceAssetRow[]>([]);
+  const [progress, setProgress] = useState<Record<string, number>>({});
+  const [installing, setInstalling] = useState<string | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    void window.nido
+      .voiceSpeakState()
+      .then((r) => {
+        if (live) setSpeechLocal(r?.ok === true && r.state === "onDevice");
+      })
+      .catch(() => {});
+    const checkVoices = () => {
+      if (live) setSystemPresent(systemVoicePresent());
+    };
+    checkVoices();
+    window.speechSynthesis?.addEventListener?.("voiceschanged", checkVoices);
+    return () => {
+      live = false;
+      window.speechSynthesis?.removeEventListener?.("voiceschanged", checkVoices);
+    };
+  }, []);
+
+  const loadRows = useCallback(async () => {
+    const r = await window.nido.voiceAssets().catch(() => null);
+    if (r?.ok && r.rows) setRows(r.rows);
+  }, []);
+  useEffect(() => {
+    void loadRows();
+  }, [loadRows]);
+  useEffect(() => {
+    const off = window.nido.onVoiceAssetProgress((p) => {
+      setProgress((cur) => ({
+        ...cur,
+        [p.id]: p.total > 0 ? Math.floor((p.done / p.total) * 100) : 0,
+      }));
+    });
+    return off;
+  }, []);
+
+  const state = voiceSurfaceState({
+    speechLocal,
+    reserveOffered: reserve,
+    systemVoicePresent: systemPresent,
+  });
+
+  const toggle = (
+    key: "voiceInputEnabled" | "readAloudEnabled" | "voiceSystemReserveEnabled",
+    next: boolean,
+    apply: (v: boolean) => void,
+  ) => {
+    apply(next);
+    if (key === "voiceSystemReserveEnabled") setReserveOffered(next);
+    void window.nido.settingsSet({ [key]: next }).then(() => refresh());
+  };
+
+  const install = async (id: string) => {
+    setInstalling(id);
+    setInstallError(null);
+    const r = await window.nido.voiceAssetInstall(id).catch(() => null);
+    setInstalling(null);
+    setProgress((cur) => {
+      const next = { ...cur };
+      delete next[id];
+      return next;
+    });
+    if (!r?.ok) setInstallError(r?.error ?? r?.reason ?? "error");
+    await loadRows();
+    // El estado de los motores puede haber nacido con la descarga.
+    const st = await window.nido.voiceSpeakState().catch(() => null);
+    if (st?.ok) setSpeechLocal(st.state === "onDevice");
+  };
+
+  const mb = (bytes: number) => `${Math.max(1, Math.round(bytes / 1_000_000))} MB`;
+
+  return (
+    <div className="card">
+      <h3>{V("title")}</h3>
+      <p>
+        {state === "local" && V("stateLocal")}
+        {state === "reserve" && V("stateReserve")}
+        {state === "none" && V("stateNone")}
+      </p>
+      <div className="row-line">
+        <span>
+          {V("dictateLabel")}
+          <span style={{ color: "var(--muted)", display: "block", fontSize: "0.85em" }}>
+            {V("dictateBody")}
+          </span>
+        </span>
+        <input
+          type="checkbox"
+          checked={dictate}
+          onChange={(e) => toggle("voiceInputEnabled", e.target.checked, setDictate)}
+        />
+      </div>
+      <div className="row-line">
+        <span>
+          {V("readAloudLabel")}
+          <span style={{ color: "var(--muted)", display: "block", fontSize: "0.85em" }}>
+            {V("readAloudBody")}
+          </span>
+        </span>
+        <input
+          type="checkbox"
+          checked={readAloud}
+          onChange={(e) => toggle("readAloudEnabled", e.target.checked, setReadAloud)}
+        />
+      </div>
+      <div className="row-line">
+        <span>
+          {V("reserveLabel")}
+          <span style={{ color: "var(--muted)", display: "block", fontSize: "0.85em" }}>
+            {V("reserveBody")}
+          </span>
+        </span>
+        <input
+          type="checkbox"
+          checked={reserve}
+          onChange={(e) =>
+            toggle("voiceSystemReserveEnabled", e.target.checked, setReserve)
+          }
+        />
+      </div>
+      <span className="section-label">{V("assetsTitle")}</span>
+      <p style={{ color: "var(--muted)" }}>{V("assetsNote")}</p>
+      {rows.map((row) => (
+        <div key={row.id} className="row-line">
+          <span>
+            {row.label}
+            <span style={{ color: "var(--muted)", display: "block", fontSize: "0.85em" }}>
+              {mb(row.archiveBytes)} · {row.license}
+            </span>
+          </span>
+          {row.state === "installed" && row.verified ? (
+            <span>{V("installed")}</span>
+          ) : installing === row.id ? (
+            <span>{progress[row.id] ?? 0}%</span>
+          ) : (
+            <button className="btn" onClick={() => void install(row.id)}>
+              {P("actionDownload")}
+            </button>
+          )}
+        </div>
+      ))}
+      {installError && <p className="vault-error">{installError}</p>}
+      <p style={{ color: "var(--muted)" }}>{V("memoryNote")}</p>
+      <p style={{ color: "var(--muted)" }}>{V("provisionalNote")}</p>
+      <p style={{ color: "var(--muted)" }}>{V("ptChainNote")}</p>
+    </div>
+  );
+}
 
 function SettingsView({
   boot,
@@ -3256,6 +3711,7 @@ function SettingsView({
     knowledge: P("packsTab"),
     appearance: P("appearance"),
     language: P("language"),
+    voice: lookup(s, "voiceSettings", "title"),
     memory: P("navMemory"),
     notices: lookup(s, "noticesSettings", "title"),
     about: P("about"),
@@ -3451,6 +3907,7 @@ function SettingsView({
               ))}
             </div>
           )}
+          {tab === "voice" && <VoiceSection boot={boot} refresh={refresh} />}
           {tab === "memory" && <MemoryView boot={boot} />}
           {tab === "notices" && (
             <>

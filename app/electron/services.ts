@@ -22,6 +22,7 @@ import { existsSync } from "node:fs";
 import { appendFile, copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { freemem, hostname, release as osRelease, totalmem, type as osType } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, clipboard, ipcMain, shell } from "electron";
 import { isAppUrl } from "./shell.ts";
 import {
@@ -39,6 +40,7 @@ import {
   trayTextsFromStrings,
 } from "./noticeShell.ts";
 import { pokeTaskRuntime, startTaskRuntime, taskRunStringsFromStrings } from "./taskRuntime.ts";
+import { voiceHostFactory, VoiceProcessManager } from "./voiceProcess.ts";
 
 import {
   initializeVault,
@@ -97,7 +99,9 @@ import { loadAllPackFacts } from "../../src/rag/packs.js";
 
 import { summarizeConversation } from "../../src/services/summarize.js";
 import { ModelManager } from "./modelManager.ts";
-import { DownloadPaused } from "./core/download.ts";
+import { DownloadPaused, downloadAsset } from "./core/download.ts";
+import { ASSET_CATALOG } from "./core/assetCatalog.ts";
+import { censusAssets } from "./core/library.ts";
 import type { ModelCard } from "../../src/core/modelCards.js";
 import { DESKTOP_CATALOG, defaultModelForBudget } from "../../src/core/catalog.js";
 import {
@@ -117,6 +121,9 @@ import {
   getNoticesPermissionAsked,
   getNoticesResident,
   getNoticesShowText,
+  getReadAloudEnabled,
+  getVoiceInputEnabled,
+  getVoiceSystemReserveEnabled,
   markGuideVisited,
   setCustomSystemPrompt,
   setDisabledToolNames,
@@ -127,6 +134,9 @@ import {
   setNoticesResident,
   setNoticesShowText,
   setPersonalityId,
+  setReadAloudEnabled,
+  setVoiceInputEnabled,
+  setVoiceSystemReserveEnabled,
 } from "../../src/models/settings.js";
 import { setDisabledTools } from "../../src/agent/tools/toolPermissions.js";
 import { PERSONALITIES } from "../../src/constants/personalities.js";
@@ -253,6 +263,7 @@ function dirs() {
     store: path.join(base, "store"),
     knowledge: path.join(base, "knowledge"),
     models: path.join(base, "models"),
+    assets: path.join(base, "assets"),
   };
 }
 
@@ -301,6 +312,22 @@ async function savePrefs(): Promise<void> {
   // writeFile llano una escritura cortada dejaba las prefs
   // truncadas y la siguiente lectura caía a defaults enteros.
   writeFileDurable(prefsPath(), JSON.stringify(prefs));
+}
+
+// El gestor del proceso de voz: nace al primer uso (el estado
+// del motor o el primer dictado), nunca al arrancar, porque la
+// escucha se carga al pulsar y no antes (E9 paso 1).
+let voiceProcessManager: VoiceProcessManager | null = null;
+function voiceManager(): VoiceProcessManager {
+  if (!voiceProcessManager) {
+    voiceProcessManager = new VoiceProcessManager({
+      assetsDir: dirs().assets,
+      hostFactory: voiceHostFactory(
+        path.join(path.dirname(fileURLToPath(import.meta.url)), "voiceHost.js"),
+      ),
+    });
+  }
+  return voiceProcessManager;
 }
 
 function senderOk(event: Electron.IpcMainInvokeEvent, channel: string): boolean {
@@ -1455,6 +1482,12 @@ export async function installServices(): Promise<void> {
     noticesResident: await getNoticesResident().catch(() => undefined) ?? null,
     noticesAutostart: autostartEnabledNow(),
     noticesCustody: noticeAgendaCustody(),
+    // E9 (paso 5): los tres gobiernos de la sección Voz.
+    voiceInputEnabled: session ? await getVoiceInputEnabled().catch(() => true) : true,
+    readAloudEnabled: session ? await getReadAloudEnabled().catch(() => false) : false,
+    voiceSystemReserveEnabled: session
+      ? await getVoiceSystemReserveEnabled().catch(() => true)
+      : true,
     personality: session ? await getPersonalityId().catch(() => null) : null,
     guideVisited: session ? await getGuideVisited().catch(() => []) : [],
     disabledTools: session ? await getDisabledToolNames().catch(() => []) : [],
@@ -1671,7 +1704,7 @@ export async function installServices(): Promise<void> {
     }
   });
 
-  handle("nido:settings-set", async (_e, args: { personality?: string; memoryAutoSummarize?: boolean; memoryHistoryTurnThreshold?: number; memoryMaxSavedSessions?: number; memoryAutoGenerateTitles?: boolean; customSystemPrompt?: string; disabledTools?: unknown; noticesPermissionAsked?: boolean; noticesShowText?: boolean; noticesResident?: boolean; noticesAutostart?: boolean }) => {
+  handle("nido:settings-set", async (_e, args: { personality?: string; memoryAutoSummarize?: boolean; memoryHistoryTurnThreshold?: number; memoryMaxSavedSessions?: number; memoryAutoGenerateTitles?: boolean; customSystemPrompt?: string; disabledTools?: unknown; noticesPermissionAsked?: boolean; noticesShowText?: boolean; noticesResident?: boolean; noticesAutostart?: boolean; voiceInputEnabled?: boolean; readAloudEnabled?: boolean; voiceSystemReserveEnabled?: boolean }) => {
     // A-3 y A-7: las escrituras selladas exigen la sesión viva
     // (una escritura desde una lectura degradada reescribiría el
     // fichero sellado desde defaults) y su resultado se cobra:
@@ -1738,6 +1771,17 @@ export async function installServices(): Promise<void> {
         try {
           applyAutostart(args.noticesAutostart);
         } catch { /* la fuente manda: el bootstrap enseña su estado real */ }
+      }
+      // E9 (paso 5): los tres gobiernos de la sección Voz, por
+      // el canal que ya existe (sin canal nuevo).
+      if (typeof args?.voiceInputEnabled === "boolean") {
+        await setVoiceInputEnabled(args.voiceInputEnabled);
+      }
+      if (typeof args?.readAloudEnabled === "boolean") {
+        await setReadAloudEnabled(args.readAloudEnabled);
+      }
+      if (typeof args?.voiceSystemReserveEnabled === "boolean") {
+        await setVoiceSystemReserveEnabled(args.voiceSystemReserveEnabled);
       }
       if (Array.isArray(args?.disabledTools)) {
         // Los permisos del agente: el cuarto campo del canal que
@@ -2275,5 +2319,135 @@ export async function installServices(): Promise<void> {
     }
     await shell.openExternal(url);
     return { ok: true };
+  });
+
+  // -------------------------------------------------------------------
+  // La voz (E9 paso 1): el dictado vive en su proceso propio
+  // (voiceProcess.ts); estos canales son su única puerta. El
+  // audio viaja del renderizador al gestor en muestras Float32
+  // a 16 kHz por el canal de envío (sin respuesta, como
+  // confirm-response), y los eventos de la sesión vuelven por
+  // nido:voice-event al remitente que abrió la sesión. Nada de
+  // esto toca el cauce del turno: el texto dictado aterriza en
+  // el borrador del composer y entra, si la persona lo envía,
+  // por la puerta del turno como cualquier texto tecleado.
+  // -------------------------------------------------------------------
+  handle("nido:voice-engine-state", async () => ({
+    ok: true,
+    state: await voiceManager().engineState(),
+  }));
+
+  handle("nido:voice-dictation-start", async (event) => {
+    if (!session) return { ok: false, reason: "locked" };
+    const sender = event.sender;
+    await voiceManager().startSession((voiceEvent) => {
+      if (!sender.isDestroyed()) sender.send("nido:voice-event", voiceEvent);
+    });
+    return { ok: true };
+  });
+
+  handle("nido:voice-dictation-stop", async () => {
+    voiceManager().stopSession();
+    return { ok: true };
+  });
+
+  ipcMain.on("nido:voice-dictation-audio", (event, chunk: unknown) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed() || !isAppUrl(event.sender.getURL())) return;
+    if (chunk instanceof ArrayBuffer) {
+      voiceManager().pushAudio(new Float32Array(chunk));
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // La lectura (E9 paso 2): Kokoro vive en el mismo proceso de
+  // voz. La síntesis es por frases y vuelve en muestras por la
+  // invocación (la orquestación y la reproducción son del
+  // renderizador: src/voice/tts.ts y su adaptador); la suelta
+  // la pide la superficie al terminar o detener la lectura.
+  // -------------------------------------------------------------------
+  handle("nido:voice-speak-state", async () => ({
+    ok: true,
+    state: await voiceManager().speechState(),
+  }));
+
+  handle("nido:voice-synth", async (_event, args: unknown) => {
+    if (!session) return { ok: false, reason: "locked" };
+    const a = (args ?? {}) as { text?: unknown; lang?: unknown };
+    if (typeof a.text !== "string" || a.text.trim() === "") {
+      return { ok: false, reason: "bad-request" };
+    }
+    const audio = await voiceManager().synthesize(
+      a.text,
+      typeof a.lang === "string" ? a.lang : "",
+    );
+    if (!audio) return { ok: false, reason: "unavailable" };
+    return {
+      ok: true,
+      samples: audio.samples.buffer as ArrayBuffer,
+      sampleRate: audio.sampleRate,
+    };
+  });
+
+  handle("nido:voice-speak-release", async () => {
+    await voiceManager().releaseSpeech();
+    return { ok: true };
+  });
+
+  // -------------------------------------------------------------------
+  // La tarjeta de activos de voz (E9 paso 5, firma 3): vive
+  // en la sección Voz de Ajustes, no en el gestor de
+  // modelos. Enseña cada activo con su tamaño ANTES de
+  // descargar (la cuenta de H-7) y su estado del censo; la
+  // instalación baja por la puerta del paso 0
+  // (downloadAsset) al directorio de activos, con su
+  // progreso empujado al remitente.
+  // -------------------------------------------------------------------
+  handle("nido:voice-assets", async () => {
+    const census = await censusAssets(dirs().assets).catch(() => null);
+    const rows = ASSET_CATALOG.map((entry) => {
+      const state = census?.get(entry.id)?.state;
+      return {
+        id: entry.id,
+        label: entry.label,
+        kind: entry.kind,
+        license: entry.license,
+        archiveBytes: entry.archiveBytes,
+        state: state?.kind ?? "absent",
+        verified: state?.kind === "installed" ? state.verified : false,
+      };
+    });
+    return { ok: true, rows };
+  });
+
+  const voiceInstallsInFlight = new Set<string>();
+  handle("nido:voice-asset-install", async (event, args: unknown) => {
+    if (!session) return { ok: false, reason: "locked" };
+    const id = (args as { id?: unknown })?.id;
+    const entry = ASSET_CATALOG.find((e) => e.id === id);
+    if (!entry) return { ok: false, reason: "unknown-asset" };
+    if (voiceInstallsInFlight.has(entry.id)) {
+      return { ok: false, reason: "already-installing" };
+    }
+    voiceInstallsInFlight.add(entry.id);
+    const sender = event.sender;
+    try {
+      await downloadAsset(entry, dirs().assets, {
+        onProgress: (done, total) => {
+          if (!sender.isDestroyed()) {
+            sender.send("nido:voice-asset-progress", { id: entry.id, done, total });
+          }
+        },
+      });
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: "install-failed",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    } finally {
+      voiceInstallsInFlight.delete(entry.id);
+    }
   });
 }

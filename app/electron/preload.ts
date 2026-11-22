@@ -100,5 +100,34 @@ contextBridge.exposeInMainWorld("nido", {
         return () => {
             ipcRenderer.removeListener("nido:notices-show", listener as never);
         };
+    },
+    // La voz (E9 paso 1): el dictado. El audio sale en muestras
+    // Float32 a 16 kHz por el canal de envío, sin respuesta (la
+    // misma forma que confirm-response); los eventos de la
+    // sesión vuelven por onVoiceEvent.
+    voiceEngineState: () => ipcRenderer.invoke("nido:voice-engine-state"),
+    voiceDictationStart: () => ipcRenderer.invoke("nido:voice-dictation-start"),
+    voiceDictationStop: () => ipcRenderer.invoke("nido:voice-dictation-stop"),
+    voiceSpeakState: () => ipcRenderer.invoke("nido:voice-speak-state"),
+    voiceSynth: (text: string, lang: string) =>
+        ipcRenderer.invoke("nido:voice-synth", {text, lang}),
+    voiceSpeakRelease: () => ipcRenderer.invoke("nido:voice-speak-release"),
+    voiceAssets: () => ipcRenderer.invoke("nido:voice-assets"),
+    voiceAssetInstall: (id: string) => ipcRenderer.invoke("nido:voice-asset-install", {id}),
+    onVoiceAssetProgress: (cb: (p: {id: string; done: number; total: number}) => void) => {
+        const listener = (_e: unknown, p: {id: string; done: number; total: number}) => cb(p);
+        ipcRenderer.on("nido:voice-asset-progress", listener as never);
+        return () => {
+            ipcRenderer.removeListener("nido:voice-asset-progress", listener as never);
+        };
+    },
+    voiceDictationAudio: (samples: ArrayBuffer) =>
+        ipcRenderer.send("nido:voice-dictation-audio", samples),
+    onVoiceEvent: (cb: (payload: unknown) => void) => {
+        const listener = (_event: unknown, payload: unknown) => cb(payload);
+        ipcRenderer.on("nido:voice-event", listener as never);
+        return () => {
+            ipcRenderer.removeListener("nido:voice-event", listener as never);
+        };
     }
 });

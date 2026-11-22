@@ -46,6 +46,9 @@ largos y el catálogo completo de herramientas siempre presente.
 - **Una guía integrada.** La sección Aprende, dentro de la
   Biblioteca, enseña cada función con ejemplos que se pueden tocar,
   escrita solo para lo que la app hace de verdad.
+- **Voz en tu dispositivo.** Dictas tus mensajes y escuchas
+  las respuestas en voz alta, en español, inglés y portugués,
+  con modelos de voz que corren enteros en tu máquina.
 - **Tres idiomas.** Toda la interfaz habla español, inglés y
   portugués.
 
@@ -93,15 +96,16 @@ fuente, como sigue.
 
 NIDO PC está en desarrollo activo, versión 0.1.0. El código de este
 repositorio es una foto de la rama de desarrollo tomada el
-2026-11-21. Hoy funciona: el chat, el catálogo de modelos con sus
+2026-11-22. Hoy funciona: el chat, el catálogo de modelos con sus
 descargas verificadas, la memoria cifrada, el calendario, los
 contactos y los recordatorios, las tareas programadas, la
-biblioteca de documentos y la guía integrada. En desarrollo ahora
-mismo: la voz en el dispositivo (dictado y habla), la etapa que se
-está construyendo.
+biblioteca de documentos, la voz en el dispositivo (dictado y
+lectura en voz alta) y la guía integrada. En desarrollo ahora
+mismo: la investigación profunda, donde NIDO trabaja una
+pregunta en varios pasos y cita lo que encuentra.
 
-En el último hito verificado, la batería de pruebas corrió 6.989
-pruebas: 6.976 en verde, 13 fallos esperados y ningún fallo
+En el último hito verificado, la batería de pruebas corrió 7.046
+pruebas: 7.033 en verde, 13 fallos esperados y ningún fallo
 inesperado.
 
 NIDO PC es software en alfa temprana. Puede fallar, y va a

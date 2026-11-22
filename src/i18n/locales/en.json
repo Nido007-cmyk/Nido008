@@ -336,21 +336,23 @@
     "clearAllButton": "Clear All",
     "clearAllChatHistory": "Clear All Chat History"
   },
-  "voiceSettings": {
-    "title": "Voice Input",
-    "enabledLabel": "Voice input",
-    "enabledValue": "Show the microphone button in the chat to dictate messages.",
-    "speechEngineLabel": "Speech-to-text engine",
-    "checking": "Checking…",
-    "unavailable": "Unavailable on this device",
-    "unavailableNote": "No system speech-recognition service was found — common on GrapheneOS / de-Googled builds. An embedded whisper.cpp model would remove this dependency but is a separate project on the scale of the llama.rn integration itself; not implemented in this version.",
-    "readAloudLabel": "Read aloud",
-    "readAloudValue": "Reads the assistant's responses using the system voice (no internet).",
-    "engineOnDevice": "On-device recognizer: the audio stays on this phone",
-    "engineSystem": "Only the system voice service (Google’s or the manufacturer’s): it may send the audio over the internet",
-    "onDeviceOnlyLabel": "On-device recognition only",
-    "onDeviceOnlyValue": "When on, dictation only works if your phone can recognize speech without the internet (Android 12 or later with an on-device recognizer). If you turn it off, NIDO can use the system voice service, which may send your audio over the internet.",
-    "onlineOnlyNote": "This phone has no on-device speech recognizer, so dictation is off. If you accept that the system service may send your audio over the internet, turn off “On-device recognition only”."
+  "voiceSettings":   {
+      "title": "Voice",
+      "stateLocal": "NIDO's voice is on this PC: dictation and reading work offline.",
+      "stateReserve": "You are using your operating system's voice, not NIDO's. It sounds different and depends on your system.",
+      "stateNone": "This PC has no voice yet: NIDO's speech model still needs to be downloaded. The download is below.",
+      "dictateLabel": "Voice dictation",
+      "dictateBody": "Type by speaking, with the PC's microphone. Recognition is local: your voice never leaves this machine.",
+      "readAloudLabel": "Read answers aloud",
+      "readAloudBody": "NIDO reads each answer aloud when it finishes writing it. You can stop it at any time.",
+      "reserveLabel": "System voice as fallback",
+      "reserveBody": "If NIDO's voice is not downloaded, reading can use your operating system's voice instead.",
+      "assetsTitle": "Voice models",
+      "assetsNote": "Listening model: 487 MB. Speech model: 350 MB. They download once and work offline.",
+      "installed": "Installed",
+      "memoryNote": "When dictation or reading ends, the models are released to free memory; the system keeps part of it and frees the rest when NIDO closes.",
+      "provisionalNote": "The Spanish and Portuguese voices are provisional: the final ones are chosen once you hear them and give your verdict.",
+      "ptChainNote": "Portuguese is understood and read aloud, but its quality is lower than Spanish and English for now."
   },
   "interfaceSettings": {
     "hapticFeedbackLabel": "Haptic feedback",
@@ -1151,12 +1153,12 @@
     "offerHeldUnverified": "{{name}}'s offer is paused: you have not compared fingerprints yet. Once you have, ask them to send it again.",
     "offerHeldUnverifiedGeneric": "An offer is paused: you have not compared fingerprints with that contact yet. Once you have, ask them to send it again."
   },
-  "voiceInputAlert": {
-    "unavailableTitle": "Voice input unavailable",
-    "unavailableMessage": "No on-device speech recognition service was found on this device (common on GrapheneOS / de-Googled builds). Type your question instead.",
-    "onlineOnlyMessage": "This phone can’t recognize speech without the internet, and NIDO is set not to send your audio anywhere. Type your question, or allow the system voice service in Settings › Voice (it may send the audio over the internet).",
-    "startLabel": "Dictate by voice",
-    "stopLabel": "Stop dictation"
+  "voiceInputAlert":   {
+      "title": "Voice dictation",
+      "onDeviceTitle": "Local dictation",
+      "onDeviceMessage": "NIDO recognizes your voice on this PC, offline, and the audio never leaves this machine.",
+      "systemMessage": "Without the listening model downloaded, dictation is not available: you can download it in Settings, in the Voice section. NIDO's dictation never uses third-party services.",
+      "cancel": "Cancel"
   },
   "tasks": {
     "approvalTitle": "Task request",
@@ -1567,6 +1569,19 @@
             ],
             "examples": [],
             "tip": "Pausing a task does not delete it: switch it off and switch it back on whenever you like. Its history stays on the card."
+          },
+          {
+            "id": "hablar-y-escuchar",
+            "title": "Speaking and listening",
+            "what": "NIDO can listen to you and read aloud, all on this PC and offline. Dictation turns your voice into text inside the writing box: you see it before sending and it is never sent on its own. Reading speaks the answers with NIDO's voice; in Emergency, the speaker button reads the CPR guide step by step.",
+            "steps": [
+              "If it is your first time, open Settings, Voice section, and download the voice models: the listening one is 487 MB and the speech one 350 MB, just once.",
+              "To dictate, tap Dictate by voice, the microphone next to the writing box, and speak in phrases: each phrase appears as text and you can keep speaking or fix it before sending.",
+              "To hear an answer, tap Read aloud, the speaker under the answer; tap again to stop the reading right away.",
+              "In Settings, Voice section, you can turn on automatic reading of every answer and turn dictation off if you do not use it."
+            ],
+            "examples": [],
+            "tip": "If NIDO's voice is not downloaded, reading can use your operating system's voice when the fallback is on: it sounds different, and the Voice section always tells you which one is speaking."
           }
         ]
       },
@@ -1987,6 +2002,11 @@
     "securityBody": "Your vault locks with your password. While it is open, your data lives only on this device.",
     "passwordFixedNote": "The password is set when the vault is created: it cannot be changed or recovered.",
     "send": "Send",
+    "dictate": "Dictate by voice",
+    "listening": "Listening…",
+    "readAloud": "Read aloud",
+    "stopReading": "Stop reading",
+    "readCprGuide": "Listen to the CPR guide",
     "settingsEmpty": "No setting matches.",
     "settingsSearch": "Search a setting",
     "sourceRelevance": "relevance {{pct}}%",

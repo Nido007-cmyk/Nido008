@@ -18,11 +18,23 @@ const HEX64 = /^[0-9a-f]{64}$/;
 const EXTRACTED: Record<string, number> = {
   "parakeet-tdt-0.6b-v3-int8": 671_341_917,
   "kokoro-multi-lang-v1_0": 401_239_297,
+  "whisper-small": 1_344_966_809,
+  "whisper-large-v3-turbo": 1_037_438_452,
+  "piper-es-es-davefx-medium": 81_146_842,
+  "piper-es-mx-claude-high": 80_947_123,
+  "piper-pt-br-edresson-low": 81_101_554,
+  "piper-pt-br-faber-medium": 81_199_149,
   silero_vad: 643_854,
 };
 const FILE_COUNT: Record<string, number> = {
   "parakeet-tdt-0.6b-v3-int8": 9,
   "kokoro-multi-lang-v1_0": 377,
+  "whisper-small": 9,
+  "whisper-large-v3-turbo": 7,
+  "piper-es-es-davefx-medium": 359,
+  "piper-es-mx-claude-high": 359,
+  "piper-pt-br-edresson-low": 359,
+  "piper-pt-br-faber-medium": 359,
   silero_vad: 1,
 };
 

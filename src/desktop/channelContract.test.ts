@@ -52,7 +52,7 @@ const onMain = new Set(grab(mainSrc, /ipcMain\.on\("([^"]+)"/g));
 const emitted = new Set(grab(mainSrc, /\.send\("([^"]+)"/g));
 
 describe("IPC channel contract census (tanda 14)", () => {
-  it("the preload surface is the signed one (42 invokes, 1 send, 5 listeners)", () => {
+  it("the preload surface is the signed one (50 invokes, 2 sends, 7 listeners)", () => {
     // Re-firmado en E4 (paso 6): la superficie del gestor
     // añadió tres canales (model-download, model-download-pause
     // y model-discard); modelsListLight reusa models-list.
@@ -88,13 +88,25 @@ describe("IPC channel contract census (tanda 14)", () => {
     // Re-firmado en E8 (paso 8): las tareas programadas
     // añaden tres canales (tasks-list, tasks-save y
     // tasks-delete) para su tarjeta de Ajustes.
-    expect(invoked.size).toBe(42);
-    expect(sent).toEqual(new Set(["nido:confirm-response"]));
+    // Re-firmado en E9 (paso 1): la espina de escucha añade
+    // tres canales (voice-engine-state, voice-dictation-start
+    // y voice-dictation-stop), un envío de audio sin
+    // respuesta (voice-dictation-audio) y un evento de
+    // dictado (voice-event).
+    // Re-firmado en E9 (paso 2): la lectura añade tres
+    // canales (voice-speak-state, voice-synth y
+    // voice-speak-release).
+    // Re-firmado en E9 (paso 5): la tarjeta de activos de
+    // voz añade dos canales (voice-assets y
+    // voice-asset-install) y un evento de progreso
+    // (voice-asset-progress).
+    expect(invoked.size).toBe(50);
+    expect(sent).toEqual(new Set(["nido:confirm-response", "nido:voice-dictation-audio"]));
     // Re-firmado en E8 (paso 6): el clic de la notificación
     // del sistema y las acciones de la bandeja emiten
     // nido:notices-show hacia el renderizador.
     expect(listened).toEqual(
-      new Set(["nido:turn-token", "nido:turn-phase", "nido:confirm-request", "nido:vault-locked", "nido:notices-show"]),
+      new Set(["nido:turn-token", "nido:turn-phase", "nido:confirm-request", "nido:vault-locked", "nido:notices-show", "nido:voice-event", "nido:voice-asset-progress"]),
     );
   });
 
@@ -172,7 +184,15 @@ describe("IPC channel contract census (tanda 14)", () => {
     // vista» de la carcasa (clic de notificación y bandeja).
     // 48 → 51 en E8 (paso 8): tasksList, tasksSave y
     // tasksDelete, la tarjeta de tareas programadas.
-    expect(exposed.size).toBe(51);
+    // 51 → 56 en E9 (paso 1): voiceEngineState,
+    // voiceDictationStart, voiceDictationStop,
+    // voiceDictationAudio y onVoiceEvent, la espina de
+    // escucha.
+    // 56 → 59 en E9 (paso 2): voiceSpeakState, voiceSynth y
+    // voiceSpeakRelease, la lectura.
+    // 59 → 62 en E9 (paso 5): voiceAssets, voiceAssetInstall
+    // y onVoiceAssetProgress, la tarjeta de activos de voz.
+    expect(exposed.size).toBe(62);
     expect([...typed].sort()).toEqual([...exposed].sort());
   });
 

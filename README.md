@@ -43,6 +43,9 @@ full tool catalog always present.
 - **A built-in guide.** The Learn section inside the Library
   teaches every feature with examples you can tap, written only
   for what the app really does.
+- **Voice on your device.** Dictate your messages and have
+  answers read aloud, in English, Spanish and Portuguese, with
+  speech models that run entirely on your machine.
 - **Three languages.** The whole interface speaks English, Spanish
   and Portuguese.
 
@@ -88,14 +91,15 @@ below.
 
 NIDO PC is in active development, version 0.1.0. The code in this
 repository is a snapshot of the development branch taken on
-2026-11-21. Working today: the chat, the model catalog with its
+2026-11-22. Working today: the chat, the model catalog with its
 verified downloads, the encrypted memory, the calendar, contacts
-and reminders, scheduled tasks, the document library and the
-built-in guide. In development right now: on-device voice
-(dictation and speech), the stage currently being built.
+and reminders, scheduled tasks, the document library, on-device
+voice (dictation and read-aloud) and the built-in guide. In
+development right now: deep research, where NIDO works through
+a question in several steps and cites what it found.
 
-At the last verified milestone, the test battery ran 6,989 tests:
-6,976 passing, 13 expected failures and no unexpected failures.
+At the last verified milestone, the test battery ran 7,046 tests:
+7,033 passing, 13 expected failures and no unexpected failures.
 
 NIDO PC is early alpha software. It can fail, and it will change.
 What every version promises is fewer failures than the one before

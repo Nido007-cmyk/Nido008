@@ -37,7 +37,27 @@
  * del §8.9 (tanda 14, acto 6): instala los servicios reales y
  * conduce el puente de la página en dos procesos contra el mismo
  * directorio de datos; su orquestador es scripts/persist.mjs y
- * su detalle va en su propia sección, abajo.
+ * su detalle va en su propia sección, abajo. Con
+ * NIDO_BENCH=voice corre la puerta de la escucha de E9 (paso 1)
+ * dentro de la carcasa real: el gestor del proceso de voz de la
+ * casa abre sesiones de verdad contra los activos instalados
+ * por la puerta del paso 0 (NIDO_BENCH_VOICE_ASSETS) y el
+ * corpus de referencias (NIDO_BENCH_VOICE_CORPUS, con su
+ * referencias.json), alimenta cada clip por la vía de la sesión
+ * (start, audio por trozos, el silencio que hace cortar al
+ * VAD) y cobra RTF y WER con su etiqueta (reconocedor o
+ * cadena), más la contabilidad del proceso de voz al cargar,
+ * en sesión y tras soltar. Con NIDO_BENCH_VOICE_WITH_LLM=<id>
+ * repite el clip español con ese modelo residente en el
+ * principal (la convivencia). El mismo modo cobra la lectura
+ * del paso 2: sintetiza las frases de muestra de es/en/pt por
+ * el gestor (latencia de la primera frase y RTF por idioma)
+ * y escribe las muestras en WAV a NIDO_BENCH_VOICE_SAMPLES.
+ * El micrófono es lo único que no se ejerce: esta VM no tiene
+ * ninguno, y la captura vive en el renderizador; la
+ * reproducción tampoco (no hay dispositivo de audio: suena
+ * en el renderizador, probada en su costura); queda
+ * declarado en el asiento de la etapa.
  *
  * El informe del banco se escribe en NIDO_BENCH_OUT (JSON) y
  * guarda MÉTRICAS Y HUELLAS, nunca la pregunta ni la respuesta
@@ -65,6 +85,9 @@ import {DESKTOP_CATALOG} from "./core/catalog.ts";
 import {LocalEngine} from "./core/engine.ts";
 import {LoadRefusal} from "./core/loadPath.ts";
 import {installServices} from "./services.ts";
+import {VoiceProcessManager, voiceHostFactory} from "./voiceProcess.ts";
+import {splitSentences} from "../../src/voice/tts.js";
+import {fileURLToPath} from "node:url";
 import {getDb} from "../../src/rag/db.js";
 
 // ---------------------------------------------------------------------
@@ -180,11 +203,23 @@ async function runShellProbes(window: BrowserWindow) {
         }
     }
 
+    // E9 (paso 5): la alcanzabilidad de la reserva del sistema,
+    // medida por las voces que la página ve en esta máquina.
+    try {
+        benchReport.voiceSystemVoices = await window.webContents.executeJavaScript(
+            "window.speechSynthesis ? speechSynthesis.getVoices().length : -1"
+        );
+    } catch {
+        benchReport.voiceSystemVoices = -2;
+    }
+
     // S-PERM: los seis estados de permissions.query, la petición de
-    // notificaciones y el rechazo de getUserMedia. La señal que
-    // distingue «la capa de permisos frenó» de «no hay micrófono en
-    // la VM» es el nombre del error: NotAllowedError (permiso)
-    // frente a NotFoundError (dispositivo ausente).
+    // notificaciones y el error de getUserMedia. Desde E9 (paso 1)
+    // «media» está en la allowlist para el dictado: la señal que se
+    // cobra es que getUserMedia ya NO muere por permiso
+    // (NotAllowedError) sino, en esta VM sin micrófono, por
+    // dispositivo ausente (NotFoundError), y que las notificaciones
+    // siguen denegadas.
     try {
         benchReport.permissions = await window.webContents.executeJavaScript(`(async () => {
             const names = ["microphone", "camera", "geolocation", "notifications", "midi", "clipboard-read"];
@@ -276,6 +311,426 @@ async function runShellProbes(window: BrowserWindow) {
 }
 
 // ---------------------------------------------------------------------
+// Modo voice (E9, paso 1): la puerta de la escucha dentro de la
+// carcasa real. El detalle del modo va en la cabecera del fichero.
+// ---------------------------------------------------------------------
+
+/** Lee un WAV PCM16 mono y lo deja en Float32 a 16 kHz. */
+function readWav16kBench(file: string): Float32Array {
+    const buf = fs.readFileSync(file);
+    let rate = 0;
+    let channels = 0;
+    let bits = 0;
+    let dataOff = -1;
+    let dataLen = 0;
+    for (let i = 12; i + 8 <= buf.length;) {
+        const id = buf.toString("ascii", i, i + 4);
+        const size = buf.readUInt32LE(i + 4);
+        if (id === "fmt ") {
+            channels = buf.readUInt16LE(i + 10);
+            rate = buf.readUInt32LE(i + 12);
+            bits = buf.readUInt16LE(i + 22);
+        }
+        if (id === "data") {
+            dataOff = i + 8;
+            dataLen = size;
+            break;
+        }
+        i += 8 + size + (size % 2);
+    }
+    if (dataOff < 0 || bits !== 16 || channels !== 1)
+        throw new Error(`wav no soportado: ${file} rate=${rate} ch=${channels} bits=${bits}`);
+    const n = Math.floor(dataLen / 2);
+    const src = new Float32Array(n);
+    for (let i = 0; i < n; i++) src[i] = buf.readInt16LE(dataOff + i * 2) / 32768;
+    const step = rate / 16000;
+    const m = Math.floor(n / step);
+    const out = new Float32Array(m);
+    for (let i = 0; i < m; i++) out[i] = src[Math.floor(i * step)];
+    return out;
+}
+
+/** Las palabras de un texto para el WER: caja, acentos y puntuación plegados. */
+function werWords(text: string): string[] {
+    return text
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[̀-ͯ]/g, "")
+        .replace(/[^\p{L}\p{N}\s]/gu, " ")
+        .split(/\s+/)
+        .filter(Boolean);
+}
+
+/** WER por distancia de edición entre palabras. */
+function werBench(ref: string[], hyp: string[]): number {
+    if (ref.length === 0) return hyp.length === 0 ? 0 : 1;
+    let prev = Array.from({length: hyp.length + 1}, (_, j) => j);
+    for (let i = 1; i <= ref.length; i++) {
+        const cur = [i];
+        for (let j = 1; j <= hyp.length; j++) {
+            cur[j] = Math.min(
+                (prev[j] ?? 0) + 1,
+                (cur[j - 1] ?? 0) + 1,
+                (prev[j - 1] ?? 0) + (ref[i - 1] === hyp[j - 1] ? 0 : 1)
+            );
+        }
+        prev = cur;
+    }
+    return (prev[hyp.length] ?? 0) / ref.length;
+}
+
+async function runVoiceProbe(): Promise<Record<string, unknown>> {
+    const assetsDir = process.env["NIDO_BENCH_VOICE_ASSETS"] ?? "";
+    const corpusDir = process.env["NIDO_BENCH_VOICE_CORPUS"] ?? "";
+    const probe: Record<string, unknown> = {};
+    const refs = JSON.parse(fs.readFileSync(path.join(corpusDir, "referencias.json"), "utf8")) as Record<
+        string,
+        {etiqueta: string; fichero: string; referencia: string}
+    >;
+    const hostPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "voiceHost.js");
+    const manager = new VoiceProcessManager({
+        assetsDir,
+        hostFactory: voiceHostFactory(hostPath)
+    });
+    const runClip = async (lang: string): Promise<Record<string, unknown>> => {
+        const entry = refs[lang];
+        if (!entry) throw new Error(`sin referencia para ${lang}`);
+        const samples = readWav16kBench(path.join(corpusDir, entry.fichero));
+        const seconds = samples.length / 16000;
+        let resolveResult: (t: string) => void = () => {};
+        let rejectResult: (e: Error) => void = () => {};
+        const done = new Promise<string>((res, rej) => {
+            resolveResult = res;
+            rejectResult = rej;
+        });
+        const timer = setTimeout(() => rejectResult(new Error(`sin resultado en 180 s (${lang})`)), 180000);
+        await manager.startSession((e) => {
+            if (e.type === "result") {
+                clearTimeout(timer);
+                resolveResult(e.text);
+            }
+            if (e.type === "error") {
+                clearTimeout(timer);
+                rejectResult(new Error(`${e.code}: ${e.message}`));
+            }
+        });
+        const t0 = Date.now();
+        for (let off = 0; off < samples.length; off += 1600) {
+            manager.pushAudio(samples.subarray(off, Math.min(samples.length, off + 1600)));
+            await sleep(5);
+        }
+        // El silencio que hace cortar al VAD.
+        manager.pushAudio(new Float32Array(16000 * 2));
+        const text = await done;
+        const wallMs = Date.now() - t0;
+        const refWords = werWords(entry.referencia);
+        const hypWords = werWords(text);
+        const clip = {
+            lang,
+            etiqueta: entry.etiqueta,
+            seconds: +seconds.toFixed(2),
+            wallMs,
+            rtf: +(wallMs / 1000 / seconds).toFixed(3),
+            wer: +werBench(refWords, hypWords).toFixed(3),
+            refWords: refWords.length,
+            hypWords: hypWords.length,
+            hypothesisChars: text.length,
+            hypothesisSha256: createHash("sha256").update(text).digest("hex")
+        };
+        benchLog(`VOICE ${JSON.stringify(clip)}`);
+        return clip;
+    };
+    probe.accountingBefore = await manager.accounting();
+    probe.rssMainBeforeMB = Math.round(process.memoryUsage().rss / 1048576);
+    const clips: Record<string, unknown>[] = [];
+    for (const lang of ["es", "en", "pt"]) {
+        clips.push(await runClip(lang));
+        if (lang === "es") probe.accountingInSession = await manager.accounting();
+    }
+    probe.clips = clips;
+    // La suelta tras el último segmento es asíncrona: se espera a
+    // que la contabilidad diga no cargado (tope 30 s).
+    for (let i = 0; i < 60; i++) {
+        const acc = await manager.accounting();
+        if (!acc.loaded) {
+            probe.accountingAfter = acc;
+            break;
+        }
+        await sleep(500);
+    }
+    probe.accountingAfter ??= await manager.accounting();
+    probe.rssMainAfterMB = Math.round(process.memoryUsage().rss / 1048576);
+
+    // La lectura (paso 2): la síntesis de Kokoro dentro de la
+    // carcasa, por el mismo gestor. Se cobra la latencia de la
+    // primera frase (la vara: suena en menos de un segundo; el
+    // sonido en sí no se ejerce: esta VM no tiene dispositivo
+    // de audio y la reproducción vive en el renderizador) y el
+    // RTF por idioma, y se escriben las muestras en WAV a
+    // NIDO_BENCH_VOICE_SAMPLES (las que escucha el dueño).
+    const samplesDir = process.env["NIDO_BENCH_VOICE_SAMPLES"] ?? "";
+    const sampleTexts: Record<string, string> = {
+        es: "Hola, soy NIDO. Trabajo sin conexión a internet, y todo lo que me cuentas se queda en tu ordenador.",
+        en: "Hello, I am NIDO. I work without an internet connection, and everything you tell me stays on your computer.",
+        pt: "Olá, eu sou o NIDO. Trabalho sem conexão com a internet, e tudo o que você me conta fica no seu computador."
+    };
+    const speech: Record<string, unknown>[] = [];
+    for (const lang of ["es", "en", "pt"]) {
+        const sentences = splitSentences(sampleTexts[lang] ?? "");
+        const parts: Float32Array[] = [];
+        let sampleRate = 24000;
+        let firstSentenceMs: number | null = null;
+        let totalSynthMs = 0;
+        let totalSeconds = 0;
+        for (const sentence of sentences) {
+            const t0 = Date.now();
+            const audio = await manager.synthesize(sentence, lang);
+            const synthMs = Date.now() - t0;
+            if (!audio) throw new Error(`sin síntesis para ${lang} (${manager.speechError() ?? "sin detalle"}): ${sentence}`);
+            if (firstSentenceMs === null) firstSentenceMs = synthMs;
+            totalSynthMs += synthMs;
+            totalSeconds += audio.samples.length / audio.sampleRate;
+            sampleRate = audio.sampleRate;
+            parts.push(audio.samples);
+        }
+        const all = new Float32Array(parts.reduce((n, p) => n + p.length, 0));
+        let off = 0;
+        for (const p of parts) {
+            all.set(p, off);
+            off += p.length;
+        }
+        if (samplesDir) {
+            fs.mkdirSync(samplesDir, {recursive: true});
+            const data = Buffer.alloc(44 + all.length * 2);
+            data.write("RIFF", 0);
+            data.writeUInt32LE(36 + all.length * 2, 4);
+            data.write("WAVE", 8);
+            data.write("fmt ", 12);
+            data.writeUInt32LE(16, 16);
+            data.writeUInt16LE(1, 20);
+            data.writeUInt16LE(1, 22);
+            data.writeUInt32LE(sampleRate, 24);
+            data.writeUInt32LE(sampleRate * 2, 28);
+            data.writeUInt16LE(2, 32);
+            data.writeUInt16LE(16, 34);
+            data.write("data", 36);
+            data.writeUInt32LE(all.length * 2, 40);
+            for (let i = 0; i < all.length; i++) {
+                const v = Math.max(-1, Math.min(1, all[i] ?? 0));
+                data.writeInt16LE(Math.round(v * 32767), 44 + i * 2);
+            }
+            fs.writeFileSync(path.join(samplesDir, `${lang}.wav`), data);
+        }
+        const row = {
+            lang,
+            firstSentenceMs,
+            firstSentenceUnder1s: firstSentenceMs !== null && firstSentenceMs < 1000,
+            audioSeconds: +totalSeconds.toFixed(2),
+            synthMs: totalSynthMs,
+            rtf: +(totalSynthMs / 1000 / totalSeconds).toFixed(3),
+            sampleRate
+        };
+        speech.push(row);
+        benchLog(`SPEECH ${JSON.stringify(row)}`);
+    }
+    probe.speech = speech;
+    await manager.releaseSpeech();
+    probe.accountingAfterSpeech = await manager.accounting();
+
+    // Los estados honestos de la superficie (paso 5): el
+    // local con los activos reales, el ninguno con un
+    // directorio vacío, y la alcanzabilidad de la reserva
+    // medida por las voces del sistema en la página.
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const emptyManager = new VoiceProcessManager({
+        assetsDir: mkdtempSync(path.join(tmpdir(), "nido-bench-sin-activos-")),
+        hostFactory: voiceHostFactory(hostPath)
+    });
+    probe.surfaceStates = {
+        localSpeech: await manager.speechState(),
+        emptySpeech: await emptyManager.speechState(),
+        emptyEngine: await emptyManager.engineState()
+    };
+
+    // La convivencia: el clip español otra vez, con un modelo de
+    // lenguaje residente en el principal por la vía de la casa.
+    const withLlm = process.env["NIDO_BENCH_VOICE_WITH_LLM"] ?? "";
+    if (withLlm) {
+        try {
+            const modelsDir = process.env["NIDO_MODELS_DIR"] ?? path.join(process.cwd(), "models");
+            const entry = DESKTOP_CATALOG.find((candidate) => candidate.id === withLlm);
+            if (!entry) throw new Error(`modelo fuera de catálogo: ${withLlm}`);
+            const engine = await LocalEngine.load(modelsDir, entry, BENCH_CONTEXT_SIZE);
+            const clip = await runClip("es");
+            probe.coexistence = {
+                modelId: withLlm,
+                clip,
+                accounting: await manager.accounting(),
+                rssMainMB: Math.round(process.memoryUsage().rss / 1048576)
+            };
+            void engine;
+        } catch (err) {
+            probe.coexistence = {modelId: withLlm, error: String(err)};
+        }
+    }
+    // Whisper (paso 3): el corpus del paso 1 contra small, con
+    // sus cifras junto a las de Parakeet, y el fichero largo
+    // contra large-v3-turbo. El largo y su referencia llegan
+    // por NIDO_BENCH_VOICE_LONG (el .wav; su .txt hermano es
+    // la referencia). Lo que la VM no pueda cargar queda en
+    // el informe con su error, declarado, no escondido.
+    const whisper: Record<string, unknown> = {};
+    const smallRows: Record<string, unknown>[] = [];
+    for (const lang of ["es", "en", "pt"]) {
+        const entry = refs[lang];
+        if (!entry) continue;
+        const samples = readWav16kBench(path.join(corpusDir, entry.fichero));
+        const seconds = samples.length / 16000;
+        const t0 = Date.now();
+        const result = await manager.transcribeFile(samples, "whisper-small");
+        const wallMs = Date.now() - t0;
+        if (!result) {
+            smallRows.push({lang, error: manager.whisperError() ?? "sin detalle"});
+            continue;
+        }
+        const refWords = werWords(entry.referencia);
+        const hypWords = werWords(result.text);
+        const row = {
+            lang,
+            etiqueta: entry.etiqueta,
+            seconds: +seconds.toFixed(2),
+            wallMs,
+            rtf: +(wallMs / 1000 / seconds).toFixed(3),
+            wer: +werBench(refWords, hypWords).toFixed(3),
+            refWords: refWords.length,
+            hypWords: hypWords.length,
+            hypothesisChars: result.text.length,
+            hypothesisSha256: createHash("sha256").update(result.text).digest("hex")
+        };
+        smallRows.push(row);
+        benchLog(`WHISPER-SMALL ${JSON.stringify(row)}`);
+    }
+    whisper.small = smallRows;
+    const longWav = process.env["NIDO_BENCH_VOICE_LONG"] ?? "";
+    if (longWav) {
+        try {
+            const samples = readWav16kBench(longWav);
+            const seconds = samples.length / 16000;
+            const reference = fs.readFileSync(longWav.replace(/\.wav$/, ".txt"), "utf8");
+            const t0 = Date.now();
+            const result = await manager.transcribeFile(samples, "whisper-large-v3-turbo");
+            const wallMs = Date.now() - t0;
+            if (!result) {
+                whisper.turbo = {error: manager.whisperError() ?? "sin detalle", seconds: +seconds.toFixed(1)};
+            } else {
+                const refWords = werWords(reference);
+                const hypWords = werWords(result.text);
+                whisper.turbo = {
+                    seconds: +seconds.toFixed(1),
+                    wallMs,
+                    rtf: +(wallMs / 1000 / seconds).toFixed(3),
+                    wer: +werBench(refWords, hypWords).toFixed(3),
+                    refWords: refWords.length,
+                    hypWords: hypWords.length,
+                    hypothesisChars: result.text.length,
+                    hypothesisSha256: createHash("sha256").update(result.text).digest("hex")
+                };
+            }
+        } catch (err) {
+            whisper.turbo = {error: String(err)};
+        }
+        benchLog(`WHISPER-TURBO ${JSON.stringify(whisper.turbo)}`);
+    }
+    probe.whisper = whisper;
+
+    // Piper (paso 4): la comparativa contra Kokoro. Cada voz
+    // sintetiza la misma frase de muestra de su idioma que
+    // la pierna de lectura generó con Kokoro (las muestras
+    // del paso 2), y su WAV va al mismo directorio de
+    // muestras: el oído del dueño compara (D-01). Se cobra
+    // el RTF de cada voz y su primera frase.
+    const piperVoices: Record<string, string> = {
+        "piper-es-es-davefx-medium": "es",
+        "piper-es-mx-claude-high": "es",
+        "piper-pt-br-edresson-low": "pt",
+        "piper-pt-br-faber-medium": "pt"
+    };
+    const piper: Record<string, unknown>[] = [];
+    for (const [voiceId, lang] of Object.entries(piperVoices)) {
+        const sentences = splitSentences(sampleTexts[lang] ?? "");
+        const parts: Float32Array[] = [];
+        let sampleRate = 22050;
+        let firstSentenceMs: number | null = null;
+        let totalSynthMs = 0;
+        let totalSeconds = 0;
+        let error: string | null = null;
+        for (const sentence of sentences) {
+            const t0 = Date.now();
+            const audio = await manager.synthesizePiper(sentence, voiceId);
+            const synthMs = Date.now() - t0;
+            if (!audio) {
+                error = manager.piperError() ?? "sin detalle";
+                break;
+            }
+            if (firstSentenceMs === null) firstSentenceMs = synthMs;
+            totalSynthMs += synthMs;
+            totalSeconds += audio.samples.length / audio.sampleRate;
+            sampleRate = audio.sampleRate;
+            parts.push(audio.samples);
+        }
+        if (error) {
+            piper.push({voiceId, lang, error});
+            benchLog(`PIPER ${JSON.stringify({voiceId, error})}`);
+            continue;
+        }
+        const all = new Float32Array(parts.reduce((n, p) => n + p.length, 0));
+        let off = 0;
+        for (const p of parts) {
+            all.set(p, off);
+            off += p.length;
+        }
+        if (samplesDir) {
+            fs.mkdirSync(samplesDir, {recursive: true});
+            const data = Buffer.alloc(44 + all.length * 2);
+            data.write("RIFF", 0);
+            data.writeUInt32LE(36 + all.length * 2, 4);
+            data.write("WAVE", 8);
+            data.write("fmt ", 12);
+            data.writeUInt32LE(16, 16);
+            data.writeUInt16LE(1, 20);
+            data.writeUInt16LE(1, 22);
+            data.writeUInt32LE(sampleRate, 24);
+            data.writeUInt32LE(sampleRate * 2, 28);
+            data.writeUInt16LE(2, 32);
+            data.writeUInt16LE(16, 34);
+            data.write("data", 36);
+            data.writeUInt32LE(all.length * 2, 40);
+            for (let i = 0; i < all.length; i++) {
+                const v = Math.max(-1, Math.min(1, all[i] ?? 0));
+                data.writeInt16LE(Math.round(v * 32767), 44 + i * 2);
+            }
+            fs.writeFileSync(path.join(samplesDir, `${voiceId}.wav`), data);
+        }
+        const row = {
+            voiceId,
+            lang,
+            firstSentenceMs,
+            audioSeconds: +totalSeconds.toFixed(2),
+            synthMs: totalSynthMs,
+            rtf: +(totalSynthMs / 1000 / totalSeconds).toFixed(3),
+            sampleRate
+        };
+        piper.push(row);
+        benchLog(`PIPER ${JSON.stringify(row)}`);
+    }
+    probe.piper = piper;
+    await manager.releasePiper();
+    manager.dispose();
+    return probe;
+}
+
+// ---------------------------------------------------------------------
 // El banco: sondas de renderizador, estados, motor por la vía de la
 // casa y ataques de navegación contra la propia ventana.
 // ---------------------------------------------------------------------
@@ -330,6 +785,22 @@ async function runBench(window: BrowserWindow) {
         }
         benchReport.packProbe = probe;
         benchLog(`PACKPROBE ${JSON.stringify(probe)}`);
+        writeBenchReport();
+        benchLog("DONE");
+        setTimeout(() => app.quit(), 500);
+        return;
+    }
+
+    // Modo voice (E9, paso 1): la puerta de la escucha dentro de
+    // la carcasa real (runVoiceProbe, arriba; el modo se
+    // documenta en la cabecera del fichero).
+    if (BENCH_MODE === "voice") {
+        try {
+            benchReport.voiceProbe = await runVoiceProbe();
+        } catch (err) {
+            benchReport.voiceProbe = {error: String(err)};
+            benchLog(`VOICE-ERROR ${String(err)}`);
+        }
         writeBenchReport();
         benchLog("DONE");
         setTimeout(() => app.quit(), 500);

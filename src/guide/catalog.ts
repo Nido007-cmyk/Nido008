@@ -145,6 +145,18 @@ export const lessons: GuideLessonDecl[] = [
     examples: [],
   },
   {
+    // E9 (paso 5): la lección de la voz nace con la etapa que
+    // la construye. Sin ejemplos de chat: la voz se usa
+    // hablando y tocando el altavoz, no escribiendo una
+    // frase de ejemplo; la lección enseña el dictado por
+    // frases (nunca «manos libres»), la lectura y el estado
+    // honesto de la sección Voz.
+    id: "hablar-y-escuchar",
+    module: "cada-dia",
+    labels: ["voiceSettings.title", "pcSurface.dictate", "pcSurface.readAloud"],
+    examples: [],
+  },
+  {
     id: "emergencias",
     module: "seguridad",
     labels: ["pcSurface.navEmergency"],

@@ -37,7 +37,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // legacy/build/pdf.mjs es el import real de ocrEngine y de
 // pdfTextEngine, y entra nombrada entera). Viajan en node_modules
 // y desempaquetados del asar (electron-builder.ts).
-const electronExternalModules = ["node-llama-cpp", "lifecycle-utils", "electron-updater", "better-sqlite3-multiple-ciphers", "react-native", "expo-calendar", "expo-contacts", "expo-document-picker", "expo-file-system", "@napi-rs/canvas", "tesseract.js", "pdfjs-dist", "pdfjs-dist/legacy/build/pdf.mjs"];
+// sherpa-onnx-node se suma por E9 (paso 1): es el runtime de voz,
+// un addon nativo que el proceso de utilidad carga desde su
+// paquete de plataforma en tiempo de ejecución; empaquetarlo en
+// el bundle rompería su resolución del .node, como los demás
+// motores nativos de esta lista.
+const electronExternalModules = ["node-llama-cpp", "lifecycle-utils", "electron-updater", "better-sqlite3-multiple-ciphers", "react-native", "expo-calendar", "expo-contacts", "expo-document-picker", "expo-file-system", "@napi-rs/canvas", "tesseract.js", "pdfjs-dist", "pdfjs-dist/legacy/build/pdf.mjs", "sherpa-onnx-node"];
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -87,7 +92,14 @@ export default defineConfig({
                             // de construcción (electron-builder.ts).
                             input: {
                                 index: path.join(__dirname, "electron/index.ts"),
-                                bench: path.join(__dirname, "electron/bench.ts")
+                                bench: path.join(__dirname, "electron/bench.ts"),
+                                // El anfitrión del proceso propio de voz
+                                // (E9 paso 1, firma 6): una tercera entrada
+                                // que el principal bifurca con
+                                // utilityProcess.fork; viaja en los dos
+                                // sabores porque el banco cobra la puerta
+                                // de la voz dentro de la carcasa real.
+                                voiceHost: path.join(__dirname, "electron/voiceHost.ts")
                             }
                         }
                     }
