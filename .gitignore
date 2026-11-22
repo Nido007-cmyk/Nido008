@@ -1,0 +1,29 @@
+# NIDO PC: ficheros generados, locales o sensibles. Nada de esto
+# entra en el repo público.
+
+# Dependencias y salidas de construcción
+node_modules/
+app/node_modules/
+app/dist/
+app/out/
+dist/
+out/
+release/
+*.tsbuildinfo
+
+# Modelos y pesos: jamás se redistribuyen
+/models/
+*.gguf
+
+# Secretos y material de firma
+.env
+.env.*
+*.pem
+*.key
+*.p12
+keystores/
+
+# Datos locales, bancos y registros de ejecución
+app/bench-results/
+src/eval/blind-results/
+*.log

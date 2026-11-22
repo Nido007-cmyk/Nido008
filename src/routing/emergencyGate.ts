@@ -1,0 +1,1282 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ *
+ * Emergencia primero y puerta léxica de salud (programa «Lo mejor de
+ * la bounty», tanda 2; pieza 06 de la colección: Field Atlas,
+ * Apache-2.0, y el patrón de puerta léxica de LabRat, MIT, descrito en
+ * su README — implementación propia, ver ATTRIBUTION.md).
+ *
+ * Dos garantías que a NIDO le faltaban, verificadas en su código:
+ *
+ * 1. LO DE EMERGENCIA NO HACE COLA. Las rutas fijas (monóxido →
+ *    números verificados de los packs → tabla de safetyAnswers)
+ *    responden sin modelo al principio de send(), pero mientras otra
+ *    respuesta se estaba generando el compositor se deshabilitaba y
+ *    el botón de enviar era «detener»: una emergencia tecleada a mitad
+ *    de generación no podía ni enviarse. `isEmergencyText` reconoce el
+ *    texto con los MISMOS detectores puros de las rutas fijas, para
+ *    que la pantalla ofrezca el envío de emergencia durante la
+ *    generación; al tocarlo se detiene y se espera la generación en
+ *    curso (la vía de stopAndAwaitGeneration) y el envío entra por la
+ *    ruta fija, que pinta al instante y primero.
+ *
+ * 2. LA SALUD SIN GUÍA NO CAE A LA MEMORIA DEL MODELO. Si la pregunta
+ *    es de salud (puerta léxica, no el juicio del modelo) y ningún
+ *    pasaje recuperado es evidencia de salud, las salidas que dejaban
+ *    texto del modelo en pie (sin fuentes, o «unverified» por lengua
+ *    distinta, o el extracto de una fuente que no es de salud en la
+ *    abstención) se sustituyen por el texto seguro fijo. Lo
+ *    «grounded»/«partial» NO se toca: no es memoria del modelo, es
+ *    texto verificado frase a frase contra sus fuentes.
+ *
+ * Evidencia de salud = un chunk de los packs cuyas guías son de salud
+ * con fuentes verificadas: NIDO Esencial y NIDO Niños (primeros
+ * auxilios) y NIDO Crisis (líneas de crisis). El id puede llevar el
+ * sufijo de embeddings «-e5» (la convención de guideAnswer.ts).
+ *
+ * 3. LA EMERGENCIA VIVA CONTADA TAMBIÉN ES PUERTA (cierre de
+ *    evaluaciones, 2026-10-31; hallazgo F-B1 de la evaluación ciega
+ *    01, estudios/E3-J10-APERTURA.md). La corrida 01 midió que las emergencias
+ *    vivas sin pack caían al modelo: la puerta léxica conoce
+ *    diagnósticos («ahogamiento») pero la gente cuenta el suceso
+ *    («se está ahogando», «no puede respirar», alguien agarrándose
+ *    el pecho, humo saliendo de la cocina). `isEmergencySituation`
+ *    es esa otra cara de la puerta: signos tal cual se cuentan,
+ *    gerundios y tercera persona incluidos, sin exigir señal de
+ *    pregunta — quien lo cuenta no pregunta, pide ayuda. Donde la
+ *    puerta de salud manda (sin fuentes, o sin evidencia de salud)
+ *    manda también esta cara, y sirve el mismo texto seguro: con la
+ *    guía instalada responde la guía por recuperación; sin ella,
+ *    ninguna emergencia queda a la improvisación del modelo. La
+ *    cura se mide contra un conjunto ciego FRESCO (corrida 02), no
+ *    contra el conjunto 01 que la destapó (regla del sello).
+ *
+ * 4. EL PASADO NO ES UNA SITUACIÓN (arreglo F-B3, 2026-10-31;
+ *    hallazgo de la corrida ciega 02). Una pregunta de historia
+ *    sobre una enfermedad («Qual foi a febre espanhola de 1918 e
+ *    quantas pessoas matou?») trae término de salud y señal de
+ *    pregunta, y la puerta disparaba: los vetos solo cubrían el
+ *    marco explícito «história de…». `hasHistoricalFrame` reconoce
+ *    el marco histórico o cultural (siglos, muertes contadas,
+ *    pandemias nombradas, novelas y películas, y el patrón año +
+ *    verbo en pasado) y veta las DOS caras de la puerta: quien
+ *    pregunta por el pasado no está en una situación de salud ni
+ *    en una emergencia. La cura se mide contra un conjunto ciego
+ *    FRESCO (corrida 03), no contra el conjunto 02 que la destapó.
+ *
+ * 5. EL TEXTO SEGURO TAMBIÉN ENSEÑA LO ESENCIAL (sustancia del
+ *    texto fijo, 2026-10-31; medida de las corridas ciegas 01 y
+ *    02). El texto anterior era un suelo honesto pero mínimo —
+ *    puntuó 38,9 % (01) y 41,7 %/33,3 % (02) contra la frontera
+ *    porque no decía nada de la situación. El texto nuevo mantiene
+ *    la honestidad y añade, en orden: los signos que hacen urgente
+ *    una situación, los gestos universales paso a paso, lo que no
+ *    hay que hacer y la regla de las dosis. LÍMITE DURO: cada
+ *    afirmación se traza línea a línea a las guías del propio pack
+ *    Esencial (ver el comentario junto a HEALTH_SAFE_TEXT); nada de
+ *    contenido clínico nuevo. Sin números de teléfono escritos (la
+ *    prueba de la casa lo prohíbe: el número cambia por país) y con
+ *    el ritmo de la RCP en palabras, no en dígitos, por la misma
+ *    regla. La mejora se mide contra el conjunto FRESCO 03.
+ *
+ * 6. LA PUERTA MANDA TAMBIÉN SOBRE INVESTIGAR (R-07, ronda física
+ *    de la 0.1.68). Con el modo Investigación profunda activo, el
+ *    turno entraba en ese pipeline antes de que ninguna puerta
+ *    mirara el texto: una emergencia dictada («¿qué hago si alguien
+ *    se está atragantando?», con el «alguien» del dictado convertido
+ *    en «argument») salió como tema de investigación, en inglés y
+ *    sobre un debate. El detector SÍ disparaba con la frase exacta;
+ *    lo que faltaba era consultarlo. `gatePreemptsDeepResearch` es
+ *    la decisión única que ChatScreen aplica antes de la bifurcación
+ *    profunda y que el pipeline reaplica tras descomponer. La misma
+ *    ronda midió la fragilidad a nivel de letra: una letra caída
+ *    dentro de la palabra-signo rompía las frases exactas en las
+ *    tres caras — de ahí la cara por raíz de `isEmergencySituation`
+ *    (punto junto a EMERGENCY_STEMS) y las frases de respiración que
+ *    faltaban («le cuesta mucho respirar», «se está asfixiando»).
+ *
+ * 7. LA RAÍZ SOLA NO DECLARA LA SITUACIÓN (H-05, revisión
+ *    adversaria de la cadena, 2026-11-01). La cara por raíz cazaba
+ *    también la metáfora: «Why do golfers choke under pressure?»
+ *    salía situación de emergencia (y cerraba la puerta de salud)
+ *    porque «chok» casa por principio de palabra y el sujeto
+ *    genérico de la metáfora no se distingue de una víctima por la
+ *    raíz sola. Desde este arreglo la raíz exige CONTEXTO DE
+ *    CUERPO (ver `stemHitHasBodyContext`): la construcción del
+ *    suceso en curso (auxiliar ante la palabra-signo, enclítico
+ *    reflexivo) o una víctima o petición de ayuda cerca de la
+ *    palabra-signo. Las formas dictadas medidas en la ronda —
+ *    «se esta tragantando», «se esta atragantndo», «my toddler is
+ *    chokng», «o bebê está engasgndo» — traen todas ese contexto y
+ *    siguen disparando; los sujetos genéricos de la metáfora
+ *    (golfers, players, students) no son señal a propósito. Las
+ *    frases-signo exactas no cambian: siguen disparando solas.
+ *
+ * 8. LA FRONTERA NO ES LA LISTA CERRADA DE VÍCTIMAS NI EL ÚNICO
+ *    EVENTO (ADV2-07 + ADV-E1, segunda adversaria y corrida de
+ *    Grok, 2026-11-01). La cura de H-05 dejó fuera emergencias
+ *    reales en dos dimensiones medidas: la víctima nombrada con el
+ *    sustantivo corriente de un parte (señor, vecino, cliente,
+ *    paciente, patient…) en forma de participio o telegráfica, y
+ *    los eventos que no son atragantamiento (desmayo, ahogamiento,
+ *    inconsciencia, con sus tallos y frases-signo en las tres
+ *    lenguas). La pieza ensancha las LISTAS con el criterio escrito
+ *    junto a cada una — no la ventana: la cara permisiva sin
+ *    ventana de la corrida externa se midió y se rechazó (reabre
+ *    la metáfora entera y ni así ve las formas telegráficas). Y
+ *    nace la cara telegráfica: el parte dictado a secas («atragan-
+ *    tado», «Choking at table four!») declara por su forma —
+ *    mensaje cortísimo, sin pregunta, con la palabra-signo en
+ *    participio, gerundio o estado, y sin marcadores de tema.
+ *
+ * 9. EL PREFIJO SIN RESTO DECLARABA CUERPOS QUE NO HAY (ADV2-08 +
+ *    ADV-E2, 2026-11-01). El casado de señales por principio de
+ *    palabra cazaba «helpful» por «help», «babysitter» por «baby»
+ *    y «personal» por «person»: desde este arreglo la señal casa
+ *    solo si la palabra ES la señal o la señal + resto ∈ {s, es}
+ *    (el plural; los femeninos van como entradas propias). Y dos
+ *    vetos nuevos cierran el tema de seguridad de producto
+ *    («choking hazard» y sus formas) y el modismo «choke back»,
+ *    que no tiene gemelo físico. Lo demás de la familia queda
+ *    como PRECIO DECLARADO y fixturado, sin código: la metáfora
+ *    familiar («my son choked at his piano recital») y la
+ *    metáfora con auxiliar de ADV-E2 («se atragantó en el
+ *    debate») — esta última medida sin cura limpia: la pierna
+ *    que la deja pasar (el «se» auxiliar) es la misma que
+ *    sostiene la forma real «Se atragantó con una espina», y la
+ *    frase metafórica es idéntica, palabra a palabra, a su
+ *    gemela verdadera; todo veto de marco vetaría la emergencia
+ *    real con esa frase exacta.
+ *
+ * 10. LA REANIMACIÓN EN CURSO TAMBIÉN SE CUENTA (F-1, auditoría
+ *    adversaria de la práctica de RCP de la 0.1.76, 2026-11-06).
+ *    La batería de enrutado de esa auditoría midió que contar una
+ *    reanimación en curso («está haciendo rcp», «they are doing
+ *    cpr on him», «estão fazendo rcp nele») no disparaba ninguna
+ *    cara, y que varias formas corrientes de preguntar cómo se
+ *    hace («cómo se hace la rcp», «como faço rcp», dictadas sin
+ *    signos) tampoco cerraban la puerta de salud: sin el pack,
+ *    esas frases caían al modelo sin el suelo del texto seguro.
+ *    La cura es la de la casa, editar las listas: los signos de
+ *    situación aprenden las formas de reanimación en curso de las
+ *    tres lenguas (quien lo cuenta no pregunta: es la cara de
+ *    situación, no la de salud), las raíces aprenden «reanim»,
+ *    «resuscit» y las siglas «rcp»/«cpr» bajo la misma disciplina
+ *    de contexto de cuerpo de H-05, el léxico de salud aprende
+ *    «reanimacion»/«reanimacao»/«resuscitation» y la sigla que al
+ *    portugués le faltaba («rcp»), y las señales de situación de
+ *    la puerta de salud aprenden «como hago», «como hacer»,
+ *    «como se hace» y sus gemelas portuguesas. La cura se mide
+ *    contra un conjunto ciego FRESCO (conjunto 04,
+ *    estudios/E3-J10-APERTURA.md), no contra la batería que la destapó
+ *    (regla del sello); las doce frases de la auditoría quedan
+ *    fixturadas como regresión en las pruebas de esta puerta.
+ *
+ * Puro, sin dependencias de UI, 100% testeable.
+ */
+
+import { crisisQuestionKind, emergencyQuestionKind, foldText, type FactLang } from "../rag/packFacts.js";
+import { parsePackChunkId } from "../rag/packSource.js";
+import type { RetrievedChunk } from "../rag/retrieve.js";
+import { matchSafetyAnswer } from "../agent/loop/safetyAnswers.js";
+import { allFrom, type SentenceProvenance } from "../rag/provenance.js";
+import { splitSentences } from "../rag/grounding.js";
+
+export type GateLang = FactLang;
+
+// ------------------------------------------------- emergencia primero
+
+/**
+ * ¿Es este texto una emergencia para las rutas fijas? Los mismos
+ * detectores que send() consulta al abrir: la tabla de seguridad
+ * (monóxido y números de emergencia), la clase de pregunta de número
+ * de emergencia de los packs y la clase de pregunta de crisis. Desde
+ * el cierre de F-B1 también la emergencia viva contada
+ * (`isEmergencySituation`): su respuesta es la guía por recuperación
+ * o el texto seguro fijo, y tampoco debe hacer cola tras una
+ * generación en curso.
+ */
+export function isEmergencyText(text: string, lang: GateLang): boolean {
+  if (!text || text.trim().length === 0) return false;
+  return (
+    matchSafetyAnswer(text, lang) !== null ||
+    emergencyQuestionKind(text) !== null ||
+    crisisQuestionKind(text) ||
+    isEmergencySituation(text)
+  );
+}
+
+// ------------------------------------------------------- puerta de salud
+
+/**
+ * Términos de salud por lengua, ya plegados (minúsculas, sin acentos).
+ * `w` = palabra entera; `p` = principio de palabra (familias: sangr-,
+ * vomit-, engasg-). Listas revisables a propósito: la puerta es
+ * léxica y sus errores se corrigen editando la lista, no el modelo.
+ *
+ * Al final de cada lista `w` va el campo de MEDICAMENTOS Y DOSIS
+ * (cierre de F-B2, evaluación ciega 01: «¿qué dosis de paracetamol…?»
+ * no traía ningún término y caía al modelo). Fuera a propósito, por
+ * el casado por prefijo de `isHealthQuestion`: «pill»/«tablet» en
+ * inglés atraparían «pillar»/«tabletop», «remedio» en portugués
+ * atraparía el verbo «remediar» (arreglar una fuga) y «pastilla» en
+ * español la «pastilla de jabón» — homógrafos que no son salud.
+ */
+const HEALTH_TERMS: Record<GateLang, { w: string[]; p: string[] }> = {
+  es: {
+    w: [
+      "fiebre", "tos", "diarrea", "mareo", "mareos", "nauseas", "hemorragia", "fractura", "asma", "diabetes",
+      "alergia", "embarazo", "embarazada", "intoxicacion", "envenenamiento", "mordedura", "picadura", "desmayo",
+      "convulsion", "convulsiones", "ahogamiento", "insolacion", "hipotermia", "sobredosis", "erupcion",
+      "infeccion", "gripe", "resfriado", "covid", "antibiotico", "antibioticos", "vacuna", "vacunas", "torniquete",
+      "esguince", "urticaria", "anemia", "apendicitis", "neumonia", "bronquitis", "otitis", "conjuntivitis",
+      "gastroenteritis", "deshidratacion", "parto", "rcp", "reanimacion", "hipertension", "sarpullido", "electrocucion",
+      "dolor de cabeza", "dolor de pecho", "dolor de espalda", "dolor abdominal", "dolor de muelas",
+      "primeros auxilios", "golpe de calor", "presion arterial",
+      "dosis", "dosificacion", "medicamento", "medicamentos", "medicacion", "medicina", "medicinas",
+      "paracetamol", "ibuprofeno", "aspirina", "amoxicilina", "omeprazol", "metamizol", "miligramos",
+      // Auditoría completa (F-6): infarto, ictus e ingestión, que la
+      // puerta no conocía en ninguna lengua.
+      "infarto", "ataque al corazon", "ictus", "derrame cerebral",
+      // La ingestión, solo con su objeto (no «se tragó el cuento»).
+      "se trago una pila", "se trago pastillas", "se trago una moneda", "se trago un iman",
+      "bebio lejia", "se bebio la lejia", "trago lejia",
+      // Auditoría 0.1.93: lo que la gente escribe y la puerta no conocía
+      // (batería de 62 preguntas reales: 40 se iban al modelo sin fuentes).
+      // El dolor contado, los medicamentos de uso corriente, la presión y
+      // el azúcar como se dicen, las picaduras contadas, y el daño a uno
+      // mismo, que nunca debe contestarlo un modelo de memoria.
+      "me duele", "me duelen", "le duele", "le duelen", "me duela", "le duela", "dolor",
+      "pastilla", "jarabe", "inyeccion", "insulina", "tramadol", "warfarina", "naproxeno", "diclofenaco",
+      "ketorolaco", "loratadina", "clonazepam", "diazepam", "morfina", "antihistaminico", "anticoagulante",
+      "presion alta", "presion baja", "azucar en la sangre", "se me bajo el azucar", "se me subio el azucar",
+      "glucosa", "migrana", "jaqueca", "taquicardia", "palpitaciones", "ataque de panico",
+      "alacran", "escorpion", "me pico", "le pico", "me mordio", "le mordio", "gripa",
+      "remedio casero", "remedio para", "contusion", "hinchazon", "inflamacion",
+      "cloro en los ojos", "cloro en el ojo", "se me durmio", "se le durmio", "hormigueo",
+      "no quiero vivir", "quiero morir", "quiero morirme", "matarme", "quitarme la vida", "hacerme dano",
+      "sintoma", "enfermedad", "enfermo", "enferma", "medico", "doctor", "hospital", "urgencias", "ambulancia",
+      "un lunar", "orinar", "orina", "tragar", "hinchado", "se me hincho", "se le hincho", "se toma cloro", "se tomo cloro", "tomo cloro", "bebio cloro",
+      "se golpeo la cabeza", "golpe en la cabeza", "se pego en la cabeza", "me pegue en la cabeza",
+      "un bulto en", "me salio un bulto", "tengo un bulto", "una bola en", "se le subio la temperatura",
+      "tiene temperatura", "tengo temperatura", "calambre", "confunde las palabras", "antigripal", "falta de aire",
+      "cancer",
+    ],
+    p: ["sangr", "vomit", "quemadur", "herid", "alergic", "diabetic", "atragant", "convuls", "desmay", "intoxi", "entumec", "suicid", "inflam"],
+  },
+  en: {
+    w: [
+      "fever", "cough", "diarrhea", "dizziness", "nausea", "hemorrhage", "haemorrhage", "fracture", "asthma",
+      "diabetes", "diabetic", "allergy", "pregnant", "pregnancy", "poisoning", "poisoned", "bite", "sting",
+      "fainted", "fainting", "seizure", "seizures", "drowning", "heatstroke", "hypothermia", "overdose", "rash",
+      "infection", "flu", "covid", "antibiotic", "antibiotics", "vaccine", "vaccines", "tourniquet", "sprain",
+      "urticaria", "anemia", "appendicitis", "pneumonia", "bronchitis", "dehydration", "labour", "labor", "cpr",
+      "resuscitation", "hypertension", "electrocution", "headache", "toothache",
+      "chest pain", "back pain", "abdominal pain", "first aid", "heat stroke", "blood pressure",
+      "dose", "dosage", "medication", "medications", "medicine", "milligrams",
+      "paracetamol", "acetaminophen", "ibuprofen", "aspirin", "amoxicillin",
+      // Auditoría completa (F-6).
+      "heart attack", "cardiac arrest", "having a stroke", "had a stroke",
+      // Ingestion, only with its object (not «the ATM swallowed my card»).
+      "swallowed a battery", "swallowed pills", "swallowed a coin", "swallowed a magnet",
+      "drank bleach", "swallowed bleach",
+      // Audit 0.1.93: everyday words the gate did not know.
+      "tylenol", "advil", "benadryl", "melatonin", "insulin", "warfarin", "blood thinner", "naproxen",
+      "tramadol", "oxycodone", "xanax", "pill", "painkiller", "lethal dose",
+      "hurts", "pain", "numb", "dizzy", "heart is racing", "racing heart", "palpitations",
+      "deep cut", "stitches", "swollen", "swelling", "migraine", "panic attack", "scorpion",
+      "burn", "burned", "burnt",
+      "kill myself", "want to die", "end my life", "hurt myself", "self harm",
+      "symptom", "sick", "illness", "doctor", "hospital", "ambulance", "emergency room",
+      "hit his head", "hit her head", "hit my head", "hit their head", "head injury", "concussion",
+      "throat is closing", "throat closing", "antidepressant", "sleeping pill",
+      "earache", "contractions", "blood sugar", "feels hot", "cancer", "cancerous", "hurting myself",
+      "has a temperature", "high temperature", "short of breath", "shortness of breath",
+    ],
+    p: ["bleed", "vomit", "wound", "allerg", "chok", "convuls", "sangr", "suicid", "anaphyla"],
+  },
+  pt: {
+    w: [
+      "febre", "tosse", "diarreia", "tontura", "enjoo", "hemorragia", "fratura", "asma", "diabetes",
+      "alergia", "gravidez", "gravida", "intoxicacao", "envenenamento", "mordida", "picada", "desmaio",
+      "convulsao", "convulsoes", "afogamento", "insolacao", "hipotermia", "overdose", "erupcao", "infeccao",
+      "gripe", "resfriado", "covid", "antibiotico", "antibioticos", "vacina", "vacinas", "torniquete",
+      "entorse", "urticaria", "anemia", "apendicite", "pneumonia", "bronquite", "desidratacao", "parto",
+      "rcp", "reanimacao", "hipertensao", "eletrocucao",
+      "dor de cabeca", "dor no peito", "dor nas costas", "dor abdominal", "dor de dente",
+      "primeiros socorros", "pressao arterial",
+      "dose", "dosagem", "medicamento", "medicamentos",
+      "paracetamol", "ibuprofeno", "aspirina", "dipirona", "amoxicilina", "miligramas",
+      // Auditoría completa (F-6).
+      "infarto", "ataque cardiaco", "avc", "derrame cerebral",
+      // A ingestão, só com o objeto.
+      "engoliu uma pilha", "engoliu remedios", "engoliu comprimidos", "engoliu uma moeda", "engoliu um ima",
+      "bebeu agua sanitaria", "engoliu agua sanitaria",
+      // Auditoria 0.1.93: palavras do dia a dia que a porta não conhecia.
+      "dor", "doi", "remedio", "comprimido", "insulina", "tramadol", "varfarina", "naproxeno",
+      "pressao alta", "pressao baixa", "pressao esta alta", "pressao esta baixa", "acucar no sangue", "glicose", "enxaqueca", "taquicardia",
+      "palpitacoes", "ataque de panico", "escorpiao", "fui picado", "fui picada", "fui mordido", "fui mordida",
+      "inchaco", "formigamento",
+      "quero morrer", "me matar", "tirar minha vida", "nao quero viver",
+      "sintoma", "doente", "doenca", "medico", "hospital", "ambulancia",
+      "bateu a cabeca", "bati a cabeca", "falta de ar", "caroco", "cancer",
+    ],
+    p: ["sangr", "vomit", "queimadur", "ferid", "alergic", "diabetic", "engasg", "convuls", "desmai", "intoxi", "suicid"],
+  },
+};
+
+/** Contextos que vetan la puerta: historia y metáforas conocidas. */
+const HEALTH_EXCLUSIONS = [
+  "historia de",
+  "historia del",
+  "history of",
+  "historia do",
+  "historia da",
+  "fiebre del oro",
+  "gold fever",
+  "febre do ouro",
+  // Auditoría 0.1.93: homónimos de uso corriente que no son salud.
+  "sangria",
+  "pastillas de freno", "pastilla de freno", "pastilhas de freio",
+  "burn a cd", "burn a dvd", "burn a disc", "burn calories", "burn fat", "burnout",
+  "labor market", "labour market", "labor day", "labor union", "labour party", "labor law",
+  "rash guard", "pain point", "horoscopo", "horoscope", "zodiac", "zodiaco",
+  // La ficción que se está escribiendo no es una situación (las señales
+  // nuevas, «estoy», «i», la habrían contado como tal).
+  "escribiendo un cuento", "escribiendo una novela", "escribiendo una historia", "escribiendo un guion",
+  "writing a story", "writing a novel", "writing a script", "writing a short story",
+  "escrevendo um conto", "escrevendo um romance", "escrevendo uma historia",
+];
+
+/**
+ * Marcos históricos o culturales, ya plegados (arreglo F-B3, punto 4
+ * de la cabecera): la pregunta es SOBRE el pasado de una enfermedad
+ * o de la salud — siglos y épocas, muertes contadas, pandemias y
+ * plagas nombradas, guerras mundiales, novelas y películas — y no
+ * sobre una situación presente. Frases, como todo el léxico de la
+ * casa: un marco nuevo se añade aquí, no al modelo. La comparación
+ * se hace sobre el texto con espacios a ambos lados, así que un
+ * marco al principio de la frase también veta (los vetos antiguos
+ * exigían un espacio delante y dejaban pasar «Historia de…» a secas
+ * al abrir la pregunta).
+ */
+const HISTORY_FRAMES = [
+  "historia de", "historia del", "historia sobre", "en la historia", "a lo largo de la historia",
+  "siglo", "murieron", "fallecieron", "cuantas personas murieron", "cuantos murieron",
+  "gripe espanola", "peste negra", "peste bubonica", "en aquella epoca", "antiguamente",
+  "en la antiguedad", "primera guerra mundial", "segunda guerra mundial",
+  "en una novela", "en la novela", "en una pelicula",
+  "history of", "history about", "in history", "throughout history",
+  "century", "how many people died", "how many died", "people died",
+  "spanish flu", "black death", "bubonic plague", "in those days", "back then",
+  "in ancient times", "first world war", "second world war",
+  "in a novel", "in the novel", "in a film", "in the film", "in a movie", "in the movie",
+  "historia do", "historia da", "na historia", "ao longo da historia",
+  "seculo", "morreram", "quantas pessoas morreram", "quantos morreram", "pessoas morreram",
+  "gripe espanhola", "peste bubonica", "naquela epoca", "antigamente",
+  "na antiguidade", "primeira guerra mundial", "segunda guerra mundial",
+  "num romance", "no romance", "num filme", "no filme",
+];
+
+/**
+ * Verbos en pasado que, junto a un año, cuentan el suceso como
+ * pasado («a pandemia de gripe de 1957 afetou…»): el año solo no
+ * veta — una situación presente puede nombrar un año («tengo
+ * fiebre desde 2023») — pero año + pasado sí es marco histórico.
+ */
+const HISTORY_PAST_MARKERS = [
+  " fue ", " foi ", " was ", " were ", " died", " happened",
+  " murieron", " fallecieron", " morreram",
+  " afetou", " afecto", " passou", " paso ", " ocorreu", " ocurrio",
+  " causou", " causo ", " deixou", " dejo ", " comecou", " comenzo",
+  " terminou", " termino ", " acabou", " acabo ",
+];
+
+const PAST_YEAR = /\b(1[0-9]{3}|20[0-2][0-9])\b/;
+
+/** ¿Lleva el texto (ya plegado) un marco histórico o cultural? */
+function hasHistoricalFrame(folded: string): boolean {
+  const hay = ` ${folded} `;
+  if (HISTORY_FRAMES.some((x) => hay.includes(` ${x} `))) return true;
+  return PAST_YEAR.test(folded) && HISTORY_PAST_MARKERS.some((m) => hay.includes(m));
+}
+
+/**
+ * Señales de que el texto PREGUNTA o CUENTA una situación (la puerta
+ * no se cierra sobre un tema suelto: «fiebre amarilla» a secas sigue
+ * su camino; «mi hijo tiene fiebre» o «¿qué es la fiebre?» no).
+ */
+const SITUATION_CUES = [
+  "?", "¿",
+  " mi ", " me ", " tengo ", " sufro ", " duele ", " que hago ", " como trat", " como cur", " ayuda ",
+  " my ", " i have ", " i feel ", " hurts ", " what should ", " how do i ", " how to treat ",
+  " meu ", " minha ", " estou ", " sinto ", " doi ", " o que fazer ", " como trat",
+  // F-1 (auditoría de la RCP, 2026-11-06): «cómo se hace» y sus
+  // hermanas, tal como se dictan, sin signos de interrogación.
+  // La señal sola no cierra la puerta: hace falta además un
+  // término de salud, así que «como hacer una mesa» sigue fuera.
+  " como hago ", " como hacer ", " como se hace ",
+  " como faco ", " como fazer ", " como se faz ",
+  // Auditoría 0.1.93: en el teléfono se pregunta sin «¿?» ni tildes
+  // («cuanto ibuprofeno puedo tomar al dia» traía término y ninguna
+  // señal, y se iba al modelo). Las señales solas no cierran la
+  // puerta: hace falta además un término de salud.
+  " cuanto ", " cuanta ", " cuantos ", " cuantas ", " que ", " cual ", " como ", " puedo ", " puede ",
+  " debo ", " sirve ", " le ", " tiene ", " tienen ", " estoy ", " esta ", " siento ", " quiero ", " necesito ",
+  " how ", " what ", " which ", " can ", " should ", " is ", " are ", " does ", " i ", " he ", " she ", " has ", " need ",
+  " quanto ", " quanta ", " quantos ", " quantas ", " qual ", " posso ", " pode ", " devo ", " serve ",
+  " tem ", " preciso ", " tomei ", " fui ", " quero ",
+];
+
+const ALL_TERMS: Array<{ w: string[]; p: string[] }> = Object.values(HEALTH_TERMS);
+
+/**
+ * ¿Pregunta (o cuenta) el texto algo de salud? Léxico puro: un
+ * término de salud en cualquier lengua de la casa (la gente mezcla),
+ * una señal de pregunta o situación, y ningún veto de contexto.
+ */
+/**
+ * Auditoría 0.1.93: los términos de la lista `w` son PALABRAS (la lista
+ * `p` es la de raíces). El casado anterior aceptaba además el término
+ * como prefijo de otra palabra, y «tos» casaba con «tostada», «flu» con
+ * «fluent», «labor» con «laboratory», «sting» con «stingy»: preguntas
+ * corrientes recibían el texto de salud. Palabra entera, o su plural.
+ */
+function hasWord(folded: string, t: string): boolean {
+  return folded.includes(` ${t} `) || folded.includes(` ${t}s `) || folded.includes(` ${t}es `);
+}
+
+/**
+ * Cuántos términos de salud DISTINTOS trae el texto (ya plegado). El
+ * mismo término en dos lenguas («asma») cuenta una vez, y uno contenido
+ * en otro («dolor» dentro de «dolor de cabeza») no suma: un tema suelto
+ * sigue siendo un tema suelto.
+ */
+function healthTermHits(folded: string): number {
+  const hits = new Set<string>();
+  for (const { w, p } of ALL_TERMS) {
+    for (const t of w) if (hasWord(folded, t)) hits.add(t);
+    for (const t of p) if (folded.includes(` ${t}`)) hits.add(t);
+  }
+  const all = [...hits];
+  return all.filter((t) => !all.some((o) => o !== t && o.includes(t))).length;
+}
+
+export function isHealthQuestion(text: string): boolean {
+  if (!text) return false;
+  const folded = foldText(text);
+  if (folded.trim().length === 0) return false;
+  if (HEALTH_EXCLUSIONS.some((x) => folded.includes(` ${x} `) || folded.includes(` ${x}`))) return false;
+  if (hasHistoricalFrame(folded)) return false;
+  // H-05: la familia inglesa «chok» comparte raíz con la metáfora
+  // deportiva («choke under pressure» = fallar bajo presión), así
+  // que cuando es el ÚNICO término que casa, no basta: la puerta
+  // exige el contexto de cuerpo de la cara de situación o una
+  // señal de primera persona («how do I stop choking?» sigue
+  // dentro; «why do golfers choke…?» queda fuera). Las demás
+  // familias — «atragant» y «engasg» incluidas — no comparten esa
+  // homografía en su uso asentado y su casado no se toca: la
+  // pregunta instructiva genérica sobre atragantamiento sigue
+  // cerrando esta puerta como hasta ahora.
+  const chokOnlyHit =
+    folded.includes(" chok") &&
+    !ALL_TERMS.some(
+      ({ w, p }) =>
+        w.some((t) => hasWord(folded, t)) ||
+        p.some((t) => t !== "chok" && folded.includes(` ${t}`)),
+    );
+  const hasTerm = chokOnlyHit
+    ? stemHitHasBodyContext(folded) || CHOKE_FIRST_PERSON_CUES.some((c) => folded.includes(c))
+    : ALL_TERMS.some(
+        ({ w, p }) => w.some((t) => hasWord(folded, t)) || p.some((t) => folded.includes(` ${t}`)),
+      );
+  if (!hasTerm) return false;
+  // Auditoría 0.1.93: dos términos de salud juntos ya cuentan una
+  // situación («vomite sangre» no trae ninguna señal de pregunta).
+  if (!chokOnlyHit && healthTermHits(folded) >= 2) return true;
+  return SITUATION_CUES.some((c) => folded.includes(c) || text.includes(c));
+}
+
+// -------------------------------------------- situación de emergencia
+
+/**
+ * Signos de una emergencia VIVA, contados tal cual se ven, ya
+ * plegados. Frases, no temas: cada entrada describe el suceso en
+ * curso (respiración que falta, atragantamiento o ahogamiento en
+ * gerundio, inconsciencia, el pecho agarrado, humo o fuego en un
+ * lugar, un sangrado que no para). Las formas con contracción
+ * inglesa van en su forma plegada («can t breathe» es lo que queda
+ * de "can't breathe" tras plegar). Listas revisables, como las de
+ * salud: un signo nuevo se añade aquí, no al modelo.
+ */
+const EMERGENCY_SIGNS: Record<GateLang, string[]> = {
+  es: [
+    "no puede respirar", "no pueden respirar", "no respira", "no respiran", "sin respirar",
+    "dejo de respirar", "paro de respirar",
+    "se esta ahogando", "esta ahogandose", "ahogandose", "se ahoga",
+    "se esta atragantando", "atragantandose",
+    // ADV-E1: los eventos nuevos también se cuentan con frase-signo
+    // (el suceso ya ocurrió y se nombra en pasado, sin víctima cerca
+    // que la cara por raíz pueda leer).
+    "se desmayo", "se ahogo", "se desvanecio",
+    "cuesta respirar", "cuesta mucho respirar",
+    // 0.1.99 T-01 (m-10, auditoría 2026-11-14): la respiración
+    // contada con su marca de gravedad dentro de la frase («mi
+    // padre respira muy mal», sonda P-18a), la forma corriente que
+    // ninguna cara veía. La raíz suelta no entra como raíz en
+    // EMERGENCY_STEMS a propósito: «respir-» comparte principio
+    // con temas cotidianos (ejercicios de respiración, «un
+    // respiro» como descanso), y las raíces de ahí no comparten
+    // principio con temas cotidianos.
+    "respira muy mal", "respira mal", "respirando muy mal", "respirando mal",
+    "respiro muy mal", "respiro mal",
+    "respira con dificultad", "respirando con dificultad",
+    "esta inconsciente", "quedo inconsciente", "no responde",
+    "se agarra el pecho", "agarrandose el pecho", "se aprieta el pecho",
+    "humo saliendo", "saliendo humo", "sale humo", "hay humo", "hay fuego",
+    "salen llamas", "saliendo llamas", "esta ardiendo",
+    "sangrando mucho", "no para de sangrar", "esta convulsionando",
+    // Auditoría completa (F-5): la primera persona de la respiración
+    // («no puedo respirar»; el inglés ya traía «can t breathe») y los
+    // eventos que el inglés o el portugués nombraban y el español no.
+    "no puedo respirar", "no podemos respirar",
+    "esta teniendo una convulsion", "le esta dando una convulsion",
+    "esta teniendo un infarto", "le esta dando un infarto",
+    "esta teniendo un ictus", "le esta dando un ictus", "le esta dando un derrame",
+    // F-1 (auditoría de la RCP, 2026-11-06): la reanimación en
+    // curso, contada por quien la ve o la hace. El suceso ES la
+    // situación: no se exige señal de pregunta.
+    "esta haciendo rcp", "estan haciendo rcp", "le esta haciendo rcp", "le estan haciendo rcp",
+    "haciendo rcp", "haciendole rcp",
+    "esta haciendo reanimacion", "estan haciendo reanimacion",
+    "le esta haciendo reanimacion", "le estan haciendo reanimacion",
+    "haciendo reanimacion", "haciendole reanimacion",
+    // 0.1.87 (giro del gas): la FUGA DE GAS contada. El signo es el
+    // olor o la fuga misma, el suceso en curso: el giro de la 0.1.86
+    // no disparaba ninguna cara de la puerta. El tema suelto (el
+    // precio de reparar, cómo funciona un detector) no trae signo y
+    // no declara; las metáforas asentadas del gas van a los vetos.
+    "huele a gas", "huele mucho a gas", "olor a gas", "fuga de gas", "hay una fuga de gas",
+    "esta saliendo gas", "saliendo gas",
+    // Auditoría 0.1.93: sucesos en curso que no son del cuerpo y la
+    // puerta no conocía (13 de 21 de la batería se iban al modelo).
+    "se esta incendiando", "se incendia", "se esta quemando", "hay un incendio", "incendio forestal",
+    "se esta inundando", "se inunda", "hay una inundacion",
+    "hubo un temblor", "esta temblando", "hubo un terremoto", "hubo un sismo",
+    "se cayo un cable", "cable caido", "cable de luz caido",
+    // §4 del bloque del loop (H-LOOP-4): la CAÍDA NARRADA — el
+    // suceso contado en pasado («se cayó de una escalera»), que
+    // ninguna cara veía: el único «cayó» de la lista era el del
+    // cable. El sustantivo suelto («caída») no entra, en la
+    // forma de la lista, que caza sucesos y no temas; y la
+    // metáfora del precio no trae estas formas («se cayó el
+    // precio» no es «se cayo de»), como la batería de la pieza
+    // cobra en su guarda.
+    "se cayo de", "se callo de", "cayo de una",
+    "tratando de entrar a mi casa", "intentan entrar a mi casa", "entraron a mi casa",
+    "hay un choque", "hubo un choque", "hay heridos", "se volco",
+    "atrapado en el elevador", "atrapada en el elevador", "atrapado en el ascensor", "atrapada en el ascensor",
+    "estoy atrapado", "estoy atrapada",
+    "atropello a", "lo atropello", "la atropello", "atropellaron a", "lo atropellaron", "la atropellaron",
+    "se desbordo", "esta entrando agua", "el agua esta entrando", "deja de respirar",
+    "tirado en la calle", "tirada en la calle", "tirado en el piso", "tirada en el piso", "no se mueve",
+    "exploto", "hubo una explosion", "encerrado en un carro", "encerrado en el coche", "encerrada en un carro",
+    "sobre los cables",
+  ],
+  en: [
+    "not breathing", "is not breathing", "stopped breathing", "no longer breathing",
+    "can t breathe", "cant breathe", "cannot breathe",
+    "is choking", "choking on", "started choking", "is drowning",
+    "struggling to breathe", "hard to breathe", "difficulty breathing",
+    // 0.1.99 T-01 (m-10): the same family as the Spanish signs —
+    // the breathing told with its severity inside the phrase.
+    "breathing very badly", "breathing badly", "breathing poorly", "breathing with difficulty",
+    "clutching his chest", "clutching her chest", "clutching my chest", "clutching their chest",
+    "is unconscious", "was unconscious", "found unconscious", "not responding", "lost consciousness",
+    // ADV-E1: «passed out», la frase-signo corriente del desmayo.
+    "passed out",
+    "smoke coming", "smoke pouring", "full of smoke", "there is a fire", "there s a fire",
+    "house on fire", "kitchen on fire", "building on fire", "car on fire", "room on fire",
+    "bleeding a lot", "bleeding heavily", "won t stop bleeding",
+    // Auditoría completa (F-5): la contracción corriente («isn't
+    // breathing» se pliega a «isn t breathing», que no contiene «not
+    // breathing») y las convulsiones, que es y pt ya traían.
+    "isn t breathing", "wasn t breathing", "aren t breathing",
+    "having a seizure", "is seizing", "is convulsing",
+    "having a heart attack", "having a stroke",
+    // F-1 (CPR practice audit, 2026-11-06): resuscitation already
+    // in progress, as a bystander tells it.
+    "doing cpr", "doing chest compressions", "performing cpr",
+    // 0.1.87 (giro del gas): THE GAS LEAK, as told — the smell or
+    // the leak itself is the running event. The bare topic (repair
+    // prices, how a detector works) carries no sign and stays out;
+    // the settled gas metaphors are in the vetoes.
+    "smells like gas", "smell of gas", "smell gas", "gas leak", "gas is leaking", "leaking gas",
+    // Audit 0.1.93: running events the gate did not know.
+    "house is on fire", "kitchen is on fire", "building is on fire", "car is on fire", "room is on fire",
+    "apartment is on fire", "stove is on fire", "oven is on fire", "caught fire", "is flooding", "flood coming", "flooding my",
+    "breaking into my", "broke into my", "someone is in my house",
+    "carbon monoxide alarm", "carbon monoxide detector",
+    "there was an earthquake", "earthquake just", "car crash", "car accident",
+    // H-LOOP-4: the fall, as told («fell off a ladder»).
+    "fell off a", "fell down the stairs", "fell from a",
+    "i m trapped", "i am trapped", "is trapped",
+    "smoke alarm", "i see smoke", "collapsed", "is sinking",
+  ],
+  pt: [
+    "nao esta respirando", "nao respira", "nao respiram", "parou de respirar", "sem respirar",
+    "deixou de respirar",
+    "esta engasgando", "engasgando", "engasgou",
+    // ADV-E1: os eventos novos em português («desmaiou», «se afogou»).
+    "desmaiou", "se afogou",
+    "dificuldade para respirar", "dificuldade em respirar",
+    // 0.1.99 T-01 (m-10): a mesma família dos signos em espanhol
+    // («respira muito mal»); «respira mal» já entra pela lista
+    // espanhola, porque ALL_SIGNS junta as três línguas.
+    "respira muito mal", "respirando muito mal",
+    "respira com dificuldade", "respirando com dificuldade",
+    "esta inconsciente", "ficou inconsciente", "nao responde",
+    "segurando o peito", "apertando o peito", "mao no peito",
+    "fumaca saindo", "saindo fumaca", "tem fogo", "pegando fogo", "em chamas", "saindo chamas",
+    "sangrando muito", "nao para de sangrar", "esta convulsionando",
+    // Auditoría completa (F-5): «não consigo respirar», la forma
+    // corriente que el portugués no traía, y los eventos de las otras
+    // dos lenguas.
+    "nao consigo respirar", "nao consegue respirar", "nao conseguem respirar",
+    "esta tendo uma convulsao", "esta tendo um infarto", "esta tendo um avc",
+    // F-1 (auditoria da RCP, 2026-11-06): a reanimação em curso,
+    // contada por quem a vê ou a faz, nas duas variantes do
+    // português (a fazer / fazendo).
+    "esta fazendo rcp", "estao fazendo rcp", "fazendo rcp",
+    "esta a fazer rcp", "estao a fazer rcp",
+    "esta fazendo reanimacao", "estao fazendo reanimacao", "fazendo reanimacao",
+    "fazendo massagem cardiaca",
+    // 0.1.87 (giro do gás): O VAZAMENTO DE GÁS contado — o cheiro
+    // ou o vazamento é o evento em curso («cheiro de gás» se dobra
+    // a «cheiro de gas»). O tema solto (preço do reparo, como
+    // funciona um detector) não traz sinal e não declara.
+    "cheiro de gas", "vazando gas", "vazamento de gas", "esta vazando gas", "sai gas", "saindo gas",
+    // Auditoria 0.1.93: eventos em curso que a porta não conhecia.
+    "esta inundando", "esta alagando", "houve um terremoto",
+    "tentando entrar na minha casa", "arrombando a porta", "houve um acidente",
+    // H-LOOP-4: a queda contada («caiu de uma escada»).
+    "caiu de", "caiu da escada",
+    "estou preso", "estou presa",
+  ],
+};
+
+/**
+ * Contextos que vetan la cara de emergencia: marcos de ficción o
+ * ensayo y metáforas asentadas. La emergencia real no se presenta
+ * como «historia sobre…» ni se ahoga «en un vaso de agua».
+ */
+const EMERGENCY_VETOES = [
+  ...HEALTH_EXCLUSIONS,
+  "historia sobre", "cuento sobre", "cuento de", "novela sobre", "poema sobre",
+  "story about", "essay about", "poem about", "novel about",
+  "conto sobre", "poema sobre",
+  "en un vaso de agua", "en deudas", "in debt", "em dividas",
+  // ADV2-08: el TEMA de seguridad de producto no es un suceso —
+  // una consulta de prevención con la víctima nombrada («choking
+  // hazard for toddlers») declaraba situación viva y adelantaba
+  // la ruta protegida. (Su cara de salud, sellada por la familia
+  // de H-04, no se toca: estos vetos solo mandan sobre la cara de
+  // situación, como todos los de esta lista.)
+  "choking hazard",
+  "peligro de atragantamiento", "riesgo de atragantamiento",
+  "peligro de asfixia", "riesgo de asfixia",
+  "risco de engasgo", "perigo de asfixia",
+  // ADV2-08: el modismo «choke back» (contener las lágrimas o la
+  // risa) no tiene gemelo físico — nadie «choke back» un objeto —
+  // y el auxiliar que trae («was choking back…») le daba contexto
+  // de cuerpo a una frase sin cuerpo.
+  "choke back", "choking back", "choked back",
+  // 0.1.87 (giro del gas): las metáforas asentadas del gas («a todo
+  // gas», «dar gas», «full gas» como elogio deportivo) no son una
+  // fuga; sin ellas, el signo «saliendo gas» no las caza, pero
+  // quedan vetadas por nombre como las demás metáforas de la lista.
+  "a todo gas", "full gas", "dar gas",
+];
+
+const ALL_SIGNS: string[] = Object.values(EMERGENCY_SIGNS).flat();
+
+/**
+ * Raíces de situación (R-07, ronda física de la 0.1.68): la cara de
+ * frases exactas de arriba no tolera el ruido del dictado por voz —
+ * una sola letra caída dentro de la palabra-signo («tragantando»,
+ * «atragantndo») la dejaba invisible en las tres caras. Esta segunda
+ * cara casa por principio de palabra, el mismo patrón de prefijos de
+ * `HEALTH_TERMS.*.p`: «atragant» cubre la familia entera y sus
+ * pretéritos, «tragant» la misma palabra sin la primera letra (el
+ * error de dictado medido) y «asfixi» el sinónimo que las frases no
+ * traían («se está asfixiando»). Inglés y portugués llevan sus
+ * equivalentes («chok»/«asphyxi»/«suffocat», «engasg»/«asfixi»).
+ * Las raíces son específicas del atragantamiento y la asfixia: no
+ * comparten principio con temas cotidianos, y los vetos de contexto
+ * y el marco histórico se aplican ANTES, igual que con las frases —
+ * el pasado y la ficción siguen sin disparar. Desde H-05 la raíz
+ * tampoco dispara sola: exige el contexto de cuerpo de
+ * `stemHitHasBodyContext` (punto 7 de la cabecera), porque «chok»
+ * sí comparte principio con una metáfora cotidiana. ADV-E1 añade
+ * los tallos de los otros eventos del parte (desmayo, ahogamiento,
+ * inconsciencia — es/en/pt), que heredan la misma disciplina: sin
+ * contexto de cuerpo o forma telegráfica no declaran, y los vetos
+ * cerrados ya cubren sus metáforas asentadas («en deudas», «em
+ * dividas», «en un vaso de agua»). F-1 añade los tallos de la
+ * reanimación («reanim», «resuscit» y las siglas «rcp»/«cpr» como
+ * raíz acotada a la palabra que empieza por ellas) bajo la misma
+ * disciplina: la sigla como tema suelto («un curso de rcp») no
+ * declara nada sin cuerpo cerca, y la cara telegráfica exige
+ * además una forma de participio, gerundio o estado que la sigla
+ * desnuda no tiene.
+ */
+const EMERGENCY_STEMS: Record<GateLang, string[]> = {
+  es: ["atragant", "tragant", "asfixi", "desmay", "ahog", "inconscient", "reanim", "rcp"],
+  en: ["chok", "asphyxi", "suffocat", "faint", "drown", "unconsc", "resuscit", "cpr"],
+  pt: ["engasg", "asfixi", "desmai", "afog", "inconscient", "reanim", "rcp"],
+};
+
+const ALL_STEMS: string[] = Object.values(EMERGENCY_STEMS).flat();
+
+/**
+ * Auxiliares que, justo antes de la palabra-signo, forman la
+ * construcción del suceso en curso que el dictado produce: «se
+ * esta tragantando», «is chokng», «estou engasgando». Los plurales
+ * genéricos («are»/«were») quedan fuera a propósito: son los
+ * auxiliares de los sujetos de clase de la metáfora («golfers are
+ * choking under pressure» no gana contexto por ellos).
+ */
+const STEM_AUX_WORDS = new Set(["is", "was", "am", "esta", "estoy", "estou", "se"]);
+
+/**
+ * Víctimas y peticiones de ayuda que, CERCA de la palabra-signo
+ * (tres palabras a cada lado), la atan a un cuerpo: quien dicta
+ * una emergencia nombra a quién le pasa («mi hijo», «o bebê»,
+ * «someone», «ayuda»). Fuera a propósito: pronombres y posesivos
+ * sueltos («he choked on stage» también los trae, y es la
+ * metáfora del escenario) y los sustantivos de clase genérica
+ * (golfers, players, students), que son el sujeto natural de la
+ * metáfora deportiva. El casado (ADV2-08) es por palabra exacta
+ * —sin la puntuación pegada— o por la señal + resto ∈ {s, es}
+ * (el plural): «son» no caza «song», y desde el arreglo «help»
+ * tampoco caza «helpful», ni «baby» a «babysitter», ni «person»
+ * a «personal» — el prefijo sin resto declaraba cuerpos que no
+ * hay. Los femeninos van como entradas propias de la lista.
+ */
+const STEM_BODY_SIGNALS = [
+  "alguien", "alguem", "someone", "somebody",
+  "bebe", "nino", "nina", "crianca", "baby", "toddler", "child",
+  "hijo", "hija", "filho", "filha", "son", "daughter",
+  "padre", "madre", "pai", "mae", "mother", "father",
+  "abuelo", "abuela", "grandfather", "grandmother",
+  "hombre", "mujer", "homem", "mulher", "persona", "pessoa", "person",
+  "ayuda", "ajuda", "help", "socorro", "auxilio",
+  // ADV2-07: a quién le pasa, nombrado por relación o por papel en
+  // un parte — el criterio de inclusión de la lista. Los sustantivos
+  // corrientes del parte dictado (señor/a, vecino/a, cliente,
+  // paciente, encargado/a, conductor/a, pasajero/a, huésped,
+  // compañero/a) y la familia que el dictado dice sin pasar por la
+  // lista vieja (papá, mamá, hermano/a, esposo/a…). Las formas
+  // irregulares entran como entradas propias: children, kid, kids.
+  // Fuera, como desde H-05: los sustantivos de clase que son el
+  // sujeto natural de la metáfora de rendimiento (golfers, players,
+  // students) y los pronombres sueltos.
+  "senor", "senora", "vecino", "vecina", "cliente", "paciente", "patient", "customer",
+  "encargado", "encargada", "conductor", "conductora", "pasajero", "pasajera",
+  "huesped", "companero", "companera",
+  "papa", "mama", "hermano", "hermana", "irmao", "irma",
+  "esposo", "esposa", "marido", "husband", "wife", "brother", "sister",
+  "amigo", "amiga",
+  "children", "kid", "kids",
+];
+
+/**
+ * ¿Trae alguna palabra-signo (principio de palabra de ALL_STEMS)
+ * contexto de cuerpo en el texto ya plegado? (H-05, punto 7 de la
+ * cabecera.) Tres formas, todas leídas sobre la palabra-signo
+ * misma o su vecindad inmediata:
+ *
+ * - la construcción progresiva o reflexiva: auxiliar justo antes
+ *   («se esta tragantando», «my toddler is chokng» — ahí manda
+ *   también la víctima), el enclítico pegado al gerundio
+ *   («atragantandose», «ahogandome») o el «se» suelto tras él
+ *   («engasgando se»);
+ * - una señal de víctima o ayuda a tres palabras o menos.
+ *
+ * La metáfora sin víctima («why do golfers choke under pressure»,
+ * «she choked on stage», «se me atragantan las matemáticas») no
+ * trae ninguna de las tres y la raíz, sola, ya no basta.
+ */
+function stemHitHasBodyContext(folded: string): boolean {
+  const words = folded.trim().split(/\s+/).filter((w) => w.length > 0);
+  for (let i = 0; i < words.length; i++) {
+    if (!ALL_STEMS.some((s) => words[i].startsWith(s))) continue;
+    if (i > 0 && STEM_AUX_WORDS.has(words[i - 1])) return true;
+    if (words[i].endsWith("ndose") || words[i].endsWith("ndome") || words[i].endsWith("ndonos")) return true;
+    if (words[i + 1] === "se") return true;
+    const from = Math.max(0, i - 3);
+    const to = Math.min(words.length - 1, i + 3);
+    for (let j = from; j <= to; j++) {
+      // La palabra sin su puntuación pegada («hijo.» cuenta como
+      // «hijo», como contaba con el casado por principio) y la
+      // regla del resto de ADV2-08: la señal, o la señal + s/es.
+      const w = words[j].replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "");
+      if (STEM_BODY_SIGNALS.some((s) => w === s || w === `${s}s` || w === `${s}es`)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Marcadores de TEMA para la cara telegráfica: un fragmento que los
+ * trae es un título, un pie o una pregunta de prevención, no un
+ * parte — por mucho que su palabra-signo venga en participio.
+ */
+const TELEGRAPHIC_TOPIC_MARKERS = [
+  "hazard", "peligro", "riesgo", "risco", "perigo",
+  "video", "foto", "photo", "pregunta", "question",
+  "historia", "titulo", "title", "libro", "book",
+];
+
+/** Formas de la palabra-signo que un parte telegráfico usa:
+ *  participio, gerundio o estado (las terminaciones de las tres
+ *  lenguas y las dos palabras de estado, que no terminan así). */
+const TELEGRAPHIC_FORM_ENDINGS = ["ando", "endo", "indo", "ado", "ada", "ados", "adas", "ing", "ed"];
+const TELEGRAPHIC_STATE_WORDS = new Set(["inconsciente", "inconscientes", "unconscious"]);
+
+/**
+ * La cara telegráfica (ADV2-07 + ADV-E1, punto 8 de la cabecera):
+ * el parte dictado a secas — «atragantado», «Choking at table
+ * four!» — no trae auxiliar, ni enclítico, ni víctima nombrada que
+ * la ventana pueda leer, y sin embargo ES el suceso. Declara por
+ * su forma, toda a la vez: mensaje sin signos de pregunta, de
+ * cinco palabras o menos, con una palabra-signo en forma de
+ * participio, gerundio o estado, y sin marcadores de tema. El
+ * sustantivo abstracto («atragantamiento») no es forma válida: un
+ * título de guía de una palabra sigue fuera. Precio nombrado: un
+ * fragmento telegráfico que sea título o pie («Choking.»,
+ * «Drowning.») cae hacia la emergencia, en la dirección aceptada.
+ */
+function stemHitIsTelegraphic(folded: string): boolean {
+  if (folded.includes("?") || folded.includes("¿")) return false;
+  const words = folded
+    .trim()
+    .split(/\s+/)
+    .map((w) => w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, ""))
+    .filter((w) => w.length > 0);
+  if (words.length === 0 || words.length > 5) return false;
+  if (words.some((w) => TELEGRAPHIC_TOPIC_MARKERS.includes(w))) return false;
+  return words.some(
+    (w) =>
+      ALL_STEMS.some((s) => w.startsWith(s)) &&
+      (TELEGRAPHIC_FORM_ENDINGS.some((e) => w.endsWith(e)) || TELEGRAPHIC_STATE_WORDS.has(w)),
+  );
+}
+
+/**
+ * La inmovilidad contada (§4 del bloque del loop, H-LOOP-4):
+ * «no se puede mover» y sus formas en las tres lenguas. NO es
+ * un signo suelto de la lista de frases: la misma forma la dice
+ * una puerta atrancada o un objeto que no enciende por analogía
+ * de redacción, y la lista de signos declara sin contexto. Su
+ * cara es la de las raíces (H-05): declara cuando el texto la
+ * ata a un cuerpo — una caída narrada en el mismo texto (las
+ * formas de caída de `EMERGENCY_SIGNS`, que ya declaran por sí
+ * solas: esta cara es su cinturón, no su único camino) o una
+ * señal de víctima o ayuda de `STEM_BODY_SIGNALS` a tres
+ * palabras o menos de la frase, con la misma regla del resto
+ * de ADV2-08. «Mi vecino no se puede mover» declara por
+ * «vecino»; «la puerta no se puede mover», sin caída ni cuerpo
+ * cerca, no — el borde honesto que la batería de la pieza fijó
+ * con sus dos guardas de objeto.
+ */
+const IMMOBILITY_SIGNS = [
+  "no se puede mover", "no puede moverse", "no se pueden mover",
+  "can t move", "cannot move", "cant move",
+  "nao se pode mover", "nao consegue se mover",
+];
+
+/** Las formas de caída narrada de `EMERGENCY_SIGNS`, en las
+ * tres lenguas (la lista de signos las mezcla, como ALL_SIGNS):
+ * la caída contada en el mismo texto es contexto de cuerpo
+ * para la inmovilidad. */
+const FALL_TOLD_SIGNS = [
+  "se cayo de", "se callo de", "cayo de una",
+  "fell off a", "fell down the stairs", "fell from a",
+  "caiu de", "caiu da escada",
+];
+
+function immobilityHasContext(folded: string): boolean {
+  if (FALL_TOLD_SIGNS.some((t) => folded.includes(` ${t}`))) return true;
+  const words = folded
+    .trim()
+    .split(/\s+/)
+    .map((w) => w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, ""))
+    .filter((w) => w.length > 0);
+  for (const phrase of IMMOBILITY_SIGNS) {
+    const pw = phrase.split(" ");
+    for (let i = 0; i + pw.length <= words.length; i++) {
+      if (!pw.every((w, k) => words[i + k] === w)) continue;
+      const from = Math.max(0, i - 3);
+      const to = Math.min(words.length - 1, i + pw.length - 1 + 3);
+      for (let j = from; j <= to; j++) {
+        const w = words[j];
+        if (STEM_BODY_SIGNALS.some((s) => w === s || w === `${s}s` || w === `${s}es`)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Señales de primera persona o de petición de instrucción que
+ * corroboran la familia «chok» cuando es el único término que
+ * casa en la puerta de salud (ver el uso en `isHealthQuestion`):
+ * «how do I stop choking?» es primeros auxilios en primera
+ * persona, no metáfora. Los posesivos quedan fuera (no prueban
+ * cuerpo: «my teacher asked why golfers choke»).
+ */
+const CHOKE_FIRST_PERSON_CUES = [
+  " i ", " estoy ", " estou ", " que hago ", " o que fazer ",
+  " what should ", " how do i ", " how can i ",
+];
+
+/**
+ * ¿Cuenta el texto una emergencia viva en curso? Léxico puro de
+ * signos: basta UN signo (el suceso ES la situación; no se exige
+ * señal de pregunta) y ningún veto de contexto. La cara por raíz,
+ * en cambio, exige además el contexto de cuerpo de
+ * `stemHitHasBodyContext` (H-05, punto 7 de la cabecera): la raíz
+ * nació para el ruido de dictado DENTRO de un suceso contado, no
+ * como detector de tema. La cara de la inmovilidad (H-LOOP-4)
+ * hereda esa misma disciplina: su frase solo declara con una
+ * caída narrada o un cuerpo cerca (`immobilityHasContext`).
+ * Ver la cabecera, punto 3: donde manda la
+ * puerta de salud manda también esta cara, con el mismo texto
+ * seguro.
+ */
+export function isEmergencySituation(text: string): boolean {
+  if (!text) return false;
+  const folded = foldText(text);
+  if (folded.trim().length === 0) return false;
+  // El pajar va acolchado: un veto que ABRE el mensaje («Choking
+  // hazard for toddlers…», ADV2-08) también veta — sin el acolchado
+  // el casado exigía un espacio delante y el tema en posición cero
+  // se colaba. Es el mismo patrón de hasHistoricalFrame.
+  const vetoHay = ` ${folded} `;
+  if (EMERGENCY_VETOES.some((x) => vetoHay.includes(` ${x} `) || vetoHay.includes(` ${x}`))) return false;
+  if (hasHistoricalFrame(folded)) return false;
+  return (
+    ALL_SIGNS.some((t) => folded.includes(` ${t} `) || folded.includes(` ${t}`)) ||
+    (ALL_STEMS.some((t) => folded.includes(` ${t}`)) && stemHitHasBodyContext(folded)) ||
+    (IMMOBILITY_SIGNS.some((t) => folded.includes(` ${t}`)) && immobilityHasContext(folded)) ||
+    stemHitIsTelegraphic(folded)
+  );
+}
+
+// -------------------------------------- la puerta manda sobre Investigar
+
+/**
+ * ¿Debe este turno ir por la ruta protegida aunque el modo
+ * Investigación profunda esté activo? (R-07, ronda física de la
+ * 0.1.68: con Investigar activo, send() entraba en el pipeline de
+ * investigación ANTES de que ninguna puerta mirara el texto, y una
+ * emergencia dictada — que `isEmergencyText` sí reconocía — salía
+ * como tema de investigación, en inglés y sobre otro tema.) La
+ * decisión nació como la unión de las dos caras que la ruta normal
+ * ya consulta: la de emergencia (`isEmergencyText`, que incluye la
+ * situación viva contada) y la de salud (`isHealthQuestion`). Es la
+ * función que ChatScreen consulta antes de la bifurcación profunda
+ * y la que el propio pipeline vuelve a consultar tras descomponer:
+ * una sola definición para que las dos redes no diverjan. Desde
+ * Núcleo 3 la unión excluye la clase de pregunta de número de
+ * emergencias (ver el cuerpo): preguntar POR el número no es un
+ * suceso y no abandona la investigación.
+ */
+export function gatePreemptsDeepResearch(text: string, lang: GateLang): boolean {
+  if (!text || text.trim().length === 0) return false;
+  // Núcleo 3 (hallazgo vecino de la preparación S-02): la pregunta
+  // SOBRE el número de emergencias no es una emergencia. Hasta hoy
+  // la unión heredaba de isEmergencyText la clase de pregunta de
+  // número de los packs y la tabla fija de números, así que
+  // «¿cuál es el número de emergencias en México?» abandonaba la
+  // investigación profunda como si fuera un suceso vivo y perdía
+  // la respuesta de conocimiento. La preempción queda en lo que sí
+  // es suceso o riesgo: la situación viva contada, la pregunta de
+  // crisis, la de salud (la fixture congelada de H-04 entra por
+  // esta cara y no se mueve) y la tabla de seguridad en sus clases
+  // de monóxido — la clase «emergency-number» ya no preempta por
+  // sí sola. isEmergencyText NO cambia: su papel en la pantalla
+  // (ofrecer enviar ya el mensaje de emergencia mientras se genera)
+  // es otro y sigue igual.
+  const safety = matchSafetyAnswer(text, lang);
+  return (
+    isHealthQuestion(text) ||
+    crisisQuestionKind(text) ||
+    isEmergencySituation(text) ||
+    (safety !== null && safety.kind !== "emergency-number")
+  );
+}
+
+// ------------------------------------------------------- texto seguro
+
+/**
+ * El texto seguro fijo, en las tres lenguas con la MISMA estructura
+ * (la paridad se cuenta en las pruebas): honestidad, signos de
+ * urgencia, seis pasos en orden, lo que no hay que hacer, la regla
+ * de las dosis y el cierre del pack. Cada afirmación se traza a las
+ * guías del pack Esencial (knowledge-packs/nido-esencial), cuyo
+ * contenido está verificado contra sus fuentes oficiales:
+ *
+ * - Llamar, nombrar a una persona concreta, decir dónde y qué pasa,
+ *   no colgar hasta que lo digan; de lado si no responde pero
+ *   respira, vigilando: guías 01 y 11.
+ * - RCP en el centro del pecho, fuerte y rápido (el ritmo, en
+ *   palabras por la regla de no escribir números largos): guía 02.
+ * - Sangrado: presión directa y no retirar el paño empapado: guía 06.
+ * - Atragantamiento: tose fuerte → animar, sin golpes ni agua;
+ *   grave → 5 golpes en la espalda y 5 abdominales; bebé → 5 y 5
+ *   en el pecho, nunca abdominales: guía 05.
+ * - Quemadura: agua corriente fresca al menos 10 minutos: guía 08.
+ * - Signos de urgencia (cuándo llamar): guía 29.
+ * - No dar comida ni bebida a quien no traga bien (01), no provocar
+ *   el vómito ni dar leche o aceite a quien tragó un tóxico (21),
+ *   no mover a quien cayó de altura o puede tener el cuello o la
+ *   espalda lesionados salvo peligro (01 y 10), no sacar objetos
+ *   clavados (06).
+ * - Dosis: la del prospecto según edad y peso; aspirina no antes
+ *   de los 16 años: guía 25.
+ *
+ * Fuera a propósito, y consta aquí: la aspirina en el dolor de
+ * pecho (guía 14) lleva cuatro condiciones que un texto genérico
+ * no puede comprobar, y el torniquete (guía 06) cede su sitio a la
+ * presión, que es el gesto universal. Son contenido de la guía con
+ * el pack instalado, no de este suelo sin pack.
+ */
+const HEALTH_SAFE_TEXT: Record<GateLang, string> = {
+  es:
+    "Esto es una pregunta de salud y en este dispositivo no hay ninguna guía verificada de NIDO que la responda, " +
+    "así que no voy a contestar de memoria: un consejo de salud inventado puede hacer daño.\n\n" +
+    "Es urgencia si la persona no responde o está muy confusa o somnolienta, le cuesta mucho respirar, tiene " +
+    "dolor o presión fuerte en el pecho, la cara torcida, un brazo débil o el habla rara, un sangrado que no " +
+    "para, convulsiones, o un dolor de cabeza repentino y fortísimo.\n\n" +
+    "Si es una urgencia, actúa en este orden:\n" +
+    "1. Si puedes, llama ahora mismo al número de emergencias de donde estás; si no puedes, grita a una " +
+    "persona concreta que llame. Di dónde estás y qué pasa, y no cuelgues hasta que te lo digan.\n" +
+    "2. Si la persona no responde pero respira con normalidad, ponla de lado y comprueba sin parar que sigue " +
+    "respirando.\n" +
+    "3. Si no responde y no respira con normalidad, túmbala boca arriba en el suelo y empuja fuerte y rápido " +
+    "en el centro del pecho, de cien a ciento veinte veces por minuto, dejando que el pecho suba del todo, " +
+    "sin parar hasta que respire o llegue la ayuda.\n" +
+    "4. Si sangra mucho, aprieta la herida con un paño limpio y no lo retires aunque se empape: pon otro " +
+    "encima y sigue apretando.\n" +
+    "5. Si se está atragantando y tose con fuerza, anímala a seguir tosiendo, sin golpes ni agua. Si no puede " +
+    "hablar ni toser con fuerza, inclínala hacia delante: 5 golpes secos entre los omóplatos y 5 compresiones " +
+    "en el abdomen, alternando. En un bebé: 5 golpes en la espalda y 5 compresiones en el pecho, nunca en el " +
+    "abdomen.\n" +
+    "6. Si hay una quemadura, enfríala con agua corriente fresca durante al menos 10 minutos.\n\n" +
+    "No hagas esto: no des comida ni bebida a una persona inconsciente, mareada o que traga mal; no provoques " +
+    "el vómito a quien haya tragado algo tóxico, ni le des leche o aceite; no muevas a quien haya caído de " +
+    "una altura o pueda tener lesionados el cuello o la espalda, salvo que donde está corra peligro; no " +
+    "saques un objeto clavado en una herida.\n\n" +
+    "Si tu pregunta es por una dosis: la dosis depende de la edad y del peso, y está en el prospecto del " +
+    "medicamento; síguelo tal cual, no improvises otra, y no des aspirina a menores de 16 años.\n\n" +
+    "Las guías oficiales de primeros auxilios de NIDO Esencial se guardan en este dispositivo al descargar el pack " +
+    "en Biblioteca › Packs: con él, estas preguntas se responden con la guía delante, sin conexión.",
+  en:
+    "This is a health question and this device holds no verified NIDO guide that answers it, so I will not " +
+    "answer from memory: made-up health advice can do harm.\n\n" +
+    "It is an emergency if the person does not respond or is very confused or drowsy, is struggling to " +
+    "breathe, has strong chest pain or pressure, a drooping face, a weak arm or slurred speech, bleeding " +
+    "that will not stop, seizures, or a sudden, worst-ever headache.\n\n" +
+    "If it is an emergency, act in this order:\n" +
+    "1. If you can, call your emergency number right now for wherever you are; if you cannot, shout at one " +
+    "specific person to call. Say where you are and what is happening, and do not hang up until they tell " +
+    "you to.\n" +
+    "2. If the person does not respond but is breathing normally, roll them onto their side and keep " +
+    "checking that they are still breathing.\n" +
+    "3. If they do not respond and are not breathing normally, lay them on their back on the floor and push " +
+    "hard and fast in the center of the chest, one hundred to one hundred and twenty times a minute, letting " +
+    "the chest come fully back up, without stopping until they breathe or help arrives.\n" +
+    "4. If they are bleeding heavily, press on the wound with a clean cloth and do not lift it off even if " +
+    "it soaks through: put another cloth on top and keep pressing.\n" +
+    "5. If they are choking and coughing hard, encourage them to keep coughing, with no blows and no water. " +
+    "If they cannot speak or cough with force, lean them forward: 5 sharp blows between the shoulder blades " +
+    "and 5 thrusts on the abdomen, alternating. For a baby: 5 blows on the back and 5 thrusts on the chest, " +
+    "never on the abdomen.\n" +
+    "6. If there is a burn, cool it under cool running water for at least 10 minutes.\n\n" +
+    "Do not do these things: do not give food or drink to someone unconscious, dizzy or swallowing badly; " +
+    "do not make someone who swallowed something toxic vomit, and do not give them milk or oil; do not move " +
+    "someone who has fallen from a height or may have injured their neck or back, unless where they are is " +
+    "dangerous; do not pull out an object stuck in a wound.\n\n" +
+    "If your question is about a dose: the dose depends on age and weight, and it is printed in the " +
+    "medicine's leaflet; follow it exactly, do not improvise another, and do not give aspirin to anyone " +
+    "under 16.\n\n" +
+    "The official first-aid guides of NIDO Essentials live on this device once you download the pack in " +
+    "Library › Packs: with it, these questions are answered with the guide in front, no connection needed.",
+  pt:
+    "Isto é uma pergunta de saúde e neste dispositivo não há nenhum guia verificado do NIDO que a responda, " +
+    "por isso não vou responder de memória: um conselho de saúde inventado pode fazer mal.\n\n" +
+    "É urgência se a pessoa não responde ou está muito confusa ou sonolenta, tem muita dificuldade para " +
+    "respirar, tem dor ou pressão forte no peito, a cara torta, um braço fraco ou a fala estranha, um " +
+    "sangramento que não para, convulsões, ou uma dor de cabeça súbita e fortíssima.\n\n" +
+    "Se for uma urgência, aja nesta ordem:\n" +
+    "1. Se puder, ligue agora mesmo para o número de emergência de onde está; se não puder, grite a uma " +
+    "pessoa concreta que ligue. Diga onde está e o que se passa, e não desligue até lhe dizerem.\n" +
+    "2. Se a pessoa não responde mas respira normalmente, vire-a de lado e verifique sem parar se continua " +
+    "a respirar.\n" +
+    "3. Se não responde e não respira normalmente, deite-a de costas no chão e empurre com força e depressa " +
+    "no centro do peito, de cem a cento e vinte vezes por minuto, deixando o peito voltar a subir por " +
+    "completo, sem parar até ela respirar ou a ajuda chegar.\n" +
+    "4. Se sangra muito, aperte a ferida com um pano limpo e não o retire mesmo que encharque: ponha outro " +
+    "por cima e continue a apertar.\n" +
+    "5. Se está a engasgar e tosse com força, incentive-a a continuar a tossir, sem pancadas nem água. Se " +
+    "não consegue falar nem tossir com força, incline-a para a frente: 5 pancadas secas entre as omoplatas " +
+    "e 5 compressões no abdómen, alternando. Num bebé: 5 pancadas nas costas e 5 compressões no peito, " +
+    "nunca no abdómen.\n" +
+    "6. Se houver uma queimadura, arrefeça-a com água corrente fresca durante pelo menos 10 minutos.\n\n" +
+    "Não faça isto: não dê comida nem bebida a uma pessoa inconsciente, tonta ou que engole mal; não " +
+    "provoque o vómito a quem engoliu algo tóxico, nem lhe dê leite ou óleo; não mova quem caiu de uma " +
+    "altura ou pode ter lesionado o pescoço ou as costas, salvo se onde está corre perigo; não retire um " +
+    "objeto espetado numa ferida.\n\n" +
+    "Se a sua pergunta é por uma dose: a dose depende da idade e do peso, e está na bula do medicamento; " +
+    "siga-a tal qual, não improvise outra, e não dê aspirina a menores de 16 anos.\n\n" +
+    "Os guias oficiais de primeiros socorros do NIDO Essencial ficam guardados neste dispositivo ao baixar o " +
+    "pacote em Biblioteca › Pacotes: com ele, estas perguntas são respondidas com o guia à frente, sem conexão.",
+};
+
+/** El texto seguro fijo al que cae la pregunta de salud sin guía. */
+export function healthSafeText(lang: GateLang): string {
+  return HEALTH_SAFE_TEXT[lang];
+}
+
+/** La procedencia del texto seguro: texto fijo de NIDO, frase a frase. */
+export function healthSafeProvenance(text: string): SentenceProvenance[] {
+  return allFrom(text, { kind: "fixed" }, splitSentences);
+}
+
+// ------------------------------------------------- evidencia de salud
+
+/** Los packs cuyas guías son de salud con fuentes verificadas (ver cabecera). */
+const HEALTH_PACK_IDS = new Set(["nido-esencial", "nido-ninos", "nido-crisis"]);
+
+/**
+ * ¿Trae la recuperación algún pasaje de un pack de salud? Hasta la
+ * 0.1.86 solo contaban los integrados de la lista cerrada de arriba:
+ * un fragmento de un pack IMPORTADO por la puerta firmada — cuya
+ * firma se verificó al entrar, la misma vara de confianza que la de
+ * los integrados — nunca era evidencia, y la sustitución por el
+ * texto seguro quedaba desarmada justo en el turno que el pack
+ * importado debía responder (el giro del gas, dirimen 2026-11-09).
+ *
+ * 0.1.87: el llamador puede pasar los ids que el registro de la
+ * puerta verificó (verifiedImportedPacks en services/packImporter,
+ * leído fresco en cada turno — un pack retirado deja de contar al
+ * momento). Esta capa sigue pura: el registro vive tras
+ * expo-file-system y no entra aquí; sin el conjunto, el
+ * comportamiento es exactamente el de siempre.
+ */
+/**
+ * ¿Cuenta este fragmento como evidencia de salud de la puerta? La
+ * misma vara que hasHealthEvidence aplica fragmento a fragmento:
+ * un pack integrado de la lista, o un pack que el registro de la
+ * puerta firmada verificó (el llamador pasa el conjunto).
+ */
+function isHealthEvidenceChunk(c: RetrievedChunk, verifiedImportedPackIds?: ReadonlySet<string>): boolean {
+  const ref = parsePackChunkId(c.chunkId);
+  if (!ref) return false;
+  if (HEALTH_PACK_IDS.has(ref.packId.replace(/-e5$/, ""))) return true;
+  return !!verifiedImportedPackIds && verifiedImportedPackIds.has(ref.packId);
+}
+
+export interface SafeTextSubstitutionInput {
+  /** El turno es de investigación profunda: la puerta no actúa. */
+  deepTurn: boolean;
+  /** Las fuentes del turno, en su orden (la procedencia cita por índice). */
+  sources: readonly RetrievedChunk[];
+  /** El veredicto del juez de fundamentación sobre la respuesta. */
+  grounding: string | undefined;
+  /** La pregunta es de salud (isHealthQuestion). */
+  isHealth: boolean;
+  /** La pregunta cuenta una emergencia viva (isEmergencySituation). */
+  isEmergency: boolean;
+  /** La procedencia por frase de la respuesta juzgada. */
+  provenance: readonly SentenceProvenance[] | undefined;
+  /** Ids de packs importados que el registro verificó en este turno. */
+  verifiedImportedPackIds?: ReadonlySet<string>;
+}
+
+/**
+ * 0.1.88 (dirimen del gas en la 0.1.87): la decisión de sustituir la
+ * respuesta del modelo por el texto seguro, extraída de ChatScreen
+ * a función pura para poder probarla con los valores del campo.
+ *
+ * Hasta la 0.1.87 la condición (en ChatScreen) sustituía cuando el
+ * veredicto era «unverified» o «abstained» y NINGUNA fuente era
+ * evidencia de salud. El hueco medido: la condición miraba las
+ * fuentes, no el apoyo de la respuesta. Con la guía del pack
+ * verificado entre las fuentes (hasHealthEvidence verdadero), un
+ * texto del modelo que el juez NO pudo verificar quedaba en
+ * pantalla en plena emergencia viva, apoyado en nada: justo el
+ * turno de la foto, donde la guía estaba en el aparato y entre las
+ * fuentes pero no se había servido. La vara pasa a ser el apoyo
+ * real: se sustituye cuando ninguna frase con procedencia de fuente
+ * se apoya en un fragmento que es evidencia de salud.
+ *
+ * Lo que NO cambia, por doctrina: los veredictos «grounded» y
+ * «partial» nunca se sustituyen por esta puerta. Sus frases
+ * quedaron verificadas una a una contra sus fuentes por el juez, y
+ * si la fuente es una guía de salud verificada, el apoyo es real
+ * aunque sea otra guía de la misma familia; el fallo de la foto se
+ * cura donde nació, en la elección de la guía, no reescribiendo lo
+ * que el juez ya verificó.
+ */
+/**
+ * 0.1.90 (familia 4): qué pasa con un turno SIN fuentes, extraído de
+ * ChatScreen a función pura con el patrón de shouldSubstituteSafeText.
+ *
+ * La ley del dueño (2026-11-09): una pregunta que una guía del
+ * dispositivo responde no llega al modelo; una pregunta que NINGUNA
+ * guía cubre la genera el modelo activo; la abstención determinista
+ * queda SOLO donde inventar sería peligroso — salud y emergencia sin
+ * evidencia. Hasta la 0.1.89 la puerta previa de la ruta fija y el
+ * post-chequeo sustituían también toda «pregunta de hechos» sin
+ * fuentes por el «no lo sé» determinista (RAG-GROUNDING 2026-10-11,
+ * Fase 3): con el Qwen3 activo, «Explícame cómo cambiar una llanta en
+ * 5 pasos numerados» recibió la abstención sin generar (foto del dueño
+ * 15:43 MST). Esa rama muere: sin fuentes y sin peligro, el turno
+ * genera y el texto del modelo queda en pie; la banda «No se
+ * encontraron fuentes offline relevantes» sigue pintándose como
+ * metadato honesto, y la instrucción de sistema sin fuentes (decir
+ * que no se sabe cuando no se puede responder con fiabilidad) sigue
+ * en el prompt, como estaba.
+ */
+export type NoSourcesOutcome = "safe-text" | "generate";
+
+export function noSourcesOutcome(input: {
+  isHealth: boolean;
+  isEmergency: boolean;
+}): NoSourcesOutcome {
+  return input.isHealth || input.isEmergency ? "safe-text" : "generate";
+}
+
+export function shouldSubstituteSafeText(input: SafeTextSubstitutionInput): boolean {
+  if (input.deepTurn || input.sources.length === 0) return false;
+  if (!input.isHealth && !input.isEmergency) return false;
+  if (input.grounding !== "unverified" && input.grounding !== "abstained") return false;
+  const restsOnEvidence = (input.provenance ?? []).some((s) => {
+    if (s.origin.kind !== "source") return false;
+    const src = input.sources[s.origin.n - 1];
+    return !!src && isHealthEvidenceChunk(src, input.verifiedImportedPackIds);
+  });
+  return !restsOnEvidence;
+}
+
+export function hasHealthEvidence(
+  chunks: readonly RetrievedChunk[],
+  verifiedImportedPackIds?: ReadonlySet<string>,
+): boolean {
+  return chunks.some((c) => isHealthEvidenceChunk(c, verifiedImportedPackIds));
+}

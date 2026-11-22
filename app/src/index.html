@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8"/>
+        <link rel="icon" type="image/png" href="/app-icon.png"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+        <!-- CSP de la ventana (SEGURIDAD-PC §5.6): todo desde la propia
+             app; nada de red, nada de objetos. La suite de
+             endurecimiento la exige presente en el paquete.
+             D-4 de la auditoría de ataque 3: frame-ancestors NO va en
+             la meta porque la especificación ordena ignorarla cuando
+             la política llega por <meta> (era decorativa). El
+             encuadre es imposible por construcción, no por directiva:
+             ventana propia de escritorio, sin webviews y con todo
+             window.open denegado en el proceso principal. -->
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"/>
+        <title>NIDO PC</title>
+    </head>
+    <body>
+        <div id="root"></div>
+        <script type="module" src="./index.tsx"></script>
+    </body>
+</html>

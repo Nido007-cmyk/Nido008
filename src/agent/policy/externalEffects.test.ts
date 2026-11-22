@@ -1,0 +1,68 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ */
+
+/**
+ * Regla R4 de la constitución (docs/NIDO_CONSTITUTION.md): ninguna acción
+ * con efecto fuera de la app se ejecuta sin confirmación de la persona.
+ *
+ * Cada herramienta del manifiesto tiene que estar clasificada aquí. Una
+ * herramienta nueva hace fallar este test hasta que alguien decida, a
+ * propósito, si tiene efecto fuera de la app y cómo se confirma.
+ */
+import { describe, expect, it } from "vitest";
+import { LOCAL_TOOLS } from "../tools/manifest.js";
+
+/** Efecto fuera de la app (o irreversible): siempre con confirmación. */
+const EXTERNAL = [
+  "open_app",
+  "create_calendar_event",
+  "nido_send_message",
+  "nido_pair",
+  "nido_approve_task",
+  "nido_reject_task",
+  "delete_note",
+  "delete_reminder",
+  // 0.1.75: olvidar un recuerdo desde el chat (irreversible).
+  "delete_memory",
+] as const;
+
+/**
+ * Sin efecto fuera de la app: leen, calculan o guardan dentro de NIDO.
+ * (Guardar notas, recordatorios o datos con contenido no confiable en el
+ * turno también pide confirmación: lo cubre untrustedContent.test.ts.)
+ */
+const INTERNAL = [
+  "save_note",
+  "list_notes",
+  "read_note",
+  "create_reminder",
+  "remember_fact",
+  // T-11 (P-09): save_person guarda dentro de NIDO, como remember_fact
+  // (con contexto no confiable pide confirmación por la puerta R11,
+  // extendida a save_person en la misma tanda).
+  "save_person",
+  "device_time",
+  "calculate",
+  "convert_units",
+  "list_calendar_events",
+  "find_contact",
+  "read_picked_file",
+  "use_skill",
+  "analyze_table",
+  "nido_read_inbox",
+  "nido_my_code",
+  "nido_review_tasks",
+] as const;
+
+describe("R4: confirmación antes de cualquier efecto fuera de la app", () => {
+  const names = LOCAL_TOOLS.map((t) => t.name);
+
+  it("cada herramienta del manifiesto está clasificada (y solo una vez)", () => {
+    const classified = [...EXTERNAL, ...INTERNAL] as string[];
+    expect(new Set(classified).size).toBe(classified.length);
+    expect([...names].sort()).toEqual([...classified].sort());
+  });
+});

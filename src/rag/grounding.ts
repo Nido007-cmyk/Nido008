@@ -1,0 +1,4280 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ */
+
+/**
+ * grounding.ts — NIDO: anclaje de respuestas a las fuentes RAG (Fase 3:
+ * "mejor no inventar").
+ *
+ * Evidencia física (Tab A9+, v0.1.6, Qwen2.5-0.5B): para "fotosíntesis" el
+ * RAG trajo "Photosynthesis" (81%) y "Chloroplast" (77%), pero la respuesta
+ * dijo que la luz se absorbe "in a process called phototropism", que la luz
+ * "is transported to the roots" y que el agua "is absorbed by the leaves".
+ * Nada de eso está en las fuentes (assets/corpus/corpus.json, entrada
+ * "Photosynthesis"): el modelo lo sacó de su "conocimiento general".
+ *
+ * Causas raíz encontradas en el código (src/rag/pure.ts, antes de este fix):
+ *  1. La instrucción le PERMITÍA inventar: "If the context doesn't cover the
+ *     question, say so and answer from general knowledge."
+ *  2. Las fuentes iban al final de un mensaje de sistema largo, separadas de
+ *     la pregunta por todo el historial: lo más lejos posible de donde el
+ *     modelo mira al generar ("Lost in the Middle", Liu et al. 2023).
+ *  3. Se generaba a temperatura 0.7 (preset de charla) aunque hubiera
+ *     fuentes.
+ *  4. Nada comprobaba la respuesta contra las fuentes después.
+ *
+ * Un 0.5B no se vuelve más listo; este módulo es la parte de CÓDIGO del
+ * arreglo (la parte de prompt está en pure.ts y la de muestreo en
+ * ChatScreen):
+ *
+ *  - verifyGroundedAnswer(): verificación determinista por FRASE. Cada frase
+ *    se reduce a sus palabras de contenido (sin palabras vacías, raíz
+ *    aproximada) y se mide qué fracción aparece en las fuentes. Las frases
+ *    sin respaldo se quitan y se avisa. Si no queda ninguna, la respuesta
+ *    se sustituye por un "no lo sé" honesto + lo que la fuente SÍ dice
+ *    (extracto literal, citado). Ese es el punto del pipeline donde se
+ *    decide el "no lo sé": después de generar, con la respuesta y las
+ *    fuentes delante — antes no se puede saber si el modelo se ciñó.
+ *  - Cada frase conservada sin cita recibe la [n] de la fuente que más la
+ *    respalda (enlace afirmación → fuente, determinista).
+ *  - Post-chequeo de cifras (programa bounty, tanda 1; lógica adaptada
+ *    de Commonplace, Apache-2.0): cada cifra de la respuesta tiene que
+ *    salir de la evidencia, con su redondeo honesto (evidenceNumbers.ts).
+ *    Una cifra inventada tumba la frase en las dos rutas, la de la misma
+ *    lengua y la de lengua cruzada.
+ *  - Si la respuesta está en otro idioma que las fuentes (pregunta en
+ *    español, corpus en inglés), la comparación léxica no es válida: no se
+ *    inventa un veredicto. Solo se comprueban cifras (iguales en todos los
+ *    idiomas) y citas; el estado queda "unverified" y la UI lo dice.
+ *  - Idioma por frase (R-04, ronda 0.1.68): un chunk puede mezclar
+ *    idiomas (un documento importado con el mismo texto en es/en/pt) y
+ *    el modelo copia la frase gemela en el idioma equivocado; el apoyo
+ *    léxico la aprueba porque la frase ESTÁ en el chunk. Ahora una copia
+ *    literal cuya gemela con las mismas cifras puntúe mejor en el idioma
+ *    de la pregunta se sustituye por esa gemela; sin gemela, se retira.
+ *    Detectar sin actuar era el fallo: el pie ya decía «otro idioma» y
+ *    la frase se servía igual.
+ *  - El dato pedido (R-05, misma ronda): si la pregunta pide un dato
+ *    que se da en cifras y la evidencia lo trae, una frase que afirma
+ *    qué es ese dato SIN darlo («el teléfono es el número de
+ *    emergencia») se sustituye por la frase fuente que lo trae. Las
+ *    puertas de cifras juzgan cifras presentes; esta juzga la
+ *    ausencia del dato debido.
+ *
+ * Limitación honesta: es una heurística léxica (sin modelo de NLI, que no
+ * cabe en el presupuesto de RAM). Detecta afirmaciones con vocabulario
+ * ajeno a las fuentes —el patrón de la evidencia— pero no una frase que
+ * reordene palabras de la fuente para decir algo falso.
+ *
+ * Puro, sin dependencias, 100% testeable.
+ */
+
+import type { SentenceProvenance } from "./provenance.js";
+import { evidenceNumberValues, evidenceQuantities, evidenceRanges, isJudged, numberTokens, parseNumberToken, quantitiesOf, quantityConflict, sentenceNumbersSupported, sentenceWordReadings, wordNumberValue } from "./evidenceNumbers.js";
+import { dateConflictForSentence, parseSourceDateSentences } from "./dates.js";
+import type { JudgeSemanticContext } from "./semanticContext.js";
+import { cosineSimilarity } from "./pure.js";
+
+export type GroundingLang = "es" | "en" | "pt";
+
+export type GroundingStatus =
+  /** Todas las frases verificables tienen respaldo en las fuentes. */
+  | "grounded"
+  /** Se quitaron frases sin respaldo; el resto sí lo tiene. */
+  | "partial"
+  /** Nada tenía respaldo (o el modelo dijo no saber): "no lo sé" + extracto. */
+  | "abstained"
+  /** Idioma distinto al de las fuentes: no se pudo verificar frase a frase. */
+  | "unverified"
+  /** No aplica (sin fuentes, respuesta vacía, modelo razonador). */
+  | "skipped";
+
+export interface GroundingChunk {
+  title: string;
+  body: string;
+  /**
+   * Adversaria H-07: este fragmento es un resto truncado por el
+   * presupuesto de contexto (fitChunksToBudget). El verificador juzga
+   * contra el cuerpo que recibe — que en la ruta fija ya es el resto
+   * que el modelo vio, no la fuente entera — y la marca queda visible
+   * en su entrada para que ningún consumidor lo trate como completo.
+   */
+  truncated?: boolean;
+}
+
+export interface GroundingResult {
+  text: string;
+  status: GroundingStatus;
+  /** Frases quitadas por no tener respaldo. */
+  removed: number;
+  /** Frases conservadas. */
+  kept: number;
+  /**
+   * M-7 (auditoría maestra, cobrado en la tanda 13): el modo en que
+   * este veredicto se juzgó — "full" cuando el contexto semántico
+   * era usable y las puertas semánticas pudieron actuar, "lexical"
+   * cuando el juez corrió degradado a su capa léxica (sin contexto
+   * o con un contexto que usableSemanticContext no validó). Todo
+   * camino lo marca, también la abstención y el salto: en el salto
+   * el juez sale antes de validar contexto alguno y ninguna puerta
+   * semántica actúa, así que su marca es "lexical". Hasta esta
+   * tanda el modo vivía solo en prosa repartida; sin el campo, el
+   * instrumento no podía registrar el modo en que cada veredicto
+   * se alcanzó y una degradación era invisible en el registro.
+   */
+  judgeMode: "lexical" | "full";
+  /**
+   * 0.1.61: de dónde sale cada frase del texto final (provenance.ts). Ausente
+   * en «skipped» por modelo razonador o respuesta vacía.
+   */
+  sentences?: SentenceProvenance[];
+}
+
+// ------------------------------------------------------------- texto
+
+const STOPWORDS = new Set(
+  (
+    // en
+    "a an the and or but if then than so as of in on at to for from by with without into onto over under " +
+    "about above below between through during before after while is are was were be been being am do does " +
+    "did done have has had having it its it's this that these those there here their them they he she him " +
+    "her his hers we us our you your i me my mine not no nor can could would should will shall may might " +
+    "must also just very much many more most some any each every all both such only own same other another " +
+    "which who whom whose what when where why how called known like make makes made use uses used using " +
+    "get gets got one ones thing things way ways part well even still yet however therefore thus because " +
+    "since although though whether either neither per via etc according source sources context " +
+    // es
+    "el la los las un una unos unas y o u e pero si sino que de del al en con sin por para sobre entre " +
+    "hasta desde durante ante tras es son era eran fue fueron ser sido siendo esta este estos estas ese " +
+    "esa esos esas eso esto aquel aquella estar esta estan estaba estaban hay ha han habia haber se su sus " +
+    "lo le les me te nos mi mis tu tus yo tu el ella ellos ellas nosotros usted ustedes muy mas menos tambien " +
+    "solo ya aun como cuando donde quien quienes cual cuales cuyo porque pues asi tanto cada todo toda todos " +
+    "todas otro otra otros otras mismo misma puede pueden hace hacen hacer llamado llamada llamados segun " +
+    "fuente fuentes contexto ademas parte forma manera " +
+    // pt
+    "o os um uma uns umas e ou mas se que de do da dos das no na nos nas em com sem por para pelo pela " +
+    "sobre entre ate desde durante e sao era eram foi foram ser sido sendo esta este estes estas esse essa " +
+    "esses essas isso isto aquele aquela estar estao estava ha tem seu sua seus suas lhe me te nos meu minha " +
+    "voce voces ele ela eles elas muito mais menos tambem so ja ainda como quando onde quem qual quais " +
+    "porque assim cada todo toda todos todas outro outra outros outras mesmo mesma pode podem faz fazem fazer " +
+    "chamado chamada segundo fonte fontes contexto alem"
+  ).split(/\s+/),
+);
+
+/**
+ * Palabras vacías típicas de cada idioma, para detectar el idioma de un texto.
+ * Auditoría de la 0.1.97: «al» (solo español; el portugués dice «ao») y
+ * «dos» (el numeral español, que es también la contracción portuguesa)
+ * entran en la lista española. Sin ellas, «Tome 5 ml dos veces al día»
+ * puntuaba 0 en español y 1/7 en portugués (por «dos»), salía «pt», y
+ * foreignCopyFix (R-04) retiraba como copia en otro idioma la frase
+ * española fiel, copiada letra a letra de su fuente española. «dos»
+ * sigue en la lista portuguesa: en un texto portugués de verdad las
+ * demás pistas deciden. La copia de pure.ts lleva el mismo cambio.
+ */
+const LANG_HINTS: Record<GroundingLang, Set<string>> = {
+  en: new Set("the and is are was were of to in that it with for this which by from have has not".split(" ")),
+  es: new Set("el la los las y es son del al que en por para con una un se su lo como pero mas dos".split(" ")),
+  pt: new Set("o os as e sao do da dos das que em por para com uma um se seu sua como mas nao".split(" ")),
+};
+
+function stripAccents(s: string): string {
+  return s.normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
+function words(text: string): string[] {
+  return stripAccents(text.toLowerCase())
+    .replace(/\[\d+\]/g, " ")
+    .replace(/[^a-z0-9ñ\s-]/g, " ")
+    .split(/[\s-]+/)
+    .filter(Boolean);
+}
+
+/** Raíz aproximada: quita sufijos frecuentes (en/es/pt) y corta a 7 letras. */
+export function stem(w: string): string {
+  let s = w;
+  for (const suf of [
+    "ations", "ation", "ings", "ing", "ies", "ied", "edly", "ed", "es", "s",
+    "ciones", "cion", "mente", "amente", "coes", "cao",
+  ]) {
+    if (s.length - suf.length >= 4 && s.endsWith(suf)) {
+      s = s.slice(0, s.length - suf.length);
+      break;
+    }
+  }
+  return s.slice(0, 7);
+}
+
+export function contentStems(text: string): string[] {
+  return words(text)
+    .filter((w) => (w.length >= 3 || /^\d+$/.test(w)) && !STOPWORDS.has(w))
+    .map((w) => (/^\d/.test(w) ? w : stem(w)));
+}
+
+export function detectTextLang(text: string): GroundingLang | null {
+  const ws = words(text);
+  if (ws.length < 4) return null;
+  let best: GroundingLang | null = null;
+  let bestScore = 0;
+  let second = 0;
+  for (const lang of ["en", "es", "pt"] as GroundingLang[]) {
+    const score = ws.filter((w) => LANG_HINTS[lang].has(w)).length / ws.length;
+    if (score > bestScore) {
+      second = bestScore;
+      bestScore = score;
+      best = lang;
+    } else if (score > second) {
+      second = score;
+    }
+  }
+  // Señal débil o empate (es/pt comparten muchas palabras): sin veredicto.
+  if (bestScore < 0.08 || bestScore - second < 0.03) return null;
+  return best;
+}
+
+/**
+ * Cuántas palabras pista de `lang` trae el texto, sin umbrales. La regla
+ * de idioma por frase (R-04) compara puntuaciones entre dos frases
+ * concretas en vez de pedir un veredicto absoluto: hay frases clínicas
+ * cortas cuyo idioma detectTextLang no se atreve a decir (la del jarabe
+ * en español da null: su única pista es «el») y aun así su gemela
+ * portuguesa puntúa más en portugués que ella.
+ */
+export function langHintCount(text: string, lang: GroundingLang): number {
+  const hints = LANG_HINTS[lang];
+  return words(text).filter((w) => hints.has(w)).length;
+}
+
+/** Divide en frases conservando la puntuación final y las citas [n]. */
+export function splitSentences(text: string): string[] {
+  const parts = text
+    .replace(/\r/g, "")
+    .split(/(?<=[.!?…])\s+(?=[\p{Lu}¿¡"«“(\d*•-])|\n+/u)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return parts;
+}
+
+// --------------------------------------------------------- abstención
+
+const IDK_RE = new RegExp(
+  [
+    // es
+    // «no sé» / «no lo sé». Without the accent only «no lo se»: a bare
+    // «no se» is the reflexive in «su médico no se lo ha prohibido», which
+    // made a first aid step count as "I don't know" (0.1.59).
+    "\\bno (lo )?sé(?![\\p{L}])",
+    "\\bno lo se(?![\\p{L}])",
+    "\\bno (tengo|encuentro|encontr[eé]|hay) (esa |la |suficiente |ninguna )?informaci[oó]n",
+    "\\blas fuentes no (lo |la )?(mencionan|dicen|contienen|incluyen|explican|hablan)",
+    "\\bno (se )?(menciona|explica|aparece) en las fuentes",
+    // en
+    "\\bi (don'?t|do not) know\\b",
+    "\\b(the )?(sources?|context) (do(es)?n'?t|do(es)? not) (mention|contain|say|cover|include|explain)",
+    "\\bnot (mentioned|covered|stated|explained) in the (sources?|context)",
+    "\\bno information (about|on)\\b",
+    // pt
+    "\\bn[aã]o sei(?![\\p{L}])",
+    "\\bn[aã]o (tenho|encontrei|h[aá]) (essa |a |informa)",
+    "\\bas fontes n[aã]o",
+  ].join("|"),
+  "iu",
+);
+
+export function isAbstention(sentence: string): boolean {
+  return IDK_RE.test(sentence);
+}
+
+/**
+ * C2-H1 (barrido 0.1.96): la abstención no puede servir de contrabando.
+ * «No lo sé, pero la dosis recomendada es de 25 ml» se conservaba entera
+ * como abstención, sin pasar por cifras, dosis ni dato, y salía
+ * «grounded» con el dato inventado dentro. Una frase que se abstiene Y
+ * afirma algo se juzga por lo que afirma, como cualquier otra frase del
+ * modelo. Afirma cuando, quitada la abstención:
+ *  - queda una conjunción de contraste con contenido detrás («pero…»,
+ *    «aunque…», «but…», «however…», «mas…», «porém…»), en cualquier
+ *    orden respecto de la abstención;
+ *  - o una cópula seguida de una cifra («es de 25 ml», «is 25 ml»,
+ *    «é de 25 ml») que no sea la de una pregunta indirecta («no sé cuál
+ *    es la dosis para 2 años» sigue siendo abstención pura).
+ *  - o (T-04 de la 0.1.99, M-01 de la auditoría) una cláusula
+ *    declarativa con contenido juzgable tras un corte de cláusula:
+ *    «Não sei, a dose dobra em crianças.» no trae contraste, ni
+ *    cópula, ni cifra, y la red la dejaba pasar como abstención pura:
+ *    en la rama principal la respuesta entera colapsaba a la
+ *    abstención honesta por casualidad, pero en la cruzada la frase
+ *    se servía tal cual. La cláusula que sigue a una coma (o a «;»,
+ *    «:», «—») con ≥ MIN_JUDGED_TERMS raíces propias y que no es una
+ *    pregunta indirecta ES una afirmación y se juzga como tal. Lo que
+ *    va ANTES del primer corte no se toca: es el complemento de tema
+ *    de la propia abstención («No tengo información sobre la dosis
+ *    para menores de 2 años», «the dose for children under 2» tras
+ *    «the sources don't mention»), y las preguntas indirectas quedan
+ *    fuera por su palabra inicial.
+ * La abstención pura («no lo sé», «las fuentes no lo mencionan») se
+ * conserva como hasta ahora.
+ */
+const ABSTENTION_CONTRAST_RE =
+  /(?:^|[\s,;:—–-])(?:pero|sin embargo|aunque|no obstante|but|however|though|although|yet|mas|por[eé]m|contudo|entretanto|embora|todavia)\s+(?:\S+\s+){0,2}\p{L}{3,}/iu;
+// Límites por letra, no \b: «é» no es carácter de palabra para \b en JS.
+const ABSTENTION_COPULA_DIGIT_RE =
+  /(?<!(?<![\p{L}])(?:cu[aá]l(?:es)?|qu[eé]|cu[aá]nt[oa]s?|what|which|how much|how many|qual|quais|quant[oa]s?|o que)\s)(?<![\p{L}])(?:es|son|era|ser[aá]|is|are|was|will be|é|são)(?![\p{L}])[^.!?\d]{0,40}\d/iu;
+const ABSTENTION_CLAUSE_SPLIT_RE = /[,;:—–-]/;
+const ABSTENTION_INTERROGATIVE_RE =
+  /^\s*(?:qu[eé]|cu[aá]l(?:es)?|cu[aá]nt[oa]s?|c[oó]mo|cu[aá]ndo|d[oó]nde|qui[eé]n(?:es)?|por qu[eé]|what|which|how|when|where|who|whom|qual|quais|quant[oa]s?|como|quando|onde|quem|por que)(?![\p{L}])/iu;
+
+/**
+ * ¿La frase casa con el patrón de declinar `re` y no afirma nada más?
+ * Lo que queda al quitar la frase que declina se pasa por las tres
+ * guardas de siempre: contraste con contenido, cópula con cifra y
+ * cláusula declarativa tras un corte (M-01) — solo las piezas que
+ * SIGUEN a un separador; la primera es el resto de la frase que
+ * declina o su complemento de tema.
+ */
+function declinesWithoutAsserting(sentence: string, re: RegExp): boolean {
+  if (!re.test(sentence)) return false;
+  const rest = sentence.replace(new RegExp(re.source, "giu"), " ");
+  if (ABSTENTION_CONTRAST_RE.test(rest)) return false;
+  if (ABSTENTION_COPULA_DIGIT_RE.test(rest)) return false;
+  const pieces = rest.split(ABSTENTION_CLAUSE_SPLIT_RE);
+  for (let i = 1; i < pieces.length; i++) {
+    const piece = pieces[i]!;
+    if (ABSTENTION_INTERROGATIVE_RE.test(piece)) continue;
+    if (new Set(contentStems(piece)).size >= MIN_JUDGED_TERMS) return false;
+  }
+  return true;
+}
+
+export function isPureAbstention(sentence: string): boolean {
+  return declinesWithoutAsserting(sentence, IDK_RE);
+}
+
+/**
+ * 0.1.104 (pasada del dueño en su Tab A9+): la negativa de capacidad
+ * («No puedo ayudarte con eso.») es la otra forma de declinar, y el
+ * juez no la conocía. IDK_RE cataloga abstenciones de conocimiento
+ * («no lo sé», «las fuentes no…»); la negativa no casa con él, no
+ * afirma nada juzgable (sus raíces quedan bajo MIN_JUDGED_TERMS y
+ * «pasa» por la regla de la frase corta) y se servía tal cual como
+ * respuesta, con la guía recuperada delante y el pie etiquetándola
+ * «del modelo sin fuente» — a «Como cambio la llanta de un carro»,
+ * con la guía de avería en carretera recuperada. Una negativa pura
+ * se trata como una abstención pura: se conserva sin juicio y, si es
+ * todo lo que el turno trae, el desenlace es la abstención honesta
+ * con su extracto. Las guardas son las de la abstención: la negativa
+ * que además afirma («no puedo ayudarte, pero la dosis es 5 ml») no
+ * es pura y se juzga por lo que afirma.
+ */
+const REFUSAL_RE = new RegExp(
+  [
+    // es
+    "\\bno (te |le |les )?puedo ayud",
+    "\\bno puedo (responder|contestar)",
+    "\\bno me es posible ayud",
+    // en
+    "\\bi (can'?t|cannot|can not) (help|answer)",
+    "\\bi'?m (unable|not able) to help",
+    // pt
+    "\\bn[aã]o posso (te |lhe )?ajud",
+    "\\bn[aã]o consigo ajud",
+    "\\bn[aã]o posso responder",
+  ].join("|"),
+  "iu",
+);
+
+export function isPureRefusal(sentence: string): boolean {
+  return declinesWithoutAsserting(sentence, REFUSAL_RE);
+}
+
+/**
+ * 0.1.105 (carril atragantamiento-01105, foto del dueño en su Tab
+ * A9+): la cáscara de cita. El modelo devolvió «[1] Cauterization»
+ * como respuesta entera a una pregunta de atragantamiento: una cita
+ * y el TÍTULO del fragmento coronado, sin una palabra del cuerpo.
+ * La frase tiene menos raíces juzgables que MIN_JUDGED_TERMS y la
+ * regla de la frase corta la dejaba pasar como «del modelo sin
+ * fuente»; con la lista del juez reducida a ese fragmento solo (el
+ * ajuste de presupuesto de una conversación crecida puede dejar un
+ * único superviviente diminuto), ninguna pierna de relevancia la
+ * retira, porque sola en la lista ella es su propia referencia de
+ * relevancia, y la puerta final de la abstención no se abría sin
+ * retiradas. Resultado medido: veredicto «grounded» con la cáscara
+ * tal cual, y la sustitución por el texto seguro de salud, que
+ * exige «unverified»/«abstained», sin disparar.
+ *
+ * Un título no es contenido: una frase que, quitadas las citas, ES
+ * el título de un fragmento de la lista (el título entero o su
+ * primera parte antes de « — », que es la forma «Guía — Apartado»
+ * de los packs) no afirma nada del cuerpo y se retira como
+ * cualquier frase sin fundamento. Si era lo único servido, el turno
+ * cae a la abstención honesta (y en salud, a la sustitución). La
+ * regla es agnóstica de clase y no toca las copias cortas fieles
+ * del CUERPO (A3-03): esas no son títulos.
+ */
+function normalizeTitleEcho(text: string): string {
+  return text
+    .replace(/\[\d+\]/g, " ")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[.\s]+$/u, "")
+    .trim();
+}
+
+function chunkTitleEchoForms(chunks: GroundingChunk[]): Set<string> {
+  const forms = new Set<string>();
+  for (const c of chunks) {
+    const title = c.title ?? "";
+    const full = normalizeTitleEcho(title);
+    if (full) forms.add(full);
+    const cut = title.indexOf(" — ");
+    if (cut > 0) {
+      const head = normalizeTitleEcho(title.slice(0, cut));
+      if (head) forms.add(head);
+    }
+  }
+  return forms;
+}
+
+function isChunkTitleEcho(sentence: string, echoForms: Set<string>): boolean {
+  if (echoForms.size === 0) return false;
+  const s = normalizeTitleEcho(sentence);
+  return s.length > 0 && echoForms.has(s);
+}
+
+// ------------------------------------------------------- verificación
+
+export interface SentenceSupport {
+  /** Fracción de palabras de contenido presentes en las fuentes (0..1). */
+  support: number;
+  /** Palabras de contenido ausentes de todas las fuentes. */
+  novel: number;
+  /** Total de palabras de contenido únicas de la frase. */
+  total: number;
+  /** Índice (0-based) de la fuente que más respalda la frase, o -1. */
+  bestChunk: number;
+}
+
+/**
+ * C2-H4 (barrido 0.1.96): el nombre compuesto inglés del teléfono es UN
+ * término. «teléfono» (es) y «telefone» (pt) son una palabra; «phone
+ * number» eran dos raíces, y la frase fiel inglesa «The phone number to
+ * change the appointment is 520-555-0147» contra «To change the
+ * appointment call 520-555-0147» quedaba en 5/7 = 0,714, bajo
+ * STRICT_SUPPORT, cuando sus gemelas es/pt dan 5/6 = 0,83. La vara no se
+ * mueve: solo se cuenta el término inglés como lo cuentan es y pt.
+ */
+const EN_PHONE_COMPOUND_RE = /\b(tele)?phone[\s-]+numbers?\b/gi;
+
+export function sentenceSupport(sentence: string, chunkStemSets: Set<string>[]): SentenceSupport {
+  const stems = [...new Set(contentStems(sentence.replace(EN_PHONE_COMPOUND_RE, "$1phone")))];
+  const union = new Set<string>();
+  for (const set of chunkStemSets) for (const s of set) union.add(s);
+  // CL-9 (caza 0.1.97): simetría dígito↔letra en el apoyo — «cinco
+  // mililitros» se apoya en el «5 ml» de la evidencia y «5» en su
+  // «cinco»: el número en letra de un lado casa con el dígito del
+  // otro (la vara de cifras ya lo hacía; el apoyo léxico no).
+  const unionWordValues = new Set<number>();
+  for (const u of union) {
+    const v = wordNumberValue(u);
+    if (v !== null) unionWordValues.add(v);
+  }
+  const stemFound = (s: string, set: Set<string>, wordValues: Set<number>): boolean => {
+    if (set.has(s)) return true;
+    const v = wordNumberValue(s);
+    if (v !== null && set.has(String(v))) return true;
+    // T-05 (m-08): la simetría también palabra↔palabra — «two» se
+    // apoya en el «twice» de la guía (ambos valen 2) como ya se
+    // apoyaba en su dígito; sin esta vía la paráfrasis fiel de
+    // P-10a quedaba con la raíz del número como novedad y caía por
+    // apoyo aunque la pierna de cifras ya la sostenía.
+    if (v !== null && wordValues.has(v)) return true;
+    if (/^\d+$/.test(s) && wordValues.has(Number(s))) return true;
+    return false;
+  };
+  const found = stems.filter((s) => stemFound(s, union, unionWordValues)).length;
+  let bestChunk = -1;
+  let bestHits = 0;
+  chunkStemSets.forEach((set, i) => {
+    const wordValues = new Set<number>();
+    for (const u of set) {
+      const v = wordNumberValue(u);
+      if (v !== null) wordValues.add(v);
+    }
+    const hits = stems.filter((s) => stemFound(s, set, wordValues)).length;
+    if (hits > bestHits) {
+      bestHits = hits;
+      bestChunk = i;
+    }
+  });
+  return {
+    support: stems.length ? found / stems.length : 1,
+    novel: stems.length - found,
+    total: stems.length,
+    bestChunk,
+  };
+}
+
+/**
+ * Umbrales (documentados y cubiertos por tests con la evidencia real):
+ *  - frases con menos de 3 palabras de contenido no se juzgan ("¡Claro!");
+ *  - sin respaldo si < 50% de sus palabras están en las fuentes, o si trae
+ *    2+ términos ajenos y el respaldo no llega al 75% (el caso
+ *    "process called phototropism": 3/5 = 60% con 2 términos nuevos).
+ */
+export const MIN_JUDGED_TERMS = 3;
+export const MIN_SUPPORT = 0.5;
+export const STRICT_SUPPORT = 0.75;
+export const MAX_NOVEL_LOOSE = 2;
+
+export function isSupported(s: SentenceSupport): boolean {
+  if (s.total < MIN_JUDGED_TERMS) return true;
+  if (s.support < MIN_SUPPORT) return false;
+  if (s.novel >= MAX_NOVEL_LOOSE && s.support < STRICT_SUPPORT) return false;
+  return true;
+}
+
+const NOTE: Record<"removed", Record<GroundingLang, string>> = {
+  removed: {
+    es: "(Quité {{n}} frase(s) que las fuentes offline no respaldan.)",
+    en: "(I removed {{n}} sentence(s) that the offline sources don't support.)",
+    pt: "(Removi {{n}} frase(s) que as fontes offline não confirmam.)",
+  },
+};
+
+const IDK_TEXT: Record<GroundingLang, string> = {
+  es: "No lo sé con certeza: las fuentes offline no responden exactamente a eso, y prefiero no inventar.",
+  en: "I don't know for sure: the offline sources don't answer exactly that, and I'd rather not make things up.",
+  pt: "Não sei com certeza: as fontes offline não respondem exatamente a isso, e prefiro não inventar.",
+};
+
+const EXTRACT_INTRO: Record<GroundingLang, string> = {
+  es: "Esto es lo que sí dice la fuente «{{title}}»:",
+  en: "Here's what the source “{{title}}” does say:",
+  pt: "Isto é o que a fonte “{{title}}” diz:",
+};
+
+/** Primeras frases literales de la fuente principal, citadas. */
+export function extractiveSnippet(chunk: GroundingChunk, index: number, maxChars = 320, lang?: GroundingLang | null): string {
+  let sentences = splitSentences(chunk.body.trim());
+  if (lang) {
+    // R-04: en un chunk multilingüe el extracto prefiere las frases del
+    // idioma de la pregunta (antes salían las primeras del chunk,
+    // acertaran o no con el idioma de quien pregunta).
+    const own = sentences.filter((s) => detectTextLang(s) === lang);
+    if (own.length > 0) {
+      sentences = [...own, ...sentences.filter((s) => detectTextLang(s) !== lang)];
+    }
+  }
+  let out = "";
+  for (const s of sentences) {
+    if (out && out.length + s.length + 1 > maxChars) break;
+    out = out ? `${out} ${s}` : s;
+    if (out.length >= maxChars * 0.6) break;
+  }
+  if (!out) out = chunk.body.trim().slice(0, maxChars);
+  return `${out} [${index + 1}]`;
+}
+
+/**
+ * Auditoría 0.1.79: el apartado de cierre de una guía («… — Importante»:
+ * en qué fuentes se basa, haz un curso) no dice nada de la pregunta. Si es
+ * la primera fuente, el extracto «Esto es lo que sí dice…» usa la
+ * siguiente; si no hay otra, la de siempre.
+ */
+const CLOSING_TITLE_RE = /\s[—–-]\s*(?:Importante|Important)\s*$/i;
+
+/** La fuente que se enseña primero: la mejor que no sea un apartado de cierre (o la primera). */
+export function primarySourceIndex(chunks: readonly { title?: string }[]): number {
+  const i = chunks.findIndex((c) => !CLOSING_TITLE_RE.test(c.title ?? ""));
+  return i < 0 ? 0 : i;
+}
+
+export function honestAbstention(chunks: GroundingChunk[], lang: GroundingLang): string {
+  if (chunks.length === 0) return IDK_TEXT[lang];
+  const i = primarySourceIndex(chunks);
+  const intro = EXTRACT_INTRO[lang].split("{{title}}").join(chunks[i].title);
+  return `${IDK_TEXT[lang]}\n\n${intro}\n${extractiveSnippet(chunks[i], i, 320, lang)}`;
+}
+
+/** Quita citas [n] que no corresponden a ninguna fuente (el modelo inventa números). */
+export function stripInvalidCitations(text: string, chunkCount: number): string {
+  return text.replace(/\s?\[(\d+)\]/g, (m, n) => {
+    const k = Number(n);
+    return k >= 1 && k <= chunkCount ? m : "";
+  });
+}
+
+function hasCitation(sentence: string): boolean {
+  return /\[\d+\]/.test(sentence);
+}
+
+function addCitation(sentence: string, n: number): string {
+  // Antes de la puntuación final: "… energía química [1]."
+  const m = /^(.*?)([.!?…]+)?$/su.exec(sentence);
+  if (!m) return `${sentence} [${n}]`;
+  return `${m[1].trimEnd()} [${n}]${m[2] ?? ""}`;
+}
+
+/**
+ * Cifras de la evidencia (tanda 1 del programa bounty, evidenceNumbers.ts):
+ * los valores que las fuentes afirman, contra los que se juzga cada
+ * cifra de la respuesta — con redondeo y escala, no por dígitos.
+ */
+
+// ------------------------------------------------ negaciones (0.1.59)
+
+/**
+ * Negation words. They are not content words, so the support check above is
+ * blind to them: «no está sangrando» → «está sangrando» kept 100% support.
+ * Seen on a tablet in the aspirin rule of the chest-pain guide.
+ */
+const NEGATION_RE = /(?<![\p{L}])(no|nunca|jam[aá]s|ni|sin|tampoco|ning[uú]n[oa]?|nada|not|never|nor|without|none|n[aã]o|nem|sem|nenhum[a]?)(?![\p{L}])|n['’]t(?![\p{L}])/giu;
+
+export function negationCount(text: string): number {
+  return (text.match(NEGATION_RE) ?? []).length;
+}
+
+/**
+ * The source sentence that shares the most content words with `sentence`
+ * (at least 3), or null. Used to compare negations sentence by sentence.
+ */
+export function closestSourceSentence(sentence: string, sourceSentences: string[]): string | null {
+  const want = new Set(contentStems(sentence));
+  let best: string | null = null;
+  let bestHits = 0;
+  for (const src of sourceSentences) {
+    const hits = new Set(contentStems(src).filter((w) => want.has(w))).size;
+    if (hits > bestHits) {
+      bestHits = hits;
+      best = src;
+    }
+  }
+  // Only a sentence that is mostly a copy of ONE source sentence is compared
+  // (85% of its content words): one that merges two would lose the other.
+  return bestHits >= MIN_JUDGED_TERMS && want.size > 0 && bestHits / want.size >= 0.85 ? best : null;
+}
+
+/**
+ * La copia corta (T-J7, barrido «revisa todo» J7): la gemela breve
+ * de closestSourceSentence para la pierna de negación. Una frase de
+ * 2 raíces nunca llega a la vía principal (exige ≥3 aciertos y el
+ * 85 %), así que «El paciente está sangrando.» contra «El paciente
+ * no está sangrando.» salía TAL CUAL, sellada y sin cita. La copia
+ * corta exige la copia entera: TODAS las raíces de la respuesta
+ * están en la frase fuente, y esa frase no es mucho más larga (las
+ * raíces de la respuesta son al menos la mitad de las suyas). Un
+ * tema compartido dentro de una frase larga no es una copia y no
+ * se toca; una raíz sola es demasiado poco y queda fuera.
+ */
+export function closestShortCopySentence(sentence: string, candidates: string[]): string | null {
+  const want = new Set(contentStems(sentence));
+  if (want.size < 2) return null;
+  let best: string | null = null;
+  let bestRatio = 0;
+  for (const cand of candidates) {
+    const have = new Set(contentStems(cand));
+    let hits = 0;
+    for (const s of want) if (have.has(s)) hits++;
+    if (hits < want.size) continue;
+    const ratio = hits / Math.max(1, have.size);
+    if (ratio < 0.5) continue;
+    if (ratio > bestRatio) {
+      bestRatio = ratio;
+      best = cand;
+    }
+  }
+  return best;
+}
+
+/**
+ * La copia corta de UNA cláusula de una frase fuente larga (auditoría
+ * de la 0.1.70, punto 5b). closestShortCopySentence exige que la frase
+ * de la respuesta cubra la mitad de las raíces de su fuente, así que
+ * «El paciente está sangrando.» contra «El paciente no está sangrando
+ * y respira con normalidad tras la caída.» salía tal cual. Aquí la
+ * frase fuente se trocea en cláusulas (comas, punto y coma, dos
+ * puntos, los cierres de frase que el troceo de frases no vio, como
+ * «seguridad.** Muchas…», y las conjunciones «y/e/and»,
+ * «pero/but/mas», «o/or/ou») y
+ * la vara es la cláusula: todas las raíces de la respuesta caben en
+ * una cláusula, y su recuento de negaciones difiere del de la
+ * respuesta. Solo frases cortas (2 raíces, por debajo de
+ * MIN_JUDGED_TERMS; las largas siguen su vía, sin cambio). Se
+ * devuelve la frase fuente entera, palabra por palabra, como hace la
+ * capa desde 0.1.59; y nunca cuando alguna cláusula de cualquier
+ * frase de las fuentes contiene esas raíces con la misma polaridad
+ * que la respuesta (hay una lectura fiel, así que no se toca), ni
+ * cuando dos frases fuente candidatas discrepan entre sí.
+ */
+const CLAUSE_SPLIT_RE = /[,;:.!?]|\s(?:y|e|and|pero|but|mas|o|or|ou)\s/iu;
+
+export function negatedClauseSource(
+  sentence: string,
+  candidates: string[],
+  allSources: string[],
+): string | null {
+  const bare = sentence.replace(/\[\d+\]/g, "");
+  const want = new Set(contentStems(bare));
+  if (want.size < 2 || want.size >= MIN_JUDGED_TERMS) return null;
+  const neg = negationCount(bare);
+  const holds = (clause: string) => {
+    const have = new Set(contentStems(clause));
+    for (const w of want) if (!have.has(w)) return false;
+    return true;
+  };
+  for (const src of allSources) {
+    for (const clause of src.split(CLAUSE_SPLIT_RE)) {
+      if (holds(clause) && negationCount(clause) === neg) return null;
+    }
+  }
+  const hits = candidates.filter((src) => src.split(CLAUSE_SPLIT_RE).some((c) => holds(c) && negationCount(c) !== neg));
+  return hits.length === 1 ? hits[0]! : null;
+}
+
+/**
+ * T-04 (M-06 de la auditoría): la volcada de UNA raíz. «No lo
+ * purgue.» contra «Purgue el aire de la manguera antes de usarla.»
+ * salía sellada «grounded»: con una raíz la frase es
+ * «too-short-to-check» y ninguna vía de negación la alcanza (la
+ * principal exige ≥3 aciertos y el 85 %; la corta y la de cláusulas,
+ * ≥2 raíces). Con una raíz no hay copia que demostrar, así que el
+ * desenlace no es la sustitución de 0.1.59 sino la retirada. Solo
+ * actúa si la frase trae negación, su raíz aparece en una cláusula
+ * del chunk de apoyo con recuento de negaciones duras DISTINTO, y
+ * ninguna cláusula de ninguna fuente la trae con el MISMO recuento: la
+ * lectura fiel protege, como en negatedClauseSource («No lo purgue»
+ * contra una guía que en otra parte ya dice «no purgue…» no se
+ * toca, porque el referente puede ser ese).
+ */
+const NEGATION_DEBRIS_STEMS = new Set([
+  "nao", "nunca", "jamas", "not", "never", "don", "nenhum", "nenhuma", "tampoco", "ningun", "ninguna", "nada", "none", "nor", "nem",
+]);
+
+function flippedSingleStem(sentence: string, bestChunkSentences: string[], allSentences: string[]): boolean {
+  const bare = sentence.replace(/\[\d+\]/g, "");
+  // Las raíces que son la propia negación no cuentan: «no» español se
+  // cae por longitud, pero «não» queda en «nao» (3 letras) y «don't»
+  // deja «don», y tapaban la raíz única en pt/en.
+  const stems = [...new Set(contentStems(bare))].filter((s) => !NEGATION_DEBRIS_STEMS.has(s));
+  if (stems.length !== 1) return false;
+  if (negationCount(bare) < 1) return false;
+  // La comparación es por negación DURA (la del predicado, como en
+  // CL-3): con el conteo entero, la cláusula protectora «No purgue
+  // el depósito sin guantes» contaba 2 («no» + el «sin» del adjunto)
+  // contra el 1 de la frase y la lectura fiel dejaba de proteger.
+  const neg = hardNegationCount(bare);
+  const stem1 = stems[0]!;
+  const clausesOf = (ss: string[]) => ss.flatMap((src) => src.split(CLAUSE_SPLIT_RE));
+  for (const clause of clausesOf(allSentences)) {
+    if (new Set(contentStems(clause)).has(stem1) && hardNegationCount(clause) === neg) return false;
+  }
+  for (const clause of clausesOf(bestChunkSentences)) {
+    if (new Set(contentStems(clause)).has(stem1) && hardNegationCount(clause) !== neg) return true;
+  }
+  return false;
+}
+
+/**
+ * T-04 (P-06 de la auditoría): el condicional caído. «La fiebre pasa
+ * de 39 grados, busca atención médica» copia a la guía condicional
+ * («Si la fiebre pasa de 39 grados…») sin el «si»: palabra funcional,
+ * invisible para las raíces, y la afirmación quedaba sellada como si
+ * la guía afirmara sin condición. Si la frase es copia demostrada de
+ * una frase fuente (la vara del 85 % de closestSourceSentence) que
+ * EMPIEZA por subordinante condicional y la respuesta no trae
+ * ningún subordinante en ninguna parte, el desenlace es el de la
+ * negación volcada de 0.1.59: sustituir por la frase fuente palabra
+ * por palabra, que devuelve el «si» a su sitio y no inventa nada.
+ * El «se» inicial solo cuenta con veredicto portugués claro: en
+ * español es el reflexivo corriente («Se recomienda…»), no una
+ * condición.
+ */
+const CONDITIONAL_STARTERS = new Set(["si", "if", "cuando", "quando", "when"]);
+const CONDITIONAL_TOKENS = new Set(["si", "se", "if", "cuando", "quando", "when"]);
+
+function droppedConditional(sentence: string, src: string): boolean {
+  const srcWords = words(src);
+  if (srcWords.length === 0) return false;
+  const first = srcWords[0]!;
+  const startsConditional = CONDITIONAL_STARTERS.has(first) || (first === "se" && detectTextLang(src) === "pt");
+  if (!startsConditional) return false;
+  const respWords = new Set(words(sentence.replace(/\[\d+\]/g, "")));
+  for (const t of CONDITIONAL_TOKENS) if (respWords.has(t)) return false;
+  return true;
+}
+
+// --------------------------------- polaridad por cláusulas (CL-3)
+
+/**
+ * Una cláusula de una frase fuente, con las raíces de su contenido y
+ * su propio recuento de negaciones.
+ */
+export interface SourceClauseRec {
+  stems: Set<string>;
+  neg: number;
+  /** T-04 (M-02): raíces que la cláusula pone bajo «sin»/«sem»/«without». */
+  sinGov: Set<string>;
+  /** T-04 (M-02): raíz gobernada por su marcador de exclusividad («solo»…), o null. */
+  soloGov: string | null;
+}
+
+/**
+ * Los verbos ligeros que acompañan al marcador sin gobernar nada:
+ * «sin hacer compresiones» niega «compresiones», no «hacer» (que además
+ * es palabra vacía en es/pt, pero no su gerundio inglés «doing»).
+ */
+const LIGHT_VERB_WORDS = new Set(
+  "hacer haciendo haga haz hagan fazer fazendo faca do doing does make making realizar realizando efetuar efectuando efectuar efectuando".split(" "),
+);
+
+/**
+ * Las raíces que una cláusula pone bajo «sin»/«sem»/«without»: lo que
+ * sigue al primer marcador, saltando el verbo ligero que lo acompaña.
+ * null si la cláusula no trae marcador. Es la polaridad que
+ * hardNegationCount no mira a propósito (la de acompañamiento), leída
+ * por gobierno y no por conteo: «haz solo compresiones sin parar»
+ * pone bajo «sin» a «parar», no a «compresiones».
+ */
+function sinGovernedStems(clause: string): Set<string> | null {
+  const ws = words(clause.replace(/\[\d+\]/g, ""));
+  const i = ws.findIndex((w) => w === "sin" || w === "sem" || w === "without");
+  if (i < 0) return null;
+  let rest = ws.slice(i + 1);
+  while (rest.length > 0 && LIGHT_VERB_WORDS.has(rest[0]!)) rest = rest.slice(1);
+  return new Set(contentStems(rest.join(" ")));
+}
+
+/**
+ * Marcadores de exclusividad (es/en/pt). «só» queda fuera a propósito:
+ * words() quita el acento y lo deja en «so», que en inglés es una
+ * conjunción corriente; el portugués conserva «somente» y «apenas».
+ */
+const EXCLUSIVITY_MARKERS = new Set("solo only somente apenas unicamente exclusivamente exclusively".split(" "));
+
+/** La primera raíz de contenido tras el marcador de exclusividad, o null. */
+function exclusivityGovernedStem(clause: string): string | null {
+  const ws = words(clause.replace(/\[\d+\]/g, ""));
+  const i = ws.findIndex((w) => EXCLUSIVITY_MARKERS.has(w));
+  if (i < 0) return null;
+  const stems = contentStems(ws.slice(i + 1).join(" "));
+  return stems.length > 0 ? stems[0]! : null;
+}
+
+/**
+ * El troceo de cláusulas de esta pierna, más fino que el de
+ * negatedClauseSource: corta también por las subordinadas («si»,
+ * «mientras», «cuando», «porque», «if», «while»…), porque la
+ * cláusula invertida se esconde detrás de una subordinada fiel de
+ * la propia guía («Give aspirin to a child with fever if the
+ * temperature needs medical care the same day»). No se toca el
+ * regex compartido: la otra pierna tiene su calibración.
+ */
+const CLAUSE_SPLIT_EXT_RE = /[,;:.!?]|\s(?:y|e|and|pero|but|mas|o|or|ou|si|if|while|when|mientras|cuando|porque|enquanto|quando|because)\s/iu;
+const CLAUSE_SPLIT_EXT_CAPTURE_RE = new RegExp(`(${CLAUSE_SPLIT_EXT_RE.source})`, "iu");
+
+// T-05 (residuo 0197, matriz-b-103/111): la variante portuguesa del
+// troceo. El «o» suelto de la alternancia es la conjunción española
+// «o», pero en portugués «o» es el ARTÍCULO: trocear por él deshace
+// cada sintagma («Não deixe o telemóvel…» → «Não deixe» / «o» /
+// «telemóvel…») y la negación queda en un fragmento sin raíces,
+// separada del contenido que niega — la cláusula se emparejaba
+// consigo misma a negación 0 y la prohibición desnudada se sellaba.
+// En portugués «or» se dice «ou», que se queda; el resto de la
+// alternancia no cambia. La elección es por frase detectada, como
+// el resto de la casa lee los idiomas.
+const CLAUSE_SPLIT_EXT_PT_RE = /[,;:.!?]|\s(?:y|e|and|pero|but|mas|or|ou|si|if|while|when|mientras|cuando|porque|enquanto|quando|because)\s/iu;
+const CLAUSE_SPLIT_EXT_PT_CAPTURE_RE = new RegExp(`(${CLAUSE_SPLIT_EXT_PT_RE.source})`, "iu");
+const clauseSplitExtRe = (text: string): RegExp =>
+  detectTextLang(text) === "pt" ? CLAUSE_SPLIT_EXT_PT_RE : CLAUSE_SPLIT_EXT_RE;
+const clauseSplitExtCaptureRe = (text: string): RegExp =>
+  detectTextLang(text) === "pt" ? CLAUSE_SPLIT_EXT_PT_CAPTURE_RE : CLAUSE_SPLIT_EXT_CAPTURE_RE;
+
+/**
+ * T-20 (0.1.99, núcleo del juez): el troceo de cláusulas CON separador,
+ * el que el diseño del núcleo midió (clausulas_con_sep) y el que el
+ * contexto semántico (semanticContext.ts) usa para alinear vectores
+ * con cláusulas. Corta con la misma regex con captura de esta pierna
+ * (la variante por idioma, como dropFlippedClauses), descarta los
+ * fragmentos de menos de 8 caracteres (ruido sin predicado) y marca
+ * si la cláusula cuelga de un separador subordinante («porque», «si»,
+ * «cuando», «because»…): la subordinada no sostiene sola una puerta
+ * (su gemela puede vivir en la principal). Vive aquí, junto al
+ * troceador, para que constructor y juez troceen con LA MISMA función:
+ * duplicarla en dos módulos es como nace una desalineación.
+ */
+const SUBORDINATE_SEP_WORDS = new Set([
+  "si", "se", "if", "when", "cuando", "quando", "while", "mientras",
+  "enquanto", "porque", "because", "aunque", "although", "que",
+]);
+
+export interface ClauseWithSep {
+  text: string;
+  subordinate: boolean;
+}
+
+export function splitClausesWithSep(text: string): ClauseWithSep[] {
+  const segs = text.split(clauseSplitExtCaptureRe(text));
+  const out: ClauseWithSep[] = [];
+  let sepPrev = "";
+  for (let i = 0; i < segs.length; i++) {
+    if (i % 2 === 1) {
+      sepPrev = segs[i]!;
+      continue;
+    }
+    const t = segs[i]!.trim();
+    if (t.length < 8) continue;
+    const subordinate = sepPrev !== "" && words(sepPrev).some((w) => SUBORDINATE_SEP_WORDS.has(w));
+    out.push({ text: t, subordinate });
+  }
+  return out;
+}
+
+/**
+ * El recuento de negaciones de ESTA pierna: sin «sin»/«sem»/
+ * «without». La negación de acompañamiento migra fielmente cuando
+ * una respuesta funde dos frases de la guía («…para empujar el
+ * barco sin motor» hereda el «sin» de la segunda frase y la primera
+ * no lo tiene: contarlo condenaba la fusión fiel). Lo que esta
+ * pierna caza es la negación del predicado principal: no, nunca,
+ * not, não… Las demás piernas siguen con negationCount entero.
+ */
+const HARD_NEGATION_RE = /(?<![\p{L}])(no|nunca|jam[aá]s|ni|tampoco|ning[uú]n[oa]?|nada|not|never|nor|none|n[aã]o|nem|nenhum[a]?)(?![\p{L}])|n['’]t(?![\p{L}])/giu;
+
+function hardNegationCount(text: string): number {
+  return (text.match(HARD_NEGATION_RE) ?? []).length;
+}
+
+function sourceClauseRecs(sourceSentences: string[]): SourceClauseRec[] {
+  const out: SourceClauseRec[] = [];
+  for (const src of sourceSentences) {
+    for (const clause of src.split(clauseSplitExtRe(src))) {
+      if (!clause.trim()) continue;
+      out.push({
+        stems: new Set(contentStems(clause)),
+        neg: hardNegationCount(clause),
+        sinGov: sinGovernedStems(clause) ?? new Set<string>(),
+        soloGov: exclusivityGovernedStem(clause),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * T-04 (M-02 de la auditoría): la cláusula niega con «sin» una acción
+ * que la guía afirma. hardNegationCount deja «sin» fuera a propósito
+ * (el de acompañamiento migra fielmente al fundir frases), así que la
+ * recombinación «Sopla 1 segundo…, sin hacer compresiones» pasaba con
+ * la polaridad «empatada». Aquí el «sin» se lee por GOBIERNO, no por
+ * conteo: devuelve true si toda raíz que la cláusula pone bajo «sin»
+ * (y que es raíz de la cláusula) aparece en las fuentes y en ninguna
+ * cláusula fuente va gobernada por «sin» — la guía la afirma siempre,
+ * negarla es volcarla. Si una sola cláusula fuente la pone bajo
+ * «sin», hay una lectura fiel y no se toca (la doctrina de
+ * negatedClauseSource); el «sin» copiado tal cual («sin despegar las
+ * manos») se protege solo, porque su raíz sí va gobernada en la
+ * fuente.
+ */
+function sinGovernedFlip(clause: string, want: Set<string>, sourceClauses: SourceClauseRec[]): boolean {
+  const gov = sinGovernedStems(clause);
+  if (!gov) return false;
+  const targets = [...gov].filter((g) => want.has(g));
+  if (targets.length === 0) return false;
+  return targets.every((g) => {
+    let seen = false;
+    for (const src of sourceClauses) {
+      if (!src.stems.has(g)) continue;
+      seen = true;
+      if (src.sinGov.has(g)) return false;
+    }
+    return seen;
+  });
+}
+
+/**
+ * T-04 (M-02 de la auditoría): el trasplante bajo exclusividad. «Haz
+ * solo respiraciones sin parar» copia el marco de la guía («haz solo
+ * compresiones sin parar») y cambia el objeto del «solo» por otra
+ * raíz de la misma guía: ni el apoyo (1,0 contra la unión de raíces)
+ * ni la polaridad (su «sin parar» es fiel) lo ven. La cláusula se
+ * corta si gobierna con su marcador una raíz que la guía trae en
+ * otra parte (trasplante, no invención), existe una cláusula fuente
+ * con marcador que gobierna OTRA raíz y comparte ≥2 raíces con ella
+ * (el marco del que copia), y ninguna cláusula fuente gobierna la
+ * MISMA raíz con contacto de marco (esa sería la lectura fiel).
+ */
+function exclusivityFlip(clause: string, want: Set<string>, sourceClauses: SourceClauseRec[]): boolean {
+  const govC = exclusivityGovernedStem(clause);
+  if (!govC) return false;
+  const shared = (src: SourceClauseRec) => {
+    let n = 0;
+    for (const w of want) if (src.stems.has(w)) n++;
+    return n;
+  };
+  for (const src of sourceClauses) {
+    if (src.soloGov === govC && shared(src) >= 1) return false;
+  }
+  let transplanted = false;
+  for (const src of sourceClauses) {
+    if (src.stems.has(govC)) {
+      transplanted = true;
+      break;
+    }
+  }
+  if (!transplanted) return false;
+  for (const src of sourceClauses) {
+    if (src.soloGov !== null && src.soloGov !== govC && shared(src) >= 2) return true;
+  }
+  return false;
+}
+
+/**
+ * La polaridad por cláusulas (CL-3 de la caza 0.1.97). Las vías de
+ * copia solo alcanzan a la frase que copia UNA frase fuente; la
+ * contradicción que reparte el vocabulario de la guía entre dos
+ * frases, o añade una cláusula propia, pasaba con el apoyo máximo y
+ * la polaridad sin comparar: «Da paracetamol a un bebé sin consultar
+ * al médico» salió sellada contra «nunca des paracetamol a un bebé
+ * sin consultar al médico». Aquí cada cláusula de la respuesta con
+ * predicado reconocible (≥ 2 raíces y ≥ 75 % de ellas en UNA
+ * cláusula fuente) se compara por recuento de negaciones con las
+ * cláusulas fuente que la contienen: si TODAS difieren, la cláusula
+ * dice lo contrario de la guía y se CORTA, conservando el resto de
+ * la frase (la frase compuesta inversa de la caza: la invención
+ * primero y lo fiel detrás — lo fiel se queda). Una sola cláusula
+ * fuente con el mismo recuento basta para no tocarla: hay una
+ * lectura fiel (la doctrina de negatedClauseSource). Sin herencia
+ * entre cláusulas: una respuesta que funde dos frases de la guía,
+ * una negada y otra afirmativa, es fiel cláusula a cláusula.
+ * Devuelve el texto con las cláusulas cortadas y cuántas cayeron.
+ */
+export function dropFlippedClauses(
+  sentence: string,
+  sourceClauses: SourceClauseRec[],
+): { text: string; dropped: number } {
+  const bare = sentence.replace(/\[\d+\]/g, "");
+  // Segmentos: cláusula, separador, cláusula, separador… Los
+  // separadores se conservan tal cual para que lo no cortado quede
+  // byte a byte como llegó.
+  const segs = bare.split(clauseSplitExtCaptureRe(bare));
+  const drop = new Set<number>();
+  const faithfulMain = new Set<number>();
+  const negatedRemainder = new Set<number>();
+  for (let i = 0; i < segs.length; i += 2) {
+    const clause = segs[i]!;
+    const want = new Set(contentStems(clause));
+    // Suelo de 2 raíces, no 3: la cláusula imperativa corta es la
+    // peligrosa y sus palabras de contenido caen a 2 tras quitar las
+    // vacías («Uses el ascensor durante un incendio» → {ascenso,
+    // incendi}: «uses» y «durante» son palabras vacías). Con 2 se
+    // exige contención entera (need = 2).
+    if (want.size < 2) {
+      // T-04 (M-02): la cláusula de UNA raíz no llega a la vara, pero
+      // si esa raíz va bajo «sin» contra la guía («sin hacer
+      // compresiones»: «hacer» es palabra vacía y solo queda
+      // «compresiones»), el gobierno del «sin» la juzga igual.
+      if (want.size === 1 && sinGovernedFlip(clause, want, sourceClauses)) drop.add(i);
+      continue;
+    }
+    const neg = hardNegationCount(clause);
+    const need = Math.max(2, Math.ceil(want.size * 0.75));
+    // T-05 (residuo 0197, matriz-a-340/341 y 463/464): la lectura
+    // fiel ya no absuelve por orden de llegada. Antes el bucle se
+    // cerraba en la PRIMERA cláusula fuente con el mismo recuento,
+    // y un fragmento débil la absolvía contra la prohibición bien
+    // emparejada: en 463, la cláusula locativa «where the pipe
+    // enters the house» (3 aciertos, vía inversa) absolvía la frase
+    // cuya cláusula principal contradecía «Do not use a metal
+    // wrench…» (5 aciertos); en 340, la gemela fiel del cable rojo
+    // (6) absolvía antes de mirar la prohibición del negro (7).
+    // Ahora manda el mejor emparejado de cada lado: la lectura fiel
+    // absuelve solo si empareja al menos tan fuerte como la mejor
+    // contradictoria. El empate sigue absolviendo — la doctrina de
+    // siempre: ante dos lecturas igual de buenas, hay lectura fiel.
+    let bestFaithful = 0;
+    let bestContra = 0;
+    for (const src of sourceClauses) {
+      let hits = 0;
+      for (const w of want) if (src.stems.has(w)) hits++;
+      // Dos vías de emparejamiento: la cláusula fuente contiene el
+      // 75 % de las raíces de la respuesta (la vía de siempre), o la
+      // respuesta contiene el 75 % de las raíces de la fuente (el
+      // núcleo invertido fundido con fragmentos fieles de otras
+      // frases, que diluía la primera vía: «Rode a válvula com
+      // ferramentas de metal até ficar perpendicular ao tubo junto
+      // ao contador»).
+      const forward = hits >= need;
+      const reverse = src.stems.size >= MIN_JUDGED_TERMS && hits >= Math.ceil(src.stems.size * 0.75);
+      if (!forward && !reverse) continue;
+      if (src.neg === neg) {
+        if (hits > bestFaithful) bestFaithful = hits;
+      } else if (hits > bestContra) {
+        bestContra = hits;
+      }
+    }
+    const matched = bestFaithful > 0 || bestContra > 0;
+    const faithful = bestFaithful > 0 && bestFaithful >= bestContra;
+    if (matched && !faithful) drop.add(i);
+    // T-04 (M-02): sin lectura fiel por conteo, quedan las dos
+    // recombinaciones que el conteo no ve — la acción afirmada por
+    // la guía y negada con «sin», y el objeto del «solo» trasplantado
+    // de otra cláusula de la guía. Una cláusula con lectura fiel
+    // demostrada no se toca tampoco por estas vías.
+    if (!drop.has(i) && !(matched && faithful)) {
+      if (sinGovernedFlip(clause, want, sourceClauses) || exclusivityFlip(clause, want, sourceClauses)) drop.add(i);
+    }
+    // Cláusula principal fiel demostrada: servirá para decidir si
+    // la frase sobrevive a la caída de su primera cláusula.
+    if (matched && faithful && want.size >= MIN_JUDGED_TERMS) faithfulMain.add(i);
+    // T-05 (matriz-b-111): cláusula con negación dura que ninguna
+    // lectura fiel sostiene — candidata a resto peligroso si otra
+    // cláusula de la frase cae (ver el desenlace abajo).
+    if (want.size >= 2 && neg > 0 && !(matched && faithful)) negatedRemainder.add(i);
+  }
+  if (drop.size === 0) return { text: sentence, dropped: 0 };
+  // Si cae la primera cláusula y detrás no queda ninguna principal
+  // fiel, cae la frase entera: su espina era la invertida y lo que
+  // queda son subordinadas colgando («Mete los dedos… mientras la
+  // persona se atraganta»). Si detrás SÍ hay una principal fiel
+  // («…y después da 5 golpes secos…»), la frase se opera y se queda.
+  const firstClause = segs.findIndex((seg, i) => i % 2 === 0 && seg.trim().length > 0);
+  if (firstClause >= 0 && drop.has(firstClause)) {
+    const quedaPrincipalFiel = [...faithfulMain].some((i) => !drop.has(i));
+    if (!quedaPrincipalFiel) return { text: "", dropped: drop.size };
+  }
+  // T-05 (matriz-b-111): la negación repartida dejaba la frase en
+  // pie a medias — cortada la prohibición desnudada («deixe o
+  // telemóvel a carregar toda a noite»), quedaba la otra mitad de
+  // la inversión («nunca o desligue da tomada»), una cláusula con
+  // negación dura que ninguna lectura fiel sostiene. Si la cirugía
+  // cortó algo, no queda ninguna principal fiel, y entre lo que
+  // queda hay una cláusula así, la frase entera cae: servir el
+  // resto sería servir la inversión por la mitad que no se pudo
+  // emparejar. Con una principal fiel en pie manda la cirugía de
+  // siempre: lo fiel se queda.
+  if (![...faithfulMain].some((i) => !drop.has(i)) && [...negatedRemainder].some((i) => !drop.has(i))) {
+    return { text: "", dropped: drop.size };
+  }
+  const kill = new Set<number>(drop);
+  for (const i of drop) {
+    // El separador que acompaña a la cláusula cortada: el anterior,
+    // o el siguiente si la cláusula abría la frase.
+    if (i > 0) kill.add(i - 1);
+    else if (segs.length > 1) kill.add(1);
+  }
+  const text = segs
+    .filter((_, i) => !kill.has(i))
+    .join("")
+    .replace(/\s+([,;:.!?])/g, "$1")
+    .trim();
+  return { text, dropped: drop.size };
+}
+
+// ------------------------------------------- idioma por frase (R-04)
+
+/** Una frase de las fuentes, con el chunk del que sale. */
+export interface SourceSentenceRec {
+  text: string;
+  chunk: number;
+}
+
+/** Todas las lecturas de todas las cifras de un texto, como conjunto. */
+function numberValueSet(text: string): Set<number> {
+  const out = new Set<number>();
+  for (const token of numberTokens(text)) {
+    for (const v of parseNumberToken(token)) out.add(v);
+  }
+  return out;
+}
+
+/** Los valores de las cifras JUZGADAS de un texto (la doctrina de isJudged). */
+function judgedNumberValueSet(text: string): Set<number> {
+  const out = new Set<number>();
+  for (const token of numberTokens(text)) {
+    if (!isJudged(token)) continue;
+    for (const v of parseNumberToken(token)) out.add(v);
+  }
+  return out;
+}
+
+function sameNumbers(a: Set<number>, b: Set<number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const v of a) if (!b.has(v)) return false;
+  return true;
+}
+
+/**
+ * T-05 (residuo 0197, matriz-a-097/098 y 130/131): la copia casi
+ * idéntica con la cifra cambiada de rol. «Da 90 golpes secos entre
+ * los omóplatos» copia la frase de la guía cambiando el 5 por el 90
+ * de los «90 segundos» de dos frases más abajo; «call 10» lava el
+ * 10 de «answers in 10 seconds». La cifra SÍ está en la evidencia
+ * (en otro rol), así que la pierna de cifras la sostiene, y las
+ * palabras son las de la propia frase: ninguna pierna comparaba la
+ * frase contra SU frase. Aquí sí: si la frase es copia de UNA
+ * cláusula fuente (contención ≥ 85 % en los dos sentidos, la vara
+ * de closestSourceSentence) y trae el mismo NÚMERO de cifras
+ * juzgadas que ella pero con algún valor distinto, la cifra
+ * distinta es un trasplante de rol y la frase se retira. La
+ * juzgada es la de la RESPUESTA (la doctrina de isJudged manda
+ * también aquí: el «paso 3» de la prosa no se juzga, barrido0196);
+ * la de la fuente es el valor reemplazado y puede ser cualquiera
+ * (el «5» de los golpes). Las guardas conservan lo fiel: la copia
+ * guía (conteo distinto) no entra; la que difiere solo en cifras
+ * que son cantidades con unidad tampoco (eso lo juzga la capa de
+ * cantidades, con sus conversiones).
+ */
+function changedNumberCopy(sentence: string, sourceSentences: readonly string[]): boolean {
+  const bare = sentence.replace(/\[\d+\]/g, "");
+  // Las cifras no cuentan como raíces para la copia: son justo lo
+  // que se compara aparte, y contarlas hunde la contención de la
+  // pareja verdadera («90» contra «5» dejaba la copia en 5/6).
+  const want = new Set(contentStems(bare).filter((s) => !/^\d+$/.test(s)));
+  if (want.size < MIN_JUDGED_TERMS) return false;
+  const mine = judgedNumberValueSet(bare);
+  if (mine.size === 0) return false;
+  const qtyVals = new Set(quantitiesOf(bare).flatMap((q) => [q.raw, q.canon]));
+  for (const src of sourceSentences) {
+    // Las unidades de emparejado: la frase entera y sus cláusulas.
+    // La copia de 130 es de la frase («In Spain, call 112…, such as
+    // fire…») y las comas la trocean por debajo del suelo; la de
+    // 097 es de una cláusula dentro de una frase condicional larga.
+    const units = [src, ...src.split(clauseSplitExtRe(src))];
+    // Las cifras comparadas son las de la FRASE fuente entera, no
+    // las de la cláusula emparejada: el troceador corta también en
+    // los dos puntos de una hora, y la copia fiel de «…a las 9:30
+    // de la mañana» emparejaba con la cláusula «…a las 9» y salía
+    // con la cifra cambiada (H-07). El valor reemplazado puede
+    // vivir en cualquier cláusula de su frase; el trasplantado,
+    // en cualquier parte de la guía (por eso basta que difiera).
+    const theirs = numberValueSet(src);
+    for (const clause of units) {
+      const srcStems = new Set(contentStems(clause).filter((s) => !/^\d+$/.test(s)));
+      if (srcStems.size < MIN_JUDGED_TERMS) continue;
+      let hits = 0;
+      for (const w of want) if (srcStems.has(w)) hits++;
+      if (hits < Math.ceil(want.size * 0.85)) continue;
+      if (hits < Math.ceil(srcStems.size * 0.85)) continue;
+      if (theirs.size === 0 || theirs.size !== mine.size) continue;
+      if ([...mine].every((v) => theirs.has(v))) continue;
+      const differing = [...mine].filter((v) => !theirs.has(v));
+      if (differing.every((v) => qtyVals.has(v))) continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+// ------------------------------------------- cifra↔rol por orden (T-19, V5b)
+
+/**
+ * T-19 (núcleo del juez, V5b): la cifra fiel lavada en un rol ajeno.
+ * La vara de cantidades ata la cifra a su unidad, pero no a su PAPEL:
+ * «3000 mg por toma» pasa cuando la guía dice «500 mg por toma» y
+ * «3000 mg en 24 horas» — la cifra existe, la unidad existe y el rol
+ * existe, pero ese par (cifra, rol) no. La pierna empareja POR ORDEN
+ * dentro de la frase: se recorren las palabras en orden, la cifra
+ * vigente es la última vista y cada palabra de rol se ata a ella.
+ * Dispara cuando un par de la frase no está entre los pares de la
+ * evidencia, con el rol emparejado en la evidencia y la cifra
+ * presente en ella: la invención con cifra ausente no dispara (es
+ * terreno de las demás puertas) y el par fiel no dispara.
+ *
+ * La forma es la medida en el diseño contra la batería completa
+ * (902 casos: caza 012/295/296/297 con 0 fieles rotas y 0 colateral).
+ * La variante cartesiana (V5a: todo valor con todo rol de la frase)
+ * rompía los conserva matriz-b-011 y matriz-b-114 y está muerta: si
+ * esta implementación rompe alguno, es que se coló la forma muerta.
+ *
+ * Las formas de la tabla son las de superficie es/en/pt; la raíz con
+ * la que se casa cada una es la que produce contentStems (el mapa se
+ * construye desde ella), y el test de la pierna fija esa raíz por
+ * entrada: una forma que el stemmer dejara muerta tumba el test, no
+ * pasa en silencio.
+ */
+export const VALUE_ROLE_FORMS: ReadonlyArray<readonly [string, string]> = [
+  ["frente", "front"], ["delantera", "front"], ["delantero", "front"], ["front", "front"],
+  ["dianteira", "front"], ["dianteiro", "front"],
+  ["trasera", "rear"], ["trasero", "rear"], ["detrás", "rear"], ["atrás", "rear"],
+  ["rear", "rear"], ["traseira", "rear"], ["traseiro", "rear"],
+  ["izquierda", "left"], ["izquierdo", "left"], ["left", "left"],
+  ["esquerda", "left"], ["esquerdo", "left"],
+  ["derecha", "right"], ["derecho", "right"], ["right", "right"],
+  ["direita", "right"], ["direito", "right"],
+  ["toma", "perdose"], ["dose", "perdose"],
+  ["día", "perday"], ["dia", "perday"], ["day", "perday"],
+  ["primera", "first"], ["primero", "first"], ["primer", "first"], ["first", "first"],
+  ["primeira", "first"], ["primeiro", "first"],
+  ["última", "last"], ["último", "last"], ["ultima", "last"], ["ultimo", "last"], ["last", "last"],
+];
+
+/** Raíz de producción → rol, construido desde las formas con contentStems. */
+const VALUE_ROLE_BY_STEM: ReadonlyMap<string, string> = (() => {
+  const map = new Map<string, string>();
+  for (const [form, role] of VALUE_ROLE_FORMS) {
+    for (const s of contentStems(form)) map.set(s, role);
+  }
+  return map;
+})();
+
+/**
+ * Los pares (cifra, rol) de un texto, como claves «valor|rol»,
+ * emparejados por la cifra precedente dentro de cada frase. Los
+ * valores son las lecturas de la casa (parseNumberToken): «3.000»
+ * empareja sus dos lecturas, como la evidencia las cuenta todas.
+ */
+export function valueRolePairs(text: string): Set<string> {
+  const pairs = new Set<string>();
+  for (const sentence of splitSentences(text)) {
+    // El mismo plegado que words(): minúsculas, sin acentos, sin citas.
+    const folded = stripAccents(sentence.toLowerCase()).replace(/\[\d+\]/g, " ");
+    let current: number[] = [];
+    for (const m of folded.matchAll(/\d+\/\d+(?![\d/])|\d[\d.,]*\d|\d|[a-zñ]+/g)) {
+      const tok = m[0];
+      if (/^\d/.test(tok)) {
+        const readings = parseNumberToken(tok);
+        if (readings.length > 0) {
+          current = readings;
+        } else if (tok.includes("/")) {
+          // Fracción que no es de cocina (una fecha, una razón):
+          // numberTokens la parte en tokens sueltos, así que la
+          // cifra vigente pasa a ser su última parte, como allí.
+          const parts = tok.match(/\d+/g) ?? [];
+          current = parts.length ? parseNumberToken(parts[parts.length - 1]) : [];
+        }
+        continue;
+      }
+      const role = VALUE_ROLE_BY_STEM.get(stem(tok));
+      if (role !== undefined) {
+        for (const v of current) pairs.add(`${v}|${role}`);
+      }
+    }
+  }
+  return pairs;
+}
+
+/**
+ * ¿Ata la frase alguna cifra a un rol con el que la evidencia nunca
+ * la empareja, estando la cifra en la evidencia y el rol emparejado
+ * en ella con otra cifra? Es el disparo de V5b; su desenlace en el
+ * juez es el de quantityConflict (la frase se retira).
+ */
+export function valueRoleConflict(
+  sentence: string,
+  sourcePairs: ReadonlySet<string>,
+  sourceRoles: ReadonlySet<string>,
+  sourceNumbers: ReadonlySet<number>,
+): boolean {
+  for (const key of valueRolePairs(sentence)) {
+    if (sourcePairs.has(key)) continue;
+    const cut = key.lastIndexOf("|");
+    if (sourceRoles.has(key.slice(cut + 1)) && sourceNumbers.has(Number(key.slice(0, cut)))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * La frase fuente de la que `sentence` es copia (literal o casi), o null.
+ * Umbrales propios, no los de closestSourceSentence: el 85 % está
+ * calibrado para la negación dentro de la misma lengua, y una copia
+ * entre lenguas hermanas pierde raíces por el camino («veces» → «vece»
+ * contra «vezes» → «veze»: el híbrido real de la ronda comparte 5/6 de
+ * sus raíces con su fuente portuguesa y aun así ES una copia). Se
+ * exige: ≥ 3 raíces compartidas, ≥ 75 % de las raíces de la frase
+ * salen de ESA fuente, y la frase cubre ≥ 50 % de las raíces de la
+ * fuente (un fragmento suelto de una frase larga no cuenta como copia).
+ */
+function bestCopySource(sentence: string, recs: SourceSentenceRec[]): SourceSentenceRec | null {
+  const want = new Set(contentStems(sentence));
+  if (want.size < MIN_JUDGED_TERMS) return null;
+  let best: SourceSentenceRec | null = null;
+  let bestScore = 0;
+  for (const rec of recs) {
+    const srcStems = new Set(contentStems(rec.text));
+    let hits = 0;
+    for (const w of want) if (srcStems.has(w)) hits++;
+    if (hits < MIN_JUDGED_TERMS) continue;
+    const ofSentence = hits / want.size;
+    const ofSource = hits / Math.max(1, srcStems.size);
+    if (ofSentence < 0.75 || ofSource < 0.5) continue;
+    const score = ofSentence + ofSource;
+    if (score > bestScore) {
+      bestScore = score;
+      best = rec;
+    }
+  }
+  return best;
+}
+
+/**
+ * La gemela de `copy` en el idioma de la pregunta: otra frase fuente
+ * con LAS MISMAS cifras, solape léxico real con la copia (≥ 3 raíces y
+ * ≥ 1/3 del conjunto menor) y mejor puntuación de pistas en el idioma
+ * de la pregunta que la propia copia. El empate de pistas solo vale si
+ * la candidata SÍ tiene veredicto claro en el idioma de la pregunta y
+ * la copia no (la frase del teléfono: «para» puntúa en las dos, pero
+ * solo la española tiene veredicto «es»). Una candidata con veredicto
+ * claro de un tercer idioma nunca es la gemela.
+ */
+function findSourceTwin(copy: SourceSentenceRec, recs: SourceSentenceRec[], lang: GroundingLang): SourceSentenceRec | null {
+  const nums = numberValueSet(copy.text);
+  const copyStems = new Set(contentStems(copy.text));
+  const copyHints = langHintCount(copy.text, lang);
+  const copyLang = detectTextLang(copy.text);
+  let best: SourceSentenceRec | null = null;
+  let bestOverlap = 0;
+  for (const cand of recs) {
+    if (cand === copy) continue;
+    const candLang = detectTextLang(cand.text);
+    if (candLang !== null && candLang !== lang) continue;
+    if (!sameNumbers(numberValueSet(cand.text), nums)) continue;
+    const candStems = new Set(contentStems(cand.text));
+    let overlap = 0;
+    for (const w of candStems) if (copyStems.has(w)) overlap++;
+    if (overlap < MIN_JUDGED_TERMS) continue;
+    if (overlap * 3 < Math.min(candStems.size, copyStems.size)) continue;
+    const hints = langHintCount(cand.text, lang);
+    const wins = hints > copyHints || (hints === copyHints && candLang === lang && copyLang !== lang);
+    if (!wins) continue;
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      best = cand;
+    }
+  }
+  return best;
+}
+
+export type ForeignCopyFix =
+  | { kind: "replace"; text: string; chunk: number }
+  | { kind: "remove" }
+  | null;
+
+/**
+ * R-04: qué hacer con una frase que copia a las fuentes en un idioma
+ * que no es el de la pregunta. Con gemela en el idioma de la pregunta,
+ * se sustituye por ella (verbatim, con su cita). Sin gemela, solo se
+ * retira si la copia es de otro idioma con veredicto claro; si el
+ * idioma de la copia no se distingue del de la pregunta, la frase se
+ * deja en paz (el detector es tímido con frases cortas y la frase
+ * puede ser legítima). Si la frase no copia a ninguna fuente, null:
+ * no es asunto de esta regla.
+ */
+export function foreignCopyFix(sentence: string, recs: SourceSentenceRec[], lang: GroundingLang): ForeignCopyFix {
+  const copy = bestCopySource(sentence, recs);
+  if (!copy) return null;
+  // Una copia cuyo idioma SÍ tiene veredicto claro y es el de la
+  // pregunta ya está en el idioma correcto: no se toca. Sin esta
+  // guarda, la gemela portuguesa del teléfono («…ligue para
+  // 520-555-0147», de veredicto null y con «para» puntuando como
+  // pista española) podía ganar el duelo de pistas y sustituir a la
+  // frase española CORRECTA por la portuguesa (bug cazado por la
+  // fixture de R-05 antes de publicar este carril).
+  if (detectTextLang(copy.text) === lang) return null;
+  const twin = findSourceTwin(copy, recs, lang);
+  if (twin) return { kind: "replace", text: twin.text, chunk: twin.chunk };
+  const copyLang = detectTextLang(copy.text);
+  if (copyLang !== null && copyLang !== lang) return { kind: "remove" };
+  return null;
+}
+
+// ------------------------------------------- el dato pedido (R-05)
+
+/**
+ * Ronda física 0.1.68, R-05: a «¿Qué teléfono aparece para cambiar la
+ * cita?» la respuesta fue «El teléfono para cambiar la cita es el
+ * número de emergencia» — afirma qué es el dato sin darlo, mientras
+ * la fuente traía impreso «…llame al 520-555-0147». Ninguna puerta
+ * juzgaba el hueco: la de cifras itera las cifras DE LA RESPUESTA
+ * (cero cifras → verdad vacua) y la de contradicciones solo contrasta
+ * cifras presentes en ambos lados. La falsedad por sustitución sin
+ * cifras no tenía puerta; esta es la suya.
+ *
+ * La regla del dato pedido: si la pregunta pide un dato que se da en
+ * cifras (doble condición: señal en la pregunta Y cifra temática en
+ * la evidencia), una frase conservada que afirma la identidad de ese
+ * dato sin dar ninguna cifra se sustituye por la frase fuente que lo
+ * trae (el precedente de sustitución verbatim de 0.1.59) y las
+ * demás que hagan lo mismo se retiran. Si alguna frase conservada YA
+ * da el dato, la regla no toca nada: afirmar junto al dato dado es
+ * hablar del dato, no sustituirlo.
+ *
+ * T-J1 (barrido «revisa todo»): la doble condición sigue mandando
+ * en esta pierna de identidad sin cifras. La pierna tipada (la
+ * afirmación CON cifras que no casan con su tipo) ya no depende de
+ * la señal de la pregunta: su perímetro nuevo está asentado en el
+ * docstring de applyDatumRule.
+ */
+
+// Señales de «la pregunta pide un dato»: la base de NUMBER_CUES
+// (packFacts.ts: teléfono, número, llamar…) ampliada con
+// cuánto/cuándo/hora/día/sala. Sobre el texto plegado (sin acentos).
+// ADV2-A: entran room/hora/fecha/dosis en sus formas en/pt además de
+// las es — la lista era española y una pregunta inglesa de sala
+// («what room…») ni siquiera llegaba a la regla. Añadir una señal
+// solo deja que la regla CONSIDERE la pregunta: la sustitución
+// sigue necesitando infractor y dato del tipo en la evidencia.
+const DATUM_QUESTION_RE =
+  /\b(numero|numeros|telefono|telefonos|tel|llamo|llamar|llamas|llama|marco|marcar|linea|number|numbers|phone|call|dial|hotline|telefone|telefones|ligo|ligar|discar|disco|contacto|contact|cuanto|cuanta|cuantos|cuantas|cuando|hora|horas|hour|hours|dia|dias|sala|room|rooms|dosis|dose|doses|fecha|fechas|date|dates|data)\b/;
+
+// La categoría del dato en la RESPUESTA (de qué dato afirma ser).
+const DATUM_CATEGORY_RE =
+  /\b(telefono|telefonos|numero|numeros|phone|phones|number|numbers|telefone|telefones|linea|line|dosis|dose|hora|horas|hour|hours|dia|dias|day|fecha|date|sala|room)\b/;
+
+// La cópula que convierte la mención en afirmación de identidad
+// («es el número de…»). Sobre texto plegado «é» se vuelve «e», que
+// queda fuera a propósito: la «e» suelta portuguesa es «y», no
+// cópula, y casaría de más.
+const DATUM_COPULA_RE = /\b(es|son|era|eran|fue|fueron|is|are|was|were|foi|foram|sao)\b/;
+
+/**
+ * T-J2 (barrido «revisa todo», J2): la cópula de la afirmación,
+ * con la portuguesa «é» leída ANTES del pliegue. La lista de arriba
+ * corre sobre texto plegado, donde «é» ya es «e» — la conjunción
+ * —, y por esa exclusión deliberada TODA afirmación tipada en
+ * portugués quedaba exenta de la pierna: la dosis falsa de un
+ * dígito se sellaba fundada en pt mientras su gemela es se retiraba
+ * desde A3-03. La salida no es meter «e» en la lista (abriría la
+ * conjunción), sino mirar el token acentuado en el texto sin
+ * plegar: «é» suelto, con fronteras de no-letra, es cópula en pt y
+ * no existe como palabra en es. Dentro de palabra («café») no
+ * caza: la letra anterior lo cierra.
+ */
+function hasDatumCopula(sentence: string): boolean {
+  if (DATUM_COPULA_RE.test(foldForCues(sentence))) return true;
+  return /(?:^|[^\p{L}])é(?![\p{L}])/u.test((sentence ?? "").toLowerCase());
+}
+
+// Preguntas «de teléfono» a efectos de la forma del dato (un teléfono
+// es una ristra larga de dígitos, no una cifra con unidad). SOLO
+// señales de teléfono o de llamada: «número/number» a secas NO está
+// (adversaria H-02) — cualquier pregunta por un número (el de la
+// tarjeta, el de la sala) activaba la forma telefónica, y la regla
+// podía entregar un teléfono como si fuera ese otro dato.
+const PHONE_QUESTION_RE =
+  /\b(telefono|telefonos|phone|phones|telefone|telefones|llamar|llama|llamo|call|dial|ligar|ligo|discar|disco|linea|hotline)\b/;
+
+function foldForCues(text: string): string {
+  return stripAccents((text ?? "").toLowerCase());
+}
+
+/** ¿Trae la frase alguna cifra juzgable? (La vara de evidenceNumbers: 2+ dígitos o parte decimal.) */
+function hasJudgedDigit(sentence: string): boolean {
+  return numberTokens(sentence).some((t) => {
+    const digits = t.replace(/[.,]/g, "");
+    return digits.length >= 2 || /[.,]\d/.test(t);
+  });
+}
+
+/** ¿Trae el texto una ristra de ≥ 7 dígitos (la forma de un teléfono)? «9:30» o «2026» no lo son. */
+function hasPhoneCluster(text: string): boolean {
+  const clusters = text.match(/\d[\d .-]*\d/g) ?? [];
+  return clusters.some((c) => c.replace(/\D/g, "").length >= 7);
+}
+
+/**
+ * ¿Es la ristra una TARJETA y no un teléfono? (segunda adversaria,
+ * ADV2-01): 15–16 dígitos agrupados como se imprimen las tarjetas
+ * (4-4-4-4, 4-6-5 o la ristra corrida) casan el conteo de dígitos
+ * de «forma telefónica», y la regla servía el número de la tarjeta
+ * como teléfono de la clínica. Un teléfono no se imprime así.
+ */
+export function isCardCluster(cluster: string): boolean {
+  const digits = cluster.replace(/\D/g, "");
+  if (digits.length !== 15 && digits.length !== 16) return false;
+  const groups = cluster
+    .trim()
+    .split(/[\s.-]+/)
+    .filter(Boolean)
+    .map((g) => g.replace(/\D/g, "").length);
+  if (groups.length === 1) return true;
+  const key = groups.join("-");
+  return key === "4-4-4-4" || key === "4-6-5";
+}
+
+/** La forma telefónica de verdad: ristra de ≥7 dígitos que NO es una tarjeta. */
+function hasPhoneForm(text: string): boolean {
+  const clusters = text.match(/\d[\d .-]*\d/g) ?? [];
+  return clusters.some((c) => c.replace(/\D/g, "").length >= 7 && !isCardCluster(c));
+}
+
+/** ¿Trae el texto una ristra con forma de tarjeta? */
+function hasCardForm(text: string): boolean {
+  const clusters = text.match(/\d[\d .-]*\d/g) ?? [];
+  return clusters.some((c) => isCardCluster(c));
+}
+
+// ---------------------------------------------------------------
+// El TIPO del dato (segunda adversaria ADV2-01 + corrida de Grok
+// ADV-G1/G2). La regla comparaba CIFRAS, no tipos: el empate entre
+// dos datos se rompía por el orden de la fuente, y una afirmación
+// con las cifras de OTRO dato (el teléfono servido como número de
+// tarjeta; el 911 servido como teléfono de la cita) pasaba sellada
+// porque «las cifras están en la fuente». Desde esta tanda, cuando
+// la pregunta nombra un tipo concreto, el dato servido y las
+// cifras afirmadas han de ser DE ESE TIPO.
+
+type DatumType = "phone" | "card" | "room" | "hour" | "date" | "dose";
+
+/**
+ * Palabra → tipo, sobre texto plegado. «número/number» NO está: es
+ * la etiqueta genérica, no un tipo — «¿cuál es el número de…?» solo
+ * gana tipo cuando nombra el dato (tarjeta, sala, hora…). El tipo
+ * de un texto es el de su PRIMERA palabra de tipo: «el teléfono de
+ * la sala» pide un teléfono; «la sala del teléfono», una sala.
+ */
+const DATUM_TYPE_BY_WORD = new Map<string, DatumType>();
+for (const w of ["tarjeta", "tarjetas", "cartao", "cartoes", "card", "cards"]) DATUM_TYPE_BY_WORD.set(w, "card");
+for (const w of ["sala", "salas", "room", "rooms"]) DATUM_TYPE_BY_WORD.set(w, "room");
+for (const w of ["hora", "horas", "hour", "hours"]) DATUM_TYPE_BY_WORD.set(w, "hour");
+for (const w of ["fecha", "fechas", "date", "dates", "data", "dia", "dias", "day", "days"])
+  DATUM_TYPE_BY_WORD.set(w, "date");
+for (const w of ["dosis", "dose", "doses"]) DATUM_TYPE_BY_WORD.set(w, "dose");
+for (const w of [
+  "telefono", "telefonos", "telefone", "telefones", "phone", "phones", "linea", "line", "hotline",
+  "llamar", "llama", "llamo", "call", "dial", "ligar", "ligo", "discar", "disco",
+])
+  DATUM_TYPE_BY_WORD.set(w, "phone");
+
+/** El tipo de dato que el texto nombra primero, o null si solo usa la etiqueta genérica. */
+function datumTypeOfText(text: string): DatumType | null {
+  for (const w of foldForCues(text).split(/[^a-zñ0-9]+/)) {
+    const t = DATUM_TYPE_BY_WORD.get(w);
+    if (t) return t;
+  }
+  return null;
+}
+
+/** Las palabras que nombran cada tipo junto a su cifra (la forma sola no basta: sala, fecha, dosis). */
+const TYPE_NEAR_WORDS: Record<Exclude<DatumType, "phone">, readonly string[]> = {
+  card: ["tarjeta", "tarjetas", "cartao", "cartoes", "card", "cards"],
+  room: ["sala", "salas", "room", "rooms"],
+  hour: ["hora", "horas", "hour", "hours"],
+  date: ["fecha", "fechas", "date", "dates", "data", "dia", "dias", "day", "days"],
+  dose: ["dosis", "dose", "doses"],
+};
+
+/** Tokens de un texto plegado, palabras y cifras en orden (para la cercanía palabra↔cifra). */
+function foldedTokens(text: string): string[] {
+  return foldForCues(text).match(/[a-zñ]+|\d+(?:[.,]\d+)?/g) ?? [];
+}
+
+/** ¿Nombra la frase el tipo a ≤5 palabras antes (o ≤2 después) de una cifra? */
+function namesTypeNearDigit(sentence: string, typeWords: readonly string[]): boolean {
+  const set = new Set(typeWords);
+  const toks = foldedTokens(sentence);
+  for (let i = 0; i < toks.length; i++) {
+    if (!/\d/.test(toks[i])) continue;
+    for (let j = Math.max(0, i - 5); j <= Math.min(toks.length - 1, i + 2); j++) {
+      if (j !== i && set.has(toks[j])) return true;
+    }
+  }
+  return false;
+}
+
+const DATE_NAME_RE =
+  /\b(lunes|martes|miercoles|jueves|viernes|sabado|sabados|domingo|domingos|monday|tuesday|wednesday|thursday|friday|saturday|sunday|segunda|terca|quarta|quinta|sexta|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|january|february|march|april|may|june|july|august|september|october|november|december|janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\b/;
+
+/**
+ * Las unidades que unen una cifra a la dosis. T-J2 trajo
+ * «colher(es)» pt: sin ella, la dosis fiel portuguesa (G08) solo se
+ * salvaba por la exclusión de «é», no por juicio. T-J6 completa la
+ * tabla con las unidades en y las formas métricas escritas: sin
+ * «tablets» la dosis CORRECTA en inglés (G06) se retiraba, porque
+ * ninguna frase de la fuente ligaba su dígito y el dato quedaba
+ * sin portador. La caja ya normalizaba estas unidades; esta tabla
+ * solo aprende a reconocerlas junto a la cifra (es/pt/en).
+ * ADV-J-C1 completa la familia del inhalador: «puffs» y «sprays»
+ * no estaban en ninguna de las dos tablas y la dosis fiel de un
+ * inhalador o un spray nasal se seguía retirando, con la infiel
+ * ciega en la otra dirección; la pt las escribe igual.
+ * ADV-R-C1 (adversaria del carril de restos): la palabra de la
+ * dosis en sí quedó fuera en las tres lenguas — es «inhalación/
+ * inhalaciones», pt «inalação/inalações», en «inhalation/
+ * inhalations» (las claves van plegadas, como todo lo que se
+ * compara contra la frase plegada): la fiel es se retiraba igual
+ * que la infiel y la caja daba [] ante la dosis cambiada. El
+ * censo de familia se cerró sobre el paradigma nombrado: las
+ * guías servidas no dosifican el inhalador con ninguna otra
+ * palabra de esta familia (grep cero sobre el corpus es/en/pt).
+ * RES-R1: la regex se exporta porque la caja la consume — la
+ * rama «dose» de sourceCarriesCategory tenía una tercera lista
+ * propia, solo-es, ciega al enseñar omisiones; desde esta tanda
+ * la familia es una sola y vive aquí.
+ */
+export const DOSE_MEASURE_RE =
+  /\d+(?:[.,]\d+)?\s*(ml|mg|mcg|kg|g|miligramos?|gramos?|comprimidos?|pastillas?|cucharadas?|cucharaditas?|colheres?|gotas|tabletas?|capsulas?|unidades?|teaspoons?|tablespoons?|tablets?|pills?|capsules?|drops?|puffs?|sprays?|inhalaciones|inhalacion|inalacoes|inalacao|inhalations?|units?|milligrams?|grams?|milliliters?|millilitres?)\b/;
+
+/**
+ * Auditoría de la 0.1.70 (2026-11-03): la DOSIS MEDIDA en una frase
+ * que no es la afirmación tipada («Toma 5 comprimidos cada 8 horas»,
+ * «Give 6 puffs», «Que mastique 8 aspirinas infantiles»). La pierna
+ * tipada de A3-03 solo mira la frase con categoría y cópula («la dosis
+ * es…»), y la vara general de cifras (hasJudgedDigit: 2+ dígitos)
+ * deja fuera el dígito único, que es justo como se escribe casi toda
+ * dosis. Medido sobre be4ed9d: «Take 5 tablets» contra «Take 2
+ * tablets», «Give 6 puffs» contra «2 puffs» y «5 ml» contra «10 ml»
+ * salían FUNDADAS con su [1]; con la guía real del dolor de pecho,
+ * «8 aspirinas infantiles» contra «2 a 4» también. La caja las
+ * marcaba (salvo las aspirinas); el juez las sellaba.
+ *
+ * Esta pierna vive al lado de la vara y no la toca (MIN_*, isSupported
+ * intactos): une cada cifra a su unidad de dosis (la siguiente palabra
+ * de unidad a ≤ 3 palabras, sin cruzar otra cifra suelta ni una
+ * palabra de tiempo o tamaño), con rangos «2 a 4 / 2 to 4 / 2–4» y los
+ * números en letra del 1 al 10, en las fuentes y en la frase. La frase
+ * se retira si trae una dosis de una unidad que la evidencia SÍ dosifica
+ * y la cifra no cae en ninguna de las de la evidencia para esa unidad.
+ * Si la evidencia no dosifica esa unidad, no juzga (no hay contra qué).
+ */
+const MEASURE_UNIT_KEY: Record<string, string> = {};
+for (const [key, words] of Object.entries({
+  ml: ["ml", "mililitro", "mililitros", "milliliter", "milliliters", "millilitre", "millilitres"],
+  mg: ["mg", "miligramo", "miligramos", "milligram", "milligrams", "miligrama", "miligramas"],
+  mcg: ["mcg"],
+  g: ["g", "gramo", "gramos", "gram", "grams", "grama", "gramas"],
+  tab: ["comprimido", "comprimidos", "pastilla", "pastillas", "tableta", "tabletas", "tablet", "tablets", "pill", "pills", "tablete", "tabletes"],
+  cap: ["capsula", "capsulas", "capsule", "capsules"],
+  tsp: ["cucharadita", "cucharaditas", "teaspoon", "teaspoons"],
+  tbsp: ["cucharada", "cucharadas", "tablespoon", "tablespoons"],
+  colher: ["colher", "colheres"],
+  drop: ["gota", "gotas", "drop", "drops"],
+  puff: ["puff", "puffs", "inhalacion", "inhalaciones", "inhalation", "inhalations", "inalacao", "inalacoes", "jato", "jatos", "pulsacion", "pulsaciones"],
+  spray: ["spray", "sprays"],
+  aspirin: ["aspirina", "aspirinas", "aspirin", "aspirins"],
+})) {
+  for (const w of words) MEASURE_UNIT_KEY[w] = key;
+}
+
+const MEASURE_NUMBER_WORDS: Record<string, number> = {
+  un: 1, una: 1, uno: 1, um: 1, uma: 1, one: 1,
+  dos: 2, two: 2, dois: 2, duas: 2,
+  tres: 3, three: 3,
+  cuatro: 4, four: 4, quatro: 4,
+  cinco: 5, five: 5,
+  seis: 6, six: 6,
+  siete: 7, seven: 7, sete: 7,
+  ocho: 8, eight: 8, oito: 8,
+  nueve: 9, nine: 9, nove: 9,
+  diez: 10, ten: 10, dez: 10,
+};
+
+/** Palabras que cortan la unión cifra→unidad: la cifra es de tiempo, tamaño o frecuencia. */
+const MEASURE_STOP_WORDS = new Set([
+  "minuto", "minutos", "minute", "minutes", "hora", "horas", "hour", "hours", "segundo", "segundos", "second", "seconds",
+  "dia", "dias", "day", "days", "semana", "semanas", "week", "weeks", "mes", "meses", "month", "months",
+  "ano", "anos", "year", "years", "cm", "centimetro", "centimetros", "centimeter", "centimeters", "metro", "metros",
+  "meter", "meters", "litro", "litros", "liter", "liters", "litre", "litres", "kg", "veces", "vez", "times", "vezes",
+  "por", "per", "cada", "every", "each", "x",
+]);
+
+const MEASURE_RANGE_WORDS = new Set(["a", "to", "y", "and", "e", "o", "ou", "or"]);
+
+interface DoseMeasure {
+  unit: string;
+  lo: number;
+  hi: number;
+}
+
+/** Las dosis medidas de una frase (cifra o número en letra unido a su unidad, con rangos). */
+export function doseMeasuresOf(text: string): DoseMeasure[] {
+  const folded = foldForCues(text.replace(/\[\d+\]/g, " "));
+  const toks: { t: string; start: number; end: number }[] = [];
+  for (const m of folded.matchAll(/[a-z]+|\d+(?:[.,]\d+)?/g)) {
+    toks.push({ t: m[0], start: m.index ?? 0, end: (m.index ?? 0) + m[0].length });
+  }
+  const valueOf = (t: string): number | null => {
+    if (/^\d/.test(t)) return Number(t.replace(",", "."));
+    return MEASURE_NUMBER_WORDS[t] ?? null;
+  };
+  const isUnit = (t: string): boolean => MEASURE_UNIT_KEY[t] !== undefined;
+  // La unidad de la cifra en i: la siguiente palabra de unidad a ≤ 3
+  // palabras, saltando como mucho un par «cifra unidad» intercalado
+  // («2 to 4 low-dose 81 mg aspirins»); una cifra suelta o una palabra
+  // de tiempo/tamaño cortan.
+  const unitAfter = (i: number, maxSkip = 3): string | null => {
+    let skipped = 0;
+    for (let j = i + 1; j < toks.length && skipped <= maxSkip; j++) {
+      const t = toks[j].t;
+      if (isUnit(t)) return MEASURE_UNIT_KEY[t];
+      if (MEASURE_STOP_WORDS.has(t)) return null;
+      if (valueOf(t) !== null && /^\d/.test(t)) {
+        if (j + 1 < toks.length && isUnit(toks[j + 1].t)) {
+          j++;
+          continue;
+        }
+        return null;
+      }
+      skipped++;
+    }
+    return null;
+  };
+  const out: DoseMeasure[] = [];
+  const used = new Set<number>();
+  for (let i = 0; i < toks.length; i++) {
+    if (used.has(i)) continue;
+    const v = valueOf(toks[i].t);
+    if (v === null) continue;
+    // Un número en letra solo cuenta junto a su unidad, con como mucho
+    // una palabra entre medias («una aspirina», «one adult aspirin»):
+    // «una vez», «un vaso» no son dosis.
+    const isWord = !/^\d/.test(toks[i].t);
+    if (isWord && !unitAfter(i, 1)) continue;
+    // ¿Inicio de rango? «N a M unidad», «N–M unidad».
+    let hiIdx = i;
+    if (i + 2 < toks.length && MEASURE_RANGE_WORDS.has(toks[i + 1].t) && valueOf(toks[i + 2].t) !== null) hiIdx = i + 2;
+    else if (i + 1 < toks.length && valueOf(toks[i + 1].t) !== null && /^\s*[-–]\s*$/.test(folded.slice(toks[i].end, toks[i + 1].start))) hiIdx = i + 1;
+    const unit = unitAfter(hiIdx, isWord && hiIdx === i ? 1 : 3);
+    if (!unit) continue;
+    const hiV = valueOf(toks[hiIdx].t)!;
+    out.push({ unit, lo: Math.min(v, hiV), hi: Math.max(v, hiV) });
+    used.add(hiIdx);
+  }
+  return out;
+}
+
+/**
+ * ¿Trae la frase una dosis medida que la evidencia contradice? Solo
+ * juzga las unidades que la evidencia dosifica; la frase tipada («la
+ * dosis es…») queda para su pierna (A3-03), que además sabe sustituir.
+ */
+function measuredDoseConflict(sentence: string, evidence: DoseMeasure[]): boolean {
+  if (evidence.length === 0) return false;
+  if (DATUM_CATEGORY_RE.test(foldForCues(sentence)) && hasDatumCopula(sentence)) return false;
+  const mine = doseMeasuresOf(sentence);
+  if (mine.length === 0) return false;
+  return mine.some((m) => {
+    const same = evidence.filter((e) => e.unit === m.unit);
+    if (same.length === 0) return false;
+    return !same.some((e) => m.lo >= e.lo - 1e-9 && m.hi <= e.hi + 1e-9);
+  });
+}
+
+/** ¿Trae la frase un dato DEL TIPO (su forma, o su nombre junto a la cifra)? */
+function carriesDatumOfType(sentence: string, type: DatumType): boolean {
+  switch (type) {
+    case "phone":
+      return hasPhoneForm(sentence);
+    case "card":
+      return hasCardForm(sentence) || namesTypeNearDigit(sentence, TYPE_NEAR_WORDS.card);
+    case "room":
+      return namesTypeNearDigit(sentence, TYPE_NEAR_WORDS.room);
+    case "hour":
+      return /\d{1,2}:\d{2}/.test(sentence) || namesTypeNearDigit(sentence, TYPE_NEAR_WORDS.hour);
+    case "date":
+      return (
+        (DATE_NAME_RE.test(foldForCues(sentence)) && /\d/.test(sentence.replace(/\[\d+\]/g, " "))) ||
+        /\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b/.test(sentence) ||
+        namesTypeNearDigit(sentence, TYPE_NEAR_WORDS.date)
+      );
+    case "dose":
+      return DOSE_MEASURE_RE.test(foldForCues(sentence)) || namesTypeNearDigit(sentence, TYPE_NEAR_WORDS.dose);
+  }
+}
+
+/**
+ * Los grupos de dígitos significativos de un texto, normalizados
+ * (sin ceros a la izquierda). De un decimal solo cuenta la parte
+ * entera: la fracción es el territorio del redondeo honesto (la
+ * doctrina de la tanda 1), y un grupo suelto de un dígito no juzga
+ * (la vara de hasJudgedDigit).
+ */
+function significantDigitGroups(text: string): string[] {
+  const out: string[] = [];
+  for (const tok of text.replace(/\[\d+\]/g, " ").match(/\d+(?:[.,]\d+)?/g) ?? []) {
+    if (/[.,]/.test(tok)) out.push(tok.split(/[.,]/)[0].replace(/^0+(?=\d)/, ""));
+    else if (tok.length >= 2) out.push(tok.replace(/^0+(?=\d)/, ""));
+  }
+  return out;
+}
+
+/**
+ * A3-03 (decisión de FV-1): la normalización de UNA cifra sin la
+ * vara de longitud de significantDigitGroups — de un decimal solo
+ * cuenta la parte entera (la misma doctrina) y se quitan los ceros
+ * a la izquierda, pero el dígito único SÍ produce grupo. La consume
+ * SOLO la pierna tipada DOSIS dentro de digitsMatchType: en una
+ * afirmación tipada dosis el dígito único es el dato entero («9 ml»
+ * contra «5 ml»), y la razón de la exención — el ruido de cifras
+ * sueltas en prosa — no aplica dentro de una frase que la propia
+ * regla ya tipó. La vara general no se toca: fuera de esa pierna,
+ * significantDigitGroups y hasJudgedDigit siguen mandando.
+ * C2-H3 (barrido 0.1.96) extiende la misma pierna a todo tipo cuando
+ * la afirmación nombra el tipo junto a su única cifra («sala 9»).
+ */
+function digitGroupKeepingSingle(tok: string): string {
+  const intPart = /[.,]/.test(tok) ? tok.split(/[.,]/)[0] : tok;
+  return intPart.replace(/^0+(?=\d)/, "");
+}
+
+/** Los grupos de cifra de un texto con la normalización de A3-03 (el dígito único cuenta). */
+function digitGroupsKeepingSingle(text: string): string[] {
+  return (text.replace(/\[\d+\]/g, " ").match(/\d+(?:[.,]\d+)?/g) ?? []).map(digitGroupKeepingSingle);
+}
+
+/**
+ * Los tokens de cifra de una frase UNIDOS al tipo (ADV3, A3-01), en
+ * orden de aparición: una cifra de una frase portadora cuenta como
+ * cifra DEL TIPO solo si está unida a un ancla del tipo dentro de
+ * la misma frase. Las anclas, sobre los tokens plegados (la misma
+ * tokenización de foldedTokens, aquí con posición en el texto):
+ * - De forma (se unen a sí mismas, sin ventana): la ristra
+ *   telefónica (los grupos de hasPhoneForm) a phone; la ristra de
+ *   tarjeta (isCardCluster) a card; el token H:MM a hour; la forma
+ *   d/m[/aaaa] a date.
+ * - De medida (dosis): la unidad de DOSE_MEASURE_RE une el token
+ *   numérico inmediatamente anterior (distancia 1: «5 ml»).
+ * - De palabra: cada palabra de TYPE_NEAR_WORDS[T] (y, para date,
+ *   cada nombre de DATE_NAME_RE) une los grupos cuyo ancla cae en
+ *   la ventana [i−3, i+2] alrededor del grupo — más estrecha que la
+ *   del portador ([i−5, i+2]): la unión juzga identidad, el
+ *   portador solo presencia, y la identidad exige más cercanía.
+ * La unión es por tipo e independiente: un grupo puede unirse a
+ * dos tipos si cae en las ventanas de dos anclas, y unirse a un
+ * tipo no lo desune de otro.
+ */
+function boundDigitTokens(sentence: string, type: DatumType): string[] {
+  const folded = foldForCues(sentence);
+  const toks: { text: string; index: number }[] = [];
+  for (const m of folded.matchAll(/[a-zñ]+|\d+(?:[.,]\d+)?/g)) toks.push({ text: m[0], index: m.index ?? 0 });
+
+  // Tramos que se unen a sí mismos, sobre el texto plegado.
+  const formSpans: { start: number; end: number }[] = [];
+  const spanOf = (m: RegExpMatchArray): { start: number; end: number } => {
+    const start = m.index ?? 0;
+    return { start, end: start + m[0].length };
+  };
+  if (type === "phone" || type === "card") {
+    for (const m of folded.matchAll(/\d[\d .-]*\d/g)) {
+      if (type === "phone" && m[0].replace(/\D/g, "").length >= 7 && !isCardCluster(m[0])) formSpans.push(spanOf(m));
+      if (type === "card" && isCardCluster(m[0])) formSpans.push(spanOf(m));
+    }
+  }
+  if (type === "hour") for (const m of folded.matchAll(/\d{1,2}:\d{2}/g)) formSpans.push(spanOf(m));
+  if (type === "date") for (const m of folded.matchAll(/\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g)) formSpans.push(spanOf(m));
+  // La medida une su número: el tramo del número dentro de cada
+  // caza de DOSE_MEASURE_RE.
+  if (type === "dose") {
+    for (const m of folded.matchAll(new RegExp(DOSE_MEASURE_RE.source, "g"))) {
+      const num = /^\d+(?:[.,]\d+)?/.exec(m[0]);
+      if (num) formSpans.push({ start: m.index ?? 0, end: (m.index ?? 0) + num[0].length });
+    }
+  }
+
+  const nearWords = type === "phone" ? null : new Set(TYPE_NEAR_WORDS[type]);
+  const out: string[] = [];
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (!/\d/.test(t.text)) continue;
+    const end = t.index + t.text.length;
+    let bound = formSpans.some((s) => t.index < s.end && s.start < end);
+    if (!bound && nearWords) {
+      for (let j = Math.max(0, i - 3); j <= Math.min(toks.length - 1, i + 2) && !bound; j++) {
+        if (j === i) continue;
+        if (nearWords.has(toks[j].text)) bound = true;
+        else if (type === "date" && DATE_NAME_RE.test(toks[j].text)) bound = true;
+      }
+    }
+    if (bound) out.push(t.text);
+  }
+  return out;
+}
+
+/**
+ * Los grupos significativos de la frase unidos al tipo, en orden de
+ * aparición (ADV3, A3-01): la materia de digitsMatchType desde esta
+ * tanda. Sin deduplicar: la deduplicación la hace el llamador donde
+ * hoy la hace.
+ */
+function boundDigitGroups(sentence: string, type: DatumType): string[] {
+  return boundDigitTokens(sentence, type).flatMap((t) => significantDigitGroups(t));
+}
+
+/** La firma de cifras de una frase (para el empate: mismo dato repetido, o datos distintos). */
+function digitSignature(text: string): string {
+  return [...new Set(significantDigitGroups(text))].sort().join(",");
+}
+
+/**
+ * ¿Casan las cifras significativas de la frase con un dato DEL TIPO
+ * en la evidencia? (ADV-G1/G2: estar en la fuente no basta — el 911
+ * está en la fuente y no es el teléfono de la cita.)
+ */
+function digitsMatchType(
+  sentence: string,
+  type: DatumType,
+  recs: SourceSentenceRec[],
+  queryStems?: Set<string>,
+  keepSingle = false,
+): boolean {
+  if (type === "phone" && queryStems && shortPhoneMatches(sentence, recs, queryStems)) return true;
+  const carriers = recs.filter((r) => carriesDatumOfType(r.text, type));
+  if (carriers.length === 0) return false;
+  // A3-03: en la pierna DOSIS los grupos se computan con la
+  // normalización que conserva el dígito único (en la afirmación y
+  // en las portadoras): sin ella, «mine» salía vacío ante «9 ml» y
+  // la comparación ni distinguía la dosis falsa de la fiel.
+  // C2-H3: la misma normalización para la afirmación tipada de un
+  // dígito de cualquier tipo (keepSingle, que solo pone
+  // isTypedDatumOffender cuando la frase no trae cifra juzgable).
+  const single = type === "dose" || keepSingle;
+  const mine = [...new Set(single ? digitGroupsKeepingSingle(sentence) : significantDigitGroups(sentence))];
+  if (mine.length === 0) return false;
+  // ADV3 (A3-01): el conjunto del tipo ya no es «todas las cifras
+  // de la frase portadora», sino solo las UNIDAS al tipo dentro de
+  // cada portadora (boundDigitGroups): en una frase compuesta, la
+  // sala ya no hereda el día ni la dosis hereda la sala. Si ninguna
+  // cifra juzgable se une al tipo, el conjunto es vacío y la
+  // afirmación con cifras de otro dato es infractora.
+  const typeGroups = new Set(
+    carriers.flatMap((r) =>
+      single ? boundDigitTokens(r.text, type).map(digitGroupKeepingSingle) : boundDigitGroups(r.text, type),
+    ),
+  );
+  if (mine.every((g) => typeGroups.has(g))) {
+    // C2-H2: el teléfono largo con el dueño cambiado.
+    if (type === "phone" && !phoneOwnerAgrees(sentence, carriers.filter((r) => mine.some((g) => boundDigitGroups(r.text, type).includes(g))), recs)) return false;
+    return true;
+  }
+  // La misma cifra con otro agrupamiento («1.234» por «1234») o el
+  // dato a medias («termina en 4417»): concatenación igual o sufijo.
+  // La ristra del portador se construye SOLO con sus tokens unidos
+  // al tipo (en orden); la de la afirmación no cambia: la
+  // afirmación es de un solo dato y su concatenación entera es su
+  // dato.
+  const concat = (t: string) => (t.replace(/\[\d+\]/g, " ").match(/\d+/g) ?? []).join("").replace(/^0+(?=\d)/, "");
+  const myConcat = concat(sentence);
+  const concatCarriers = carriers.filter((r) => {
+    const c = boundDigitTokens(r.text, type).join("").replace(/^0+(?=\d)/, "");
+    return c === myConcat || c.endsWith(myConcat);
+  });
+  if (myConcat.length < 4 || concatCarriers.length === 0) return false;
+  // C2-H2: también por esta vía, el dueño tiene que casar.
+  return type !== "phone" || phoneOwnerAgrees(sentence, concatCarriers, recs);
+}
+
+/**
+ * C2-H2 (barrido 0.1.96): el dueño del teléfono. «El teléfono de
+ * emergencias es el 520-555-0147» se sellaba fundado con cita cuando, en
+ * la fuente, ese número es el de la CLÍNICA: el tipo y las cifras casaban
+ * con el tipo y nadie miraba de quién era. La guarda de dueño solo
+ * existía para el teléfono corto (shortPhoneMatches) y para el puente
+ * pregunta-respuesta (phoneDatumBridge).
+ *
+ * La regla: el dato no es del dueño de la afirmación cuando TODAS las
+ * frases de la fuente que traen esas cifras nombran otro dueño sin
+ * mencionar el suyo Y la fuente da a ese dueño su propio número en otra
+ * frase («Para emergencias, llama al 911»). Si la fuente no dice de quién
+ * es el número, o lo dice y casa, o el dueño de la afirmación no tiene
+ * número propio en la fuente («la cita» no lo tiene: su teléfono es el
+ * de la clínica, doctrina de genericDatum), todo sigue como antes. La
+ * sustituta, cuando la hay, es la frase del número propio de ese dueño
+ * (phoneOwnRec). Los dueños se leen con
+ * phoneOwnerStems (gobierno «teléfono de X», posesivo inglés «X's
+ * phone») más el sustantivo delante del nombre en inglés («emergency
+ * phone», «clinic number»), que esa función no ve.
+ */
+function phoneDatumOwners(sentence: string): Set<string> {
+  const owners = phoneOwnerStems(sentence);
+  const toks = foldedTokens(sentence);
+  for (let k = 1; k < toks.length; k++) {
+    if (!PHONE_NAME_WORDS.has(toks[k])) continue;
+    const prev = toks[k - 1];
+    if (!/^[a-z]+$/.test(prev) || prev === "s") continue;
+    const stems = contentStems(prev);
+    if (stems.length > 0 && !GENERIC_DATUM_STEMS.has(stems[0])) owners.add(stems[0]);
+  }
+  return owners;
+}
+
+/** La frase de la fuente que da al dueño de la afirmación su propio número, o null. */
+function phoneOwnRec(sentence: string, recs: SourceSentenceRec[], exclude: SourceSentenceRec[] = []): SourceSentenceRec | null {
+  const mine = phoneDatumOwners(sentence);
+  if (mine.size === 0) return null;
+  return (
+    recs.find((r) => {
+      if (exclude.includes(r) || !/\d/.test(r.text)) return false;
+      if (!hasPhoneForm(r.text) && !CALL_CUE_RE.test(r.text)) return false;
+      const stems = new Set(contentStems(r.text));
+      return [...mine].some((o) => stems.has(o));
+    }) ?? null
+  );
+}
+
+function phoneOwnerAgrees(sentence: string, carriers: SourceSentenceRec[], recs: SourceSentenceRec[]): boolean {
+  const mine = phoneDatumOwners(sentence);
+  if (mine.size === 0 || carriers.length === 0) return true;
+  const agrees = carriers.some((r) => {
+    const theirs = phoneDatumOwners(r.text);
+    if (theirs.size === 0) return true;
+    const stems = new Set(contentStems(r.text));
+    return [...mine].some((o) => stems.has(o));
+  });
+  if (agrees) return true;
+  // Otro dueño en todas las portadoras: solo es infractora si el suyo
+  // tiene número propio en la fuente.
+  return phoneOwnRec(sentence, recs, carriers) === null;
+}
+
+/**
+ * La afirmación CON cifras del tipo pedido pero con las cifras de
+ * otro dato (ADV-G1/G2): nombra el tipo con cópula, trae cifras
+ * juzgables y ninguna casa con un dato de ese tipo en la evidencia.
+ * La pierna que faltaba: la regla solo juzgaba la afirmación SIN
+ * cifras, y la de cifras se fiaba del chequeo de presencia.
+ */
+function isTypedDatumOffender(sentence: string, type: DatumType, recs: SourceSentenceRec[], queryStems?: Set<string>): boolean {
+  const folded = foldForCues(sentence);
+  if (!hasDatumCopula(sentence)) return false;
+  // ADV-G1-R (auditoría del tip f96e473): la afirmación con la
+  // etiqueta GENÉRICA («El número es 520-555-0147», «Es el
+  // 520-555-0147») no nombra tipo, y la regla la dejaba pasar sellada
+  // con las cifras de otro dato ante una pregunta de tarjeta. Sin tipo
+  // propio, se juzga con el tipo pedido (el único que llega aquí sin
+  // nombrarse); con tipo propio distinto, no es de esta pierna, como
+  // hasta hoy. La afirmación genérica cuenta si trae la etiqueta del
+  // dato o es una identidad desnuda corta (≤ 5 palabras).
+  // El teléfono queda fuera de la forma genérica: su tipo se ata por
+  // la forma de ≥7 dígitos, así que un número corto fiel («Es el
+  // 112») se leería como de otro dato y se retiraría.
+  const own = datumTypeOfText(sentence);
+  if (own !== null && own !== type) return false;
+  if (own === null && type === "phone") return false;
+  if (!DATUM_CATEGORY_RE.test(folded) && !(own === null && isBareIdentity(sentence))) return false;
+  // A3-03 (decisión de FV-1): la clase DOSIS no hereda la exención
+  // de un dígito de hasJudgedDigit. Sin esta pierna, «La dosis es
+  // 9 ml» contra «Tome 5 ml…» salía sellada fundada: la regla ni
+  // miraba la frase porque su única cifra no era «juzgable». En la
+  // afirmación tipada dosis cualquier cifra cuenta; fuera de ella
+  // (prosa, y sala/hora/fecha/teléfono/tarjeta) la vara general de
+  // hasJudgedDigit queda intacta.
+  // C2-H3 (barrido 0.1.96): la misma razón vale para todo dato tipado.
+  // «La consulta es en la sala 9» contra «sala 4» salía sellada: el
+  // dígito único de la sala no era «juzgable» y la pierna ni miraba.
+  // Cuando la frase NOMBRA el tipo junto a su cifra (carriesDatumOfType:
+  // «sala 9», «día 9», «9 ml»), esa cifra es el dato entero y se juzga.
+  // Lo que la exención protege queda intacto: el dígito suelto en prosa
+  // sin dato tipado («repite el paso 3»), la frase sin cópula de dato, y
+  // toda frase que ya trae cifra juzgable (su vara no cambia).
+  // CL-9 (caza 0.1.97): la presencia de cifra se mira sin la cita
+  // «[1]» — con ella, una afirmación en letra («cinco mililitros»)
+  // entraba en la pierna de dígito único y caía en la comparación
+  // de cifras sin tener ninguna: infractora por la cita, no por su
+  // cifra.
+  const singleTyped = !hasJudgedDigit(sentence) && /\d/.test(sentence.replace(/\[\d+\]/g, " ")) && (type === "dose" || carriesDatumOfType(sentence, type));
+  if (!hasJudgedDigit(sentence) && !singleTyped) return false;
+  return !digitsMatchType(sentence, type, recs, queryStems, singleTyped);
+}
+
+/** «Es el 520-555-0147.» / «It's 520-555-0147.»: identidad corta, cópula y cifra, sin más tema. */
+function isBareIdentity(sentence: string): boolean {
+  const words = sentence.replace(/\[\d+\]/g, " ").trim().split(/\s+/).filter(Boolean);
+  return words.length <= 5 && hasJudgedDigit(sentence);
+}
+
+/** Verbos y palabras que atan un número corto a «llamar» (es/en/pt). */
+const CALL_CUE_RE =
+  /(?<![\p{L}])(?:llam[ae]\w*|llamar|marc[ae]\w*|telefone\w*|tel[eé]fono\w*|n[uú]mero\w*|emergencias?|emerg[eê]ncias?|call\w*|dial\w*|phone\w*|number\w*|emergenc(?:y|ies)|lig[ue]\w*|ligar|disqu\w*|disc[ae]\w*)(?![\p{L}])/iu;
+
+/**
+ * El teléfono CORTO (3–4 cifras: 112, 911, 190) que la fuente da junto a un
+ * verbo de llamar (pruebas adversarias del 2026-11-03: «El teléfono es el
+ * 112» ante «Llama al 112 en caso de emergencia» se retiraba porque el tipo
+ * teléfono solo se ataba por la forma de ≥7 cifras). Cuenta solo si la frase
+ * fuente trae ESE número junto a un verbo o una palabra de llamar, y si las
+ * raíces de tema de la afirmación (fuera de las etiquetas del dato) están en
+ * esa misma frase: «El teléfono de la clínica es el 911» ante «llama al 911
+ * en caso de emergencia» sigue siendo infractora (ADV-G2), porque «clínica»
+ * no está en la frase del 911.
+ */
+function shortPhoneMatches(sentence: string, recs: SourceSentenceRec[], queryStems: Set<string>): boolean {
+  const mine = [...new Set((sentence.replace(/\[\d+\]/g, " ").match(/\d+/g) ?? []))];
+  if (mine.length !== 1 || !/^\d{3,4}$/.test(mine[0])) return false;
+  const num = mine[0];
+  // El tema es el de la afirmación Y el de la pregunta: «El teléfono es el
+  // 911» ante «¿cuál es el teléfono de la cita?» trae el tema «cita», que
+  // la frase del 911 no tiene (ADV-G2).
+  const topic = [...new Set([...contentStems(sentence), ...queryStems])].filter((w) => !GENERIC_DATUM_STEMS.has(w) && !/^\d+$/.test(w));
+  return recs.some((r) => {
+    const toks: string[] = r.text.match(/\d+/g) ?? [];
+    if (!toks.includes(num) || !CALL_CUE_RE.test(r.text)) return false;
+    const have = new Set(contentStems(r.text));
+    return topic.every((w) => have.has(w));
+  });
+}
+
+/** Cuántas raíces de contenido comparte la frase con la pregunta. */
+function sharedStemCount(sentence: string, queryStems: Set<string>): number {
+  let shared = 0;
+  for (const w of new Set(contentStems(sentence))) if (queryStems.has(w)) shared++;
+  return shared;
+}
+
+/**
+ * Las raíces-etiqueta del dato (número, teléfono y familia): prueban
+ * que una frase HABLA de un dato, no de CUÁL. Como «tema sustantivo
+ * compartido» no cuentan (adversaria H-02: la frase del 911 comparte
+ * «número» con «¿cuál es el número de la tarjeta?» y no por eso trae
+ * el dato de la tarjeta). Se derivan con el propio stem() para que
+ * las formas es/en/pt caigan en la misma raíz que produce el conteo.
+ */
+const GENERIC_DATUM_STEMS = new Set(
+  ["numero", "numeros", "number", "numbers", "telefono", "telefonos", "phone", "phones", "telefone", "telefones"].map(
+    stem,
+  ),
+);
+
+/** Raíces compartidas con la pregunta que son tema sustantivo (no la etiqueta del dato). */
+function substantiveStemCount(sentence: string, queryStems: Set<string>): number {
+  let shared = 0;
+  for (const w of new Set(contentStems(sentence)))
+    if (queryStems.has(w) && !GENERIC_DATUM_STEMS.has(w)) shared++;
+  return shared;
+}
+
+/**
+ * Cuánto casa una frase con la pregunta a efectos del dato: 2 por
+ * raíz de contenido compartida, +3 si la pregunta es de teléfono y la
+ * frase trae la ristra telefónica (la forma del dato también es tema:
+ * es lo único que empareja pregunta y fuente entre idiomas).
+ */
+function datumScore(sentence: string, queryStems: Set<string>, phoneQuestion: boolean): number {
+  // La bonificación de forma es de la forma TELEFÓNICA (ADV2-01):
+  // una ristra de tarjeta ya no suma como si fuera un teléfono.
+  return 2 * sharedStemCount(sentence, queryStems) + (phoneQuestion && hasPhoneForm(sentence) ? 3 : 0);
+}
+
+/**
+ * La frase fuente que trae EL dato DEL TIPO pedido: la de mayor
+ * datumScore entre las portadoras del tipo. Elegible = lleva
+ * cifras juzgables y es el mismo tipo de dato que se pide
+ * (adversaria H-02): comparte al menos una raíz sustantiva con la
+ * pregunta, o trae la forma telefónica ante una pregunta de
+ * teléfono de verdad (la vía que empareja entre idiomas, donde
+ * puede no haber raíces que compartir). «Algún dígito temático» ya
+ * no basta: sin elegible, la evidencia no contiene ese dato y no
+ * hay sustitución que hacer — y menos con el dato de otro. Null si
+ * no hay elegible.
+ *
+ * ADV2-A (segunda adversaria, ADV2-01): con TIPO pedido, la
+ * elegibilidad es traer un dato DE ESE TIPO — la frase del teléfono
+ * ya no compite en una pregunta de sala por compartir «cambiar» y
+ * «cita». Y el empate en la cima entre datos DISTINTOS se resuelve
+ * a favor de «sin sustitución» en las dos vías: antes ganaba el
+ * primero en la fuente y el dato servido lo decidía el orden del
+ * papel, no la pregunta (la acotación que la adversaria sugirió y
+ * Grok midió en su corrida: desempate por tipo, no por aparición).
+ *
+ * T-J1 extrae esta pierna de pickDatumSentence para que la regla
+ * pueda pedir el dato de un tipo que no viene de la pregunta sino
+ * de la propia afirmación juzgada (el tipo se pasa, no se lee).
+ */
+function pickTypedDatumSentence(
+  type: DatumType,
+  queryStems: Set<string>,
+  phoneQuestion: boolean,
+  recs: SourceSentenceRec[],
+): SourceSentenceRec | null {
+  const digitRecs = recs.filter((r) => hasJudgedDigit(r.text));
+  const carriers = digitRecs.filter((r) => carriesDatumOfType(r.text, type));
+  if (carriers.length === 0) return null;
+  let bestScore = -1;
+  let best: SourceSentenceRec[] = [];
+  for (const rec of carriers) {
+    const score = datumScore(rec.text, queryStems, phoneQuestion);
+    if (score > bestScore) {
+      bestScore = score;
+      best = [rec];
+    } else if (score === bestScore) {
+      best.push(rec);
+    }
+  }
+  if (best.length > 1 && best.some((r) => digitSignature(r.text) !== digitSignature(best[0].text))) return null;
+  if (bestScore >= 2) return best[0];
+  // Sin puntuación léxica (pregunta y fuente sin idioma común), el
+  // tipo es el único puente: vale si el portador es único; con
+  // varios y sin desempate honesto, no se sustituye.
+  return carriers.length === 1 ? best[0] : null;
+}
+
+function pickDatumSentence(query: string, recs: SourceSentenceRec[]): SourceSentenceRec | null {
+  const queryStems = new Set(contentStems(query));
+  const phoneQuestion = PHONE_QUESTION_RE.test(foldForCues(query));
+  const askedType = datumTypeOfText(query);
+  const digitRecs = recs.filter((r) => hasJudgedDigit(r.text));
+
+  if (askedType) return pickTypedDatumSentence(askedType, queryStems, phoneQuestion, recs);
+
+  let best: SourceSentenceRec | null = null;
+  let bestScore = 0;
+  const tops: SourceSentenceRec[] = [];
+  for (const rec of digitRecs) {
+    const phoneForm = phoneQuestion && hasPhoneForm(rec.text);
+    if (substantiveStemCount(rec.text, queryStems) === 0 && !phoneForm) continue;
+    const score = datumScore(rec.text, queryStems, phoneQuestion);
+    if (score >= 2) {
+      if (score > bestScore) {
+        bestScore = score;
+        tops.length = 0;
+        tops.push(rec);
+        best = rec;
+      } else if (score === bestScore) {
+        tops.push(rec);
+      }
+    }
+  }
+  if (tops.length > 0) {
+    if (tops.some((r) => digitSignature(r.text) !== digitSignature(tops[0].text))) return null;
+    return best;
+  }
+  return phoneDatumBridge(query, recs, digitRecs, queryStems, phoneQuestion);
+}
+
+/**
+ * Las raíces-dueño de un teléfono nombradas en su frase (ADV3,
+ * A3-04): de quién dice la frase que es el teléfono, leído con
+ * medios cerrados sobre los tokens plegados:
+ * - Gobierno tras el nombre del dato: tras una palabra-nombre
+ *   (teléfono/numero/phone/line…), si dentro de los 2 tokens
+ *   siguientes aparece una preposición de posesión (de, del, da,
+ *   do, das, dos, of — el «the» de «number of the X» es el
+ *   artículo que se salta, no la preposición), las raíces de
+ *   contenido de las 3 palabras de contenido siguientes son
+ *   dueño: «el teléfono de la clínica San Rafael» →
+ *   {clinica, san, rafael}.
+ * - Posesivo inglés delante del nombre: «the clinic's phone»
+ *   deja tokens clinic, s, phone — la raíz 2 tokens antes del
+ *   nombre es dueño.
+ * Las etiquetas genéricas (GENERIC_DATUM_STEMS) nunca son dueño.
+ * Sin construcción de dueño, el conjunto es vacío.
+ */
+const PHONE_NAME_WORDS = new Set([
+  "telefono", "telefonos", "telefone", "telefones", "phone", "phones",
+  "linea", "line", "hotline", "numero", "numeros", "number", "numbers",
+]);
+const PHONE_OWNER_PREPS = new Set(["de", "del", "da", "do", "das", "dos", "of"]);
+
+function phoneOwnerStems(sentence: string): Set<string> {
+  const toks = foldedTokens(sentence);
+  const owners = new Set<string>();
+  const addContentStem = (tok: string): boolean => {
+    if (!/^[a-zñ]+$/.test(tok)) return false;
+    const stems = contentStems(tok);
+    if (stems.length === 0) return false;
+    if (!GENERIC_DATUM_STEMS.has(stems[0])) owners.add(stems[0]);
+    return true;
+  };
+  for (let k = 0; k < toks.length; k++) {
+    if (!PHONE_NAME_WORDS.has(toks[k])) continue;
+    // Posesivo inglés: «… clinic s phone …».
+    if (k >= 2 && toks[k - 1] === "s") addContentStem(toks[k - 2]);
+    // Gobierno: preposición dentro de los 2 tokens siguientes.
+    let prep = -1;
+    for (let m = k + 1; m <= Math.min(toks.length - 1, k + 2); m++) {
+      if (PHONE_OWNER_PREPS.has(toks[m])) {
+        prep = m;
+        break;
+      }
+    }
+    if (prep === -1) continue;
+    let collected = 0;
+    for (let j = prep + 1; j < toks.length && collected < 3; j++) {
+      if (/\d/.test(toks[j])) break;
+      if (addContentStem(toks[j])) collected++;
+    }
+  }
+  return owners;
+}
+
+/**
+ * El puente de ADV2-02 (segunda adversaria): «¿Cuál es el número de
+ * la clínica?» no trae palabra-señal de teléfono ni comparte raíces
+ * con la frase del teléfono, y la sustitución moría en los tres
+ * idiomas — el rodeo quedaba sellado o la app declaraba no saber
+ * con el número impreso en la fuente. La forma humana de pedir un
+ * teléfono es «el número de <entidad>»: si la pregunta pide «el
+ * número» de una entidad que la evidencia nombra, no nombra ningún
+ * tipo concreto, ningún candidato con cifras comparte tema con
+ * ella y la evidencia trae UN solo dato con forma telefónica, ese
+ * es el dato pedido. Cualquier competencia lo cierra (la tarjeta
+ * que comparte «tarjeta», la sala que comparte «sala»): es la
+ * orilla estrecha que no reabre H-02.
+ */
+/**
+ * CL-6 (caza 0.1.97): los dueños que una frase ATRIBUYE a un
+ * teléfono, por aparición de la palabra-nombre: posesivo inglés
+ * («the clinic's phone») y gobierno tras el nombre («el teléfono de
+ * la clínica») — las dos vías de phoneOwnerStems — y, SOLO si esa
+ * aparición no trae dueño por ninguna de las dos, las palabras de
+ * contenido inmediatamente anteriores al nombre, que es donde el
+ * inglés pone al dueño adjetivo («the emergency phone number»).
+ * La vía prenombre no corre cuando el gobierno ya nombró dueño en
+ * esa aparición: caminar hacia atrás cruzaría a la cláusula
+ * anterior y robaría su vocabulario (medido: «…em caso de
+ * emergência; o telefone da companhia…» atribuía el teléfono de la
+ * compañía también a «emergência»).
+ */
+const DATUM_DETERMINERS = new Set(["the", "el", "la", "los", "las", "un", "una", "al", "del", "o", "a"]);
+
+function phoneClaimedOwners(sentence: string): Set<string> {
+  const owners = new Set<string>();
+  const toks = foldedTokens(sentence);
+  const addTok = (tok: string): boolean => {
+    if (!/^[a-zñ]+$/.test(tok)) return false;
+    const stems = contentStems(tok);
+    if (stems.length === 0) return false;
+    if (!GENERIC_DATUM_STEMS.has(stems[0])) owners.add(stems[0]);
+    return true;
+  };
+  for (let k = 0; k < toks.length; k++) {
+    if (!PHONE_NAME_WORDS.has(toks[k])) continue;
+    const before = owners.size;
+    if (k >= 2 && toks[k - 1] === "s") addTok(toks[k - 2]);
+    let prep = -1;
+    for (let m = k + 1; m <= Math.min(toks.length - 1, k + 2); m++) {
+      if (PHONE_OWNER_PREPS.has(toks[m])) {
+        prep = m;
+        break;
+      }
+    }
+    if (prep !== -1) {
+      let collected = 0;
+      for (let j = prep + 1; j < toks.length && collected < 3; j++) {
+        if (/\d/.test(toks[j])) break;
+        if (addTok(toks[j])) collected++;
+      }
+    }
+    if (owners.size > before) continue;
+    // Prenombre (inglés adjetivo): hasta 2 palabras de contenido
+    // hacia atrás, saltando artículos.
+    let collected = 0;
+    for (let j = k - 1; j >= 0 && collected < 2; j--) {
+      const tok = toks[j];
+      if (DATUM_DETERMINERS.has(tok) || tok === "s") continue;
+      if (!/^[a-zñ]+$/.test(tok)) break;
+      const stems = contentStems(tok);
+      if (stems.length === 0 || GENERIC_DATUM_STEMS.has(stems[0])) break;
+      owners.add(stems[0]);
+      collected++;
+    }
+  }
+  // La vía del verbo de llamada: «call the plumber at 911»,
+  // «llama a la clínica al 555…» — el dueño va entre el verbo y el
+  // número, sin palabra-nombre ninguna. Solo cuentan las palabras
+  // de contenido en ese hueco (artículos y preposiciones fuera);
+  // «call 911» a secas no atribuye a nadie.
+  for (let v = 0; v < toks.length; v++) {
+    if (!DATUM_CALL_VERBS.has(toks[v])) continue;
+    for (let d = v + 1; d <= Math.min(toks.length - 1, v + 5); d++) {
+      if (!/\d/.test(toks[d])) continue;
+      for (let j = v + 1; j < d; j++) {
+        const tok = toks[j];
+        if (DATUM_DETERMINERS.has(tok) || PHONE_OWNER_PREPS.has(tok) || tok === "s") continue;
+        addTok(tok);
+      }
+      break;
+    }
+  }
+  return owners;
+}
+
+const DATUM_CALL_VERBS = new Set(["call", "calls", "llama", "llamar", "llame", "ligue", "ligar", "dial", "marca", "marcar", "disca", "discar"]);
+
+/**
+ * Las claves-dígito de los valores de una cláusula: las ristras
+ * (≥3 dígitos con separadores) y los tokens juzgables, cada una en
+ * su forma literal y sin ceros a la izquierda («061» casa con «61»).
+ */
+function datumValueKeys(text: string): string[] {
+  const keys = new Set<string>();
+  const add = (digits: string) => {
+    if (digits.length >= 2) {
+      keys.add(digits);
+      const stripped = digits.replace(/^0+/, "");
+      if (stripped) keys.add(stripped);
+    }
+  };
+  for (const c of text.match(/\d[\d .-]*\d/g) ?? []) add(c.replace(/\D/g, ""));
+  for (const t2 of numberTokens(text)) add(t2.replace(/[.,]/g, ""));
+  return [...keys];
+}
+
+/** Verbos de atención que no son dueño («responde en el…», «answers on…»). */
+const DATUM_SUBJECT_VERBS = new Set(["respond", "answer", "atend", "lig", "call", "contact", "contac", "marc", "dial", "contest"]);
+
+/**
+ * CL-6: el mapa número → dueños según las FUENTES, por CLÁUSULA:
+ * una frase fuente con dos datos («call a plumber at 800…; for a
+ * major flood call 911») no puede atribuirlos al mismo dueño — el
+ * dueño de cada valor es el de su cláusula. Por cláusula: los
+ * dueños nombrados (phoneClaimedOwners); sin construcción de dueño
+ * pero con ristra telefónica, el dueño es el SUJETO de la cláusula
+ * («La asistencia en carretera responde en el 900-…»: las raíces de
+ * contenido anteriores a la ristra, sin el verbo). Si la cláusula
+ * trae una ristra (≥7 dígitos), sus valores cortos no se atribuyen
+ * (serán horas, conteos u otros datos, no el teléfono) — salvo el
+ * 911/112, cuyo dueño es emergencias por convención cerrada cuando
+ * su cláusula no nombra otro. Una ristra sin dueño nombrado deja el
+ * conjunto vacío: el número existe, pero nadie condena por él.
+ */
+function phoneAttributions(recs: SourceSentenceRec[]): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>();
+  const addOwners = (key: string, owners: Set<string>) => {
+    let set = map.get(key);
+    if (!set) {
+      set = new Set();
+      map.set(key, set);
+    }
+    for (const o of owners) set.add(o);
+  };
+  for (const r of recs) {
+    for (const clause of r.text.split(CLAUSE_SPLIT_EXT_RE)) {
+      let owners = phoneClaimedOwners(clause);
+      const clusters = clause.match(/\d[\d .-]*\d/g) ?? [];
+      const longCluster = clusters.find((c) => c.replace(/\D/g, "").length >= 7);
+      if (owners.size === 0 && longCluster) {
+        const prefix = clause.slice(0, clause.indexOf(longCluster));
+        owners = new Set(
+          contentStems(prefix).filter((s) => !GENERIC_DATUM_STEMS.has(s) && !DATUM_SUBJECT_VERBS.has(s)),
+        );
+      }
+      if (owners.size === 0 && !longCluster) {
+        for (const key of datumValueKeys(clause)) {
+          if (key === "911" || key === "112") addOwners(key, new Set(["emergen"]));
+        }
+        continue;
+      }
+      for (const key of datumValueKeys(clause)) {
+        if (longCluster && key.length < 7 && key !== "911" && key !== "112") continue;
+        addOwners(key, owners);
+        if (key === "911" || key === "112") addOwners(key, new Set(["emergen"]));
+      }
+    }
+  }
+  return map;
+}
+
+/**
+ * CL-6: ¿atribuye alguna cláusula de la frase un número de las
+ * fuentes a un dueño que NO es el suyo? El número correcto con el
+ * dueño cambiado (el de información servido como emergencias, el de
+ * la clínica como emergencias) es infracción pregunte lo que
+ * pregunte el usuario: la identidad del dato es pierna por frase,
+ * no por pregunta. Solo condena con dueño nombrado en AMBOS lados y
+ * conjuntos disjuntos; las raíces puentean los cognados entre
+ * idiomas (emergenc-, clinic-, hospital, informa-).
+ */
+/**
+ * Las raíces de TIPO de entidad a efectos de dueño: cuando ambos
+ * lados nombran un tipo (clínica contra hospital, emergencias
+ * contra información), manda el tipo — el nombre propio compartido
+ * («Riverside») no absuelve: la clínica Riverside y el hospital
+ * Riverside comparten pueblo, no teléfono.
+ */
+const DATUM_ENTITY_STEMS = new Set(
+  [
+    "clinica", "clinic", "hospital", "emergencias", "emergency", "emergencia",
+    "informacion", "information", "informacao", "compania", "companhia", "company",
+    "farmacia", "pharmacy", "hotel", "fontanero", "plumber", "encanador",
+    "asistencia", "assistance", "bomberos", "firefighters", "bombeiros",
+    "policia", "police", "gas", "agua", "water", "ayuda", "help",
+    "ayuntamiento", "oficina", "office", "escuela", "school", "escola",
+  ].map(stem),
+);
+
+function phoneOwnerConflict(sentence: string, attributions: Map<string, Set<string>>): boolean {
+  for (const clause of sentence.split(CLAUSE_SPLIT_EXT_RE)) {
+    const claimed = phoneClaimedOwners(clause);
+    if (claimed.size === 0) continue;
+    for (const key of datumValueKeys(clause)) {
+      const owners = attributions.get(key);
+      if (!owners || owners.size === 0) continue;
+      const typeClaimed = [...claimed].filter((s) => DATUM_ENTITY_STEMS.has(s));
+      const typeOwners = [...owners].filter((s) => DATUM_ENTITY_STEMS.has(s));
+      if (typeClaimed.length > 0 && typeOwners.length > 0) {
+        if (!typeOwners.some((o) => claimed.has(o))) return true;
+      } else if (![...owners].some((o) => claimed.has(o))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function phoneDatumBridge(
+  query: string,
+  recs: SourceSentenceRec[],
+  digitRecs: SourceSentenceRec[],
+  queryStems: Set<string>,
+  phoneQuestion: boolean,
+): SourceSentenceRec | null {
+  if (phoneQuestion) return null;
+  if (!/\b(numero|numeros|number|numbers)\b/.test(foldForCues(query))) return null;
+  const substantive = [...queryStems].filter((s) => !GENERIC_DATUM_STEMS.has(s));
+  if (substantive.length === 0) return null;
+  if (digitRecs.some((r) => substantiveStemCount(r.text, queryStems) > 0)) return null;
+  const phoneRecs = digitRecs.filter((r) => hasPhoneForm(r.text));
+  if (phoneRecs.length !== 1) return null;
+  const evidenceStems = new Set(recs.flatMap((r) => contentStems(r.text)));
+  if (!substantive.some((s) => evidenceStems.has(s))) return null;
+  // ADV3 (A3-04): si la frase del teléfono nombra como dueño a una
+  // entidad y ninguna de sus raíces es la pedida, el teléfono es
+  // de OTRA entidad: el puente no lo sirve como respuesta (servía
+  // el de la clínica ante la pregunta por la farmacia). Sin dueño
+  // nombrado — la forma de ADV2-02 — la guardia no bloquea nada, y
+  // cualquier solape basta para dejarlo disparar.
+  const owners = phoneOwnerStems(phoneRecs[0].text);
+  if (owners.size > 0 && ![...owners].some((s) => substantive.includes(s))) return null;
+  return phoneRecs[0];
+}
+
+/** ¿Afirma la frase qué es el dato (categoría + cópula) sin dar ninguna cifra? */
+function assertsDatumIdentity(sentence: string): boolean {
+  if (hasJudgedDigit(sentence)) return false;
+  const folded = foldForCues(sentence);
+  return DATUM_CATEGORY_RE.test(folded) && hasDatumCopula(sentence);
+}
+
+/**
+ * Aplica la regla del dato pedido sobre las frases conservadas (kept
+ * y prov caminan juntos): sustituye al primer infractor por la frase
+ * fuente del dato y retira los demás infractores. Devuelve cuántas
+ * frases se retiraron de más y si hubo sustitución. Sin pregunta o
+ * sin el dato en la evidencia: no toca nada.
+ *
+ * ADV2-A añade la segunda pierna (ADV-G1/G2): la afirmación CON
+ * cifras del tipo pedido pero con las cifras de otro dato también
+ * es infractora — se sustituye por el dato del tipo, o se retira si
+ * la evidencia no trae ese tipo o si otra frase ya lo entregó bien.
+ *
+ * T-J1 (barrido «revisa todo», J1) — EL PERÍMETRO NUEVO, decidido
+ * con su demostración: hasta esta tanda la regla entera estaba
+ * cerrada por la pregunta — sin señal de dato en ella
+ * (DATUM_QUESTION_RE), la pierna tipada ni corría, y el par de
+ * A3-03 volvía a sellarse fundado en cuanto la pregunta era «¿Cómo
+ * se toma el jarabe?» en vez de «¿Cuál es la dosis?» (la forma
+ * natural de preguntar por una dosis). La vara del juez no se
+ * mueve; se mueve su ALCANCE, y solo en la pierna tipada: una
+ * afirmación que ya viene tipada en la propia frase (categoría +
+ * cópula + tipo nombrables por ella misma) y cuyas cifras no casan
+ * con ningún dato de ese tipo en la evidencia es infractora la
+ * pregunte lo que pregunte — la cuádruple condición de
+ * isTypedDatumOffender (nombra su tipo, afirma identidad con
+ * cópula, trae cifras, y esas cifras FALLAN contra el tipo) es tan
+ * estrecha como la señal que antes se exigía a la pregunta. La
+ * pierna de identidad SIN cifras conserva la doble condición de
+ * R-05 intacta (señal en la pregunta Y cifra temática en la
+ * evidencia): afirmar sin dar ningún número es otra clase de
+ * falsedad, con otro riesgo, y su puerta no se abre aquí. Sin
+ * pregunta (las llamadas antiguas de 3 argumentos), la regla sigue
+ * sin actuar: no hay turno al que responder.
+ */
+export function applyDatumRule(
+  kept: string[],
+  prov: SentenceProvenance[],
+  query: string,
+  recs: SourceSentenceRec[],
+): { removedExtra: number; replaced: boolean } {
+  const none = { removedExtra: 0, replaced: false };
+  if (!query) return none;
+  const querySignal = DATUM_QUESTION_RE.test(foldForCues(query));
+  const askedType = datumTypeOfText(query);
+  const queryStems = new Set(contentStems(query));
+  const phoneQuestion = PHONE_QUESTION_RE.test(foldForCues(query));
+  let removedExtra = 0;
+  let replaced = false;
+
+  // La pierna tipada (ADV-G1/G2), generalizada por tipo: cada
+  // afirmación infractora se sustituye por el dato DE SU TIPO si
+  // ninguna frase lo entregó bien, o se retira. Con un solo tipo
+  // en juego (el de la pregunta, el camino de siempre) el desenlace
+  // es el de antes, frase a frase.
+  const runTypedLeg = (
+    resolveType: (s: string) => DatumType | null,
+    datumForType: (t: DatumType) => SourceSentenceRec | null,
+  ): void => {
+    const offenders: { i: number; type: DatumType }[] = [];
+    kept.forEach((s, i) => {
+      if (prov[i].origin.kind === "abstain") return;
+      const t = resolveType(s);
+      if (t && isTypedDatumOffender(s, t, recs, queryStems)) offenders.push({ i, type: t });
+    });
+    if (offenders.length === 0) return;
+    const offenderIdx = new Set(offenders.map((o) => o.i));
+    const typesInOrder: DatumType[] = [];
+    for (const o of offenders) if (!typesInOrder.includes(o.type)) typesInOrder.push(o.type);
+    const replaceAt = new Map<number, SourceSentenceRec>();
+    const removeIdx = new Set<number>();
+    for (const t of typesInOrder) {
+      const group = offenders.filter((o) => o.type === t);
+      const deliveredNow = kept.some(
+        (s, i) =>
+          !offenderIdx.has(i) &&
+          prov[i].origin.kind !== "abstain" &&
+          hasJudgedDigit(s) &&
+          digitsMatchType(s, t, recs, queryStems) &&
+          (carriesDatumOfType(s, t) || datumTypeOfText(s) === t),
+      );
+      // C2-H2: si la fuente da al dueño de la afirmación su propio número
+      // («el de emergencias»), la sustituta es esa frase, no el teléfono de
+      // otro dueño («el de la clínica»).
+      const ownT = t === "phone" ? phoneOwnRec(kept[group[0].i], recs) : null;
+      const datumT = deliveredNow ? null : (ownT ?? datumForType(t));
+      if (!deliveredNow && datumT) {
+        replaceAt.set(group[0].i, datumT);
+        for (const o of group.slice(1)) removeIdx.add(o.i);
+      } else {
+        for (const o of group) removeIdx.add(o.i);
+      }
+    }
+    for (const [i, datumT] of replaceAt) {
+      const fixed = addCitation(datumT.text, datumT.chunk + 1);
+      kept[i] = fixed;
+      prov[i] = { text: fixed, origin: { kind: "source", n: datumT.chunk + 1, support: 1, replaced: true } };
+      replaced = true;
+    }
+    for (const i of [...removeIdx].sort((a, b) => b - a)) {
+      kept.splice(i, 1);
+      prov.splice(i, 1);
+      removedExtra++;
+    }
+  };
+
+  // Sin señal en la pregunta, solo corre la pierna tipada, con el
+  // tipo que cada afirmación nombra de sí misma (T-J1).
+  if (!querySignal) {
+    runTypedLeg(
+      (s) => datumTypeOfText(s),
+      (t) => pickTypedDatumSentence(t, queryStems, phoneQuestion, recs),
+    );
+    return replaced || removedExtra > 0 ? { removedExtra, replaced } : none;
+  }
+
+  const datum = pickDatumSentence(query, recs);
+
+  const typedOffender = (s: string): boolean => askedType !== null && isTypedDatumOffender(s, askedType, recs, queryStems);
+
+  // «Ya entregado»: una frase conservada con cifras que casa con la
+  // pregunta. Cuando la pregunta pide un tipo, la afirmación con las
+  // cifras de OTRO dato («el teléfono es el 911») no cuenta como
+  // entrega: es el infractor, no el testigo que apaga la regla.
+  const delivered = kept.some(
+    (s, i) =>
+      prov[i].origin.kind !== "abstain" &&
+      hasJudgedDigit(s) &&
+      datumScore(s, queryStems, phoneQuestion) >= 2 &&
+      !typedOffender(s),
+  );
+  if (!delivered && datum) {
+    const offenders: number[] = [];
+    kept.forEach((s, i) => {
+      if (prov[i].origin.kind === "abstain" || !assertsDatumIdentity(s)) return;
+      // CL-9 (caza 0.1.97): assertsDatumIdentity no ve los dígitos
+      // únicos, así que una afirmación FIEL con su cifra («A dose é
+      // de 5 ml») parecía una identidad sin cifras y se sustituía
+      // por la frase del dato. Si la frase trae cifras y esas
+      // cifras CASAN con un dato de su tipo, no es infractora de
+      // identidad: su juez es la pierna tipada. La sustitución es
+      // solo para la cifra que contradice o para la que no existe.
+      // La cita «[1]» no es una cifra de la frase: los dos guardas
+      // miran el texto sin citas.
+      const bare = s.replace(/\[\d+\]/g, " ");
+      if (askedType !== null && /\d/.test(bare) && digitsMatchType(s, askedType, recs, queryStems)) return;
+      // CL-9, la otra cara: la cifra en LETRA que casa con la
+      // evidencia tampoco es identidad sin cifras («cinco
+      // mililitros» contra el «5 ml» de la guía).
+      if (askedType !== null && !/\d/.test(bare)) {
+        const values = evidenceNumberValues(recs.map((r) => r.text));
+        const readings = sentenceWordReadings(s);
+        if (readings.length > 0 && readings.every((r) => values.has(r.value))) return;
+        const quantities = quantitiesOf(s);
+        if (quantities.length > 0 && quantities.every((q) => values.has(q.raw) || values.has(q.canon))) return;
+      }
+      offenders.push(i);
+    });
+    if (offenders.length > 0) {
+      const first = offenders[0];
+      const fixed = addCitation(datum.text, datum.chunk + 1);
+      kept[first] = fixed;
+      prov[first] = { text: fixed, origin: { kind: "source", n: datum.chunk + 1, support: 1, replaced: true } };
+      replaced = true;
+      for (const i of offenders.slice(1).reverse()) {
+        kept.splice(i, 1);
+        prov.splice(i, 1);
+        removedExtra++;
+      }
+    }
+  }
+
+  // La afirmación CON cifras del tipo equivocado (ADV-G1/G2). Con
+  // tipo pedido, ese y solo ese; con señal pero sin tipo («¿cuánto
+  // jarabe…?»), el de cada afirmación, como en la vía sin señal.
+  if (askedType) {
+    runTypedLeg(
+      () => askedType,
+      () => datum,
+    );
+  } else {
+    runTypedLeg(
+      (s) => datumTypeOfText(s),
+      (t) => pickTypedDatumSentence(t, queryStems, phoneQuestion, recs),
+    );
+  }
+
+  return replaced || removedExtra > 0 ? { removedExtra, replaced } : none;
+}
+
+/**
+ * T-20: la validación del contexto semántico. El contexto solo se
+ * acepta ENTERO y alineado con lo que el juez mismo reconstruye: el
+ * perfil multilingüe medido, un vector de similitud por chunk, y
+ * exactamente los vectores de las cláusulas que salen de aplicar
+ * splitClausesWithSep a las frases de los chunks y de la respuesta,
+ * todos vectores finitos de la misma dimensión. Cualquier desvío —
+ * un chunk de más o de menos, una cláusula desalineada, un NaN — y
+ * el contexto se ignora entero: nunca se juzga con un contexto a
+ * medias (la desalineación cláusula↔vector es el fallo silencioso
+ * que esta validación existe para hacer imposible).
+ */
+function usableSemanticContext(
+  ctx: JudgeSemanticContext | undefined,
+  chunks: GroundingChunk[],
+  sentences: string[],
+  chunkSentences: string[][],
+): JudgeSemanticContext | undefined {
+  if (!ctx) return undefined;
+  if (ctx.profileId !== "multilingual-e5-small") return undefined;
+  if (ctx.chunkClauseVectors.length !== chunks.length) return undefined;
+  if (ctx.questionChunkSims.length !== chunks.length) return undefined;
+  if (ctx.answerClauseVectors.length !== sentences.length) return undefined;
+  for (const sim of ctx.questionChunkSims) {
+    if (!Number.isFinite(sim)) return undefined;
+  }
+  let dim = 0;
+  const vectorOk = (v: Float32Array): boolean => {
+    if (!(v instanceof Float32Array) || v.length === 0) return false;
+    if (dim === 0) dim = v.length;
+    if (v.length !== dim) return false;
+    for (const x of v) if (!Number.isFinite(x)) return false;
+    return true;
+  };
+  for (let i = 0; i < chunks.length; i++) {
+    const expected = chunkSentences[i]!.flatMap((s) => splitClausesWithSep(s)).length;
+    const vectors = ctx.chunkClauseVectors[i]!;
+    if (vectors.length !== expected) return undefined;
+    for (const v of vectors) if (!vectorOk(v)) return undefined;
+  }
+  for (let i = 0; i < sentences.length; i++) {
+    const expected = splitClausesWithSep(sentences[i]!).length;
+    const vectors = ctx.answerClauseVectors[i]!;
+    if (vectors.length !== expected) return undefined;
+    for (const v of vectors) if (!vectorOk(v)) return undefined;
+  }
+  return ctx;
+}
+
+// ------------------------------------------- puertas semánticas (T-21)
+
+/**
+ * T-21 (0.1.99, núcleo del juez): las puertas semánticas medidas por
+ * el diseño del núcleo (DISENO-NUCLEO.md) y re-medidas por T-20
+ * contra el GGUF servido de e5. Son la última vara del juicio: solo
+ * actúan sobre frases que el juicio léxico conservaría (las que
+ * llegan vivas al final de su rama, principal o cruzada), solo con
+ * contexto semántico válido (perfil multilingüe activo) y en el
+ * orden sellado SUELO → TIE2 → N8 → TRAS-tema. Sin contexto, el
+ * juez es byte a byte el de T-19.
+ *
+ * Umbrales (medición oficial de T-20, arnés de la caza sobre el
+ * pipeline real): SUELO 0,87 (a 0,88 cae la fiel 222: no subirlo) ·
+ * TIE2 tau 0,82 eps 0,05 · N8 margen 0,02 apoyo 0,5 · TRAS-tema
+ * 0,88. Unión medida: 61/67 del residuo con 0 fieles rotas en los
+ * tres conjuntos (marcador fiel, no-marcador fiel, no-marcador de
+ * las que ya caían).
+ *
+ * Re-derivación en PC (E3, tanda 10C · J-9, 2026-11-17): el eps
+ * de TIE2 es la única cifra que no viaja tal cual de T-20. Su
+ * calibración (0,05) se tomó sobre la geometría de la fixture, y
+ * con la geometría que el motor de PC sirve el casi-empate se
+ * decidía dentro de la deriva de cláusulas entre builds de
+ * llama.cpp (~1,5 centésimas) y cortaba tres respuestas fieles
+ * (matriz-a-315, 348 y 435, medidas en el re-cobro de J-9).
+ * Re-derivado por el método de T-20 (maximizar cazadas con
+ * fieles rotas = 0) con las dos geometrías como co-restricción,
+ * el barrido de eps a tau 0,82 deja una sola ventana factible,
+ * [0,0408, 0,0428), y su centro, 0,042, es el valor que corre
+ * aquí; tau no se mueve (0,82) y ningún otro umbral se toca.
+ * Firmado por el dirimen de calibración
+ * (estudios/DIRIMEN-CALIBRACION-TIE2.md §4): residuo de PC en
+ * su geometría 5 con fieles rotas 0, y la pierna de la fixture
+ * de J-9 re-firmada en residuo 7 con fieles rotas 0 (con eps
+ * 0,042 salen de la caza de la fixture falsos-dictado-f10-4,
+ * matriz-a-099 y matriz-a-132, que se declaran en el residuo
+ * de sus baterías).
+ */
+const SEM_FLOOR = 0.87;
+const SEM_TIE_TAU = 0.82;
+const SEM_TIE_EPS = 0.042;
+const SEM_N8_MARGIN = 0.02;
+const SEM_N8_SUPPORT = 0.5;
+const SEM_TRAS_SIM = 0.88;
+
+/**
+ * El vocabulario de negación gobernante del diseño (GOV_NEG): la
+ * negación que manda sobre el predicado, incluida la de
+ * acompañamiento («sin»/«sem»/«without»), que aquí sí cuenta
+ * porque se lee por gobierno y en simetría, no por conteo.
+ */
+const GOV_NEG_WORDS = new Set(
+  "no not never none without nunca jamas tampoco ningun ninguno ninguna nada nao nenhum nenhuma sem sin".split(" "),
+);
+const NT_RE = /n['’]t(?![a-z])/;
+
+/**
+ * La negación por PRESENCIA gobernante (el neg_gov del diseño):
+ * alguna palabra de GOV_NEG en la cláusula, o la contracción
+ * inglesa. En régimen portugués «no» no niega (es la preposición
+ * de «no tubo»): sale del conjunto, como midió el diseño.
+ */
+function semNegGov(text: string, ptRegime: boolean): boolean {
+  if (NT_RE.test(text.toLowerCase())) return true;
+  const ws = new Set(words(text));
+  for (const w of GOV_NEG_WORDS) {
+    if (w === "no" && ptRegime) continue;
+    if (ws.has(w)) return true;
+  }
+  return false;
+}
+
+/**
+ * La negación por POSICIÓN gobernante (el neg_pos del diseño): la
+ * negación solo niega su cláusula si precede a su primera raíz de
+ * contenido; el adjunto posverbal («sin consultar», «without
+ * turning on») no niega ni en la respuesta ni en la gemela. Esa
+ * simetría es la llave del núcleo: desblinda las cargas que se
+ * escondían tras un adjunto y salva las fieles cuyo adjunto
+ * convertía su gemela en «negada».
+ */
+function semNegPos(text: string, ptRegime: boolean): boolean {
+  if (NT_RE.test(text.toLowerCase())) return true;
+  const toks = words(text);
+  let firstContent = -1;
+  for (let i = 0; i < toks.length; i++) {
+    const w = toks[i]!;
+    if ((w.length >= 3 || /^\d+$/.test(w)) && !STOPWORDS.has(w)) {
+      firstContent = i;
+      break;
+    }
+  }
+  for (let i = 0; i < toks.length; i++) {
+    const w = toks[i]!;
+    if (w === "no" && ptRegime) continue;
+    if (GOV_NEG_WORDS.has(w) && (firstContent === -1 || i <= firstContent)) return true;
+  }
+  return false;
+}
+
+/** Una cláusula fuente con todo lo que las puertas leen de ella. */
+interface SemSourceClause {
+  chunk: number;
+  stems: Set<string>;
+  negPos: boolean;
+  negGov: boolean;
+  poles: Set<string>;
+  vec: Float32Array;
+}
+
+/** Una cláusula de la respuesta con todo lo que las puertas leen. */
+interface SemAnswerClause {
+  text: string;
+  subordinate: boolean;
+  /** Cuelga de la abstención de su frase (ella o una anterior): exenta. */
+  preamble: boolean;
+  stems: Set<string>;
+  negPos: boolean;
+  negGov: boolean;
+  vec: Float32Array;
+}
+
+/** Todo lo que las puertas necesitan, calculado una vez por juicio. */
+interface SemGateData {
+  sources: SemSourceClause[];
+  answerClauses: SemAnswerClause[][];
+  /** El chunk más relevante para la pregunta y su margen sobre el segundo. */
+  topChunk: number;
+  n8Margin: number;
+  chunkStemSets: Set<string>[];
+  /** Raíces que en las fuentes SOLO aparecen bajo negación gobernante (TRAS). */
+  negStems: Set<string>;
+  posStems: Set<string>;
+  /** Ámbito de tema de TRAS: solape pregunta↔chunk de la prohibición. */
+  topicOverlap: number;
+  chunkLangs: (GroundingLang | null)[];
+  /** El idioma detectado de la respuesta (el ámbito cruzado de TIE2). */
+  answerLang: GroundingLang | null;
+}
+
+/**
+ * Prepara los datos de las puertas desde el contexto validado, con
+ * el mismo troceo que el juez valida (splitClausesWithSep sobre las
+ * frases de chunkSentences y de la respuesta): los vectores se
+ * consumen en ese orden exacto. Sin cláusulas fuente no hay
+ * evidencia semántica que leer y no hay puertas (null).
+ */
+function prepareSemGates(
+  ctx: JudgeSemanticContext,
+  chunks: GroundingChunk[],
+  chunkSentences: string[][],
+  sentences: string[],
+  chunkTexts: string[],
+  query: string,
+  answerLang: GroundingLang | null,
+  sourceLang: GroundingLang | null,
+): SemGateData | null {
+  const ptRegime = answerLang === "pt" || sourceLang === "pt";
+  const sources: SemSourceClause[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    let k = 0;
+    for (const s of chunkSentences[i]!) {
+      for (const cl of splitClausesWithSep(s)) {
+        sources.push({
+          chunk: i,
+          stems: new Set(contentStems(cl.text)),
+          negPos: semNegPos(cl.text, ptRegime),
+          negGov: semNegGov(cl.text, ptRegime),
+          poles: clausePoles(cl.text),
+          vec: ctx.chunkClauseVectors[i]![k++]!,
+        });
+      }
+    }
+  }
+  if (sources.length === 0) return null;
+  const answerClauses: SemAnswerClause[][] = sentences.map((s, si) => {
+    const cls = splitClausesWithSep(s);
+    const idkIdx = cls.findIndex((c) => IDK_RE.test(c.text));
+    return cls.map((c, j) => ({
+      text: c.text,
+      subordinate: c.subordinate,
+      preamble: idkIdx >= 0 && j <= idkIdx,
+      stems: new Set(contentStems(c.text)),
+      negPos: semNegPos(c.text, ptRegime),
+      negGov: semNegGov(c.text, ptRegime),
+      vec: ctx.answerClauseVectors[si]![j]!,
+    }));
+  });
+  // N8: el chunk más relevante para la pregunta y su margen.
+  let topChunk = -1;
+  let topVal = -Infinity;
+  let second = -Infinity;
+  for (let i = 0; i < ctx.questionChunkSims.length; i++) {
+    const v = ctx.questionChunkSims[i]!;
+    if (v > topVal) {
+      second = topVal;
+      topVal = v;
+      topChunk = i;
+    } else if (v > second) {
+      second = v;
+    }
+  }
+  const n8Margin = ctx.questionChunkSims.length >= 2 && topChunk >= 0 ? topVal - second : 0;
+  // TRAS-tema: las raíces bajo negación gobernante y las demás, y el
+  // solape de tema entre la pregunta y los chunks que las contienen.
+  const negStems = new Set<string>();
+  const posStems = new Set<string>();
+  for (const src of sources) {
+    for (const st of src.stems) (src.negGov ? negStems : posStems).add(st);
+  }
+  const questionStems = new Set(contentStems(query ?? ""));
+  let topicOverlap = 0;
+  chunkSentences.forEach((ss, i) => {
+    const bodyStems = new Set<string>();
+    for (const s of ss) for (const st of contentStems(s)) bodyStems.add(st);
+    let toca = false;
+    for (const st of bodyStems) if (negStems.has(st)) { toca = true; break; }
+    if (!toca) return;
+    let n = 0;
+    for (const st of questionStems) if (bodyStems.has(st)) n++;
+    if (n > topicOverlap) topicOverlap = n;
+  });
+  return {
+    sources,
+    answerClauses,
+    topChunk,
+    n8Margin,
+    chunkStemSets: chunkTexts.map((t) => new Set(contentStems(t))),
+    negStems,
+    posStems,
+    topicOverlap,
+    chunkLangs: chunkTexts.map((t) => detectTextLang(t)),
+    answerLang,
+  };
+}
+
+/** La mejor similitud de un vector contra todas las cláusulas fuente. */
+function semMaxSim(vec: Float32Array, data: SemGateData): number {
+  let mx = 0;
+  for (const src of data.sources) {
+    const v = cosineSimilarity(vec, src.vec);
+    if (v > mx) mx = v;
+  }
+  return mx;
+}
+
+type SemGateName = "suelo" | "tie2" | "n8" | "tras";
+
+/**
+ * Las cuatro puertas sobre UNA frase que el juicio léxico
+ * conservaría, en el orden sellado. Devuelve la puerta que dispara
+ * o null. `datumJurisdiction` es la excepción heredada de CL-10/V6
+ * y solo la lee N8: lo que es de la regla del dato se sustituye,
+ * no se retira por relevancia.
+ */
+function semGateFire(
+  data: SemGateData,
+  sentenceIdx: number,
+  sentenceStems: Set<string>,
+  datumJurisdiction: boolean,
+): SemGateName | null {
+  const clauses = data.answerClauses[sentenceIdx]!;
+  // 1 · SUELO de cláusula sustantiva: si TODAS las cláusulas
+  // sustantivas de la frase quedan por debajo del suelo contra las
+  // cláusulas fuente, la frase no tiene respaldo semántico. Las de
+  // preámbulo de abstención no cuentan; la abstención pura (todas
+  // preámbulo) está exenta entera.
+  if (!(clauses.length > 0 && clauses.every((c) => c.preamble))) {
+    let mx = -1;
+    for (const c of clauses) {
+      if (c.stems.size < 3 || c.preamble) continue;
+      const v = semMaxSim(c.vec, data);
+      if (v > mx) mx = v;
+    }
+    if (mx >= 0 && mx < SEM_FLOOR) return "suelo";
+  }
+  // 2 · TIE2: la gemela negada de cláusula con casi-empate. Una
+  // cláusula sin negación gobernante propia cuya mejor gemela
+  // NEGADA (negación por posición, en simetría) alcanza tau y queda
+  // a eps o menos de su mejor gemela positiva dice lo contrario de
+  // la guía. Ámbito cruzado: la gemela que dispara debe vivir en un
+  // chunk de otro idioma que el de la RESPUESTA — la formulación
+  // con la que el arnés oficial de T-20 midió la unión (61/67). La
+  // variante por idioma de cláusula, que el diseño prefería en su
+  // §9, la contradijo la batería de esta tanda con dos pérdidas
+  // atribuibles y medidas: 087 (la cláusula «Aplique manteiga nem
+  // pasta…» no tiene idioma detectable y la variante la saltaba) y
+  // f10-4 (la cláusula que dispara es la fiel en el idioma de la
+  // guía dentro de una respuesta mezclada: por cláusula no hay
+  // cruce y por caso sí, que es como el arnés la cazó). Comparar
+  // contra el chunk de la gemela, y no contra el primero, conserva
+  // la protección de b-099: su gemela vive en el chunk de su mismo
+  // idioma y TIE2 no la toca (la caza TRAS-tema).
+  for (const c of clauses) {
+    if (c.stems.size < 3 || c.subordinate || c.preamble || c.negPos) continue;
+    let mn = -1;
+    let mnChunk = -1;
+    let mp = 0;
+    for (const src of data.sources) {
+      const v = cosineSimilarity(c.vec, src.vec);
+      if (src.negPos) {
+        if (v > mn) { mn = v; mnChunk = src.chunk; }
+      } else if (v > mp) {
+        mp = v;
+      }
+    }
+    if (mn < SEM_TIE_TAU || mn < mp - SEM_TIE_EPS) continue;
+    const ownerLang = data.chunkLangs[mnChunk];
+    if (ownerLang === null || data.answerLang === null || ownerLang === data.answerLang) continue;
+    return "tie2";
+  }
+  // 3 · N8: la relevancia semántica pregunta→chunk. Si un chunk
+  // gana claramente como el del tema y la frase se apoya sobre todo
+  // en otro (y en el del tema, ni a medias), su único respaldo es
+  // el sentido competidor: la polisemia que el léxico no separa.
+  if (data.topChunk >= 0 && data.n8Margin >= SEM_N8_MARGIN && !datumJurisdiction && sentenceStems.size > 0) {
+    let best = -1;
+    let bestSupport = -1;
+    let topSupport = 0;
+    data.chunkStemSets.forEach((set, i) => {
+      let hits = 0;
+      for (const st of sentenceStems) if (set.has(st)) hits++;
+      const apoyo = hits / sentenceStems.size;
+      if (apoyo > bestSupport) { bestSupport = apoyo; best = i; }
+      if (i === data.topChunk) topSupport = apoyo;
+    });
+    if (best >= 0 && best !== data.topChunk && bestSupport >= SEM_N8_SUPPORT && topSupport < SEM_N8_SUPPORT) {
+      return "n8";
+    }
+  }
+  // 4 · TRAS-tema: el trasplante léxico con ámbito de tema. La
+  // frase trae una raíz que en las fuentes SOLO aparece bajo
+  // negación, su mejor cláusula roza a la guía (≥ 0,88), no trae
+  // negación propia, y el chunk de la prohibición no es el del tema
+  // de la pregunta (solape < 2): sin ese ámbito, TRAS rompía 514.
+  if (data.negStems.size > 0 && data.topicOverlap < 2) {
+    let ownNegation = false;
+    let mx = 0;
+    const stemsF = new Set<string>();
+    for (const c of clauses) {
+      if (c.negPos || c.negGov) ownNegation = true;
+      for (const st of c.stems) stemsF.add(st);
+      const v = semMaxSim(c.vec, data);
+      if (v > mx) mx = v;
+    }
+    if (!ownNegation && mx >= SEM_TRAS_SIM) {
+      for (const st of stemsF) {
+        if (data.negStems.has(st) && !data.posStems.has(st)) return "tras";
+      }
+    }
+  }
+  return null;
+}
+
+// ------------------------- cirugía semántica de polos (F-06, T-21)
+
+/**
+ * Los ejes de polos del diseño (EJES): pares de acciones o estados
+ * opuestos, leídos por raíces con el puenteo de matchLevel. V4 los
+ * midió a nivel de FRASE y murió ahí (rompía 346/347/348/511/519):
+ * a nivel de frase, la mitad fiel de una frase compuesta cae con la
+ * inventada. En forma de cirugía de cláusula — la doctrina F-06
+ * que el dueño aceptó — el desenlace es el de dropFlippedClauses:
+ * se corta la cláusula opuesta y la fiel se queda, y es el
+ * marcador de cada gemela de la batería quien decide (511 conserva
+ * porque su marcador vive en la cláusula fiel; 512 corta porque
+ * vive en la opuesta).
+ */
+const POLE_AXES_RAW: ReadonlyArray<readonly [readonly string[], readonly string[]]> = [
+  [["marcha", "encendido", "encendida", "prendido", "running", "ligado", "aceso", "encender"],
+   ["apagar", "apagado", "apagada", "desligar", "desligado", "off", "apague"]],
+  [["abrir", "abierto", "abierta", "open", "aberta", "aberto"],
+   ["cerrar", "cerrado", "cerrada", "fechar", "fechado", "fechada", "close", "closed", "shut"]],
+  [["subir", "levantar", "elevar", "raise", "lift", "levanta"],
+   ["bajar", "descender", "baixar", "lower", "desce"]],
+  [["dentro", "inside"], ["fuera", "fora", "outside"]],
+  [["caliente", "quente", "hot"], ["frío", "frio", "fria", "cold"]],
+  [["seco", "seca", "dry"], ["mojado", "mojada", "molhado", "molhada", "wet"]],
+  [["limpio", "limpia", "clean"], ["sucio", "sucia", "sujo", "suja", "dirty"]],
+  [["seguir", "continuar", "keep", "continue", "sigue"],
+   ["parar", "detener", "stop", "pare"]],
+  [["dar", "give"], ["quitar", "retirar", "remove", "tirar", "quita", "retira"]],
+  [["lleno", "llena", "cheio", "cheia", "full"], ["vacío", "vacía", "vazio", "vazia", "empty"]],
+];
+const POLE_AXES: ReadonlyArray<readonly [ReadonlySet<string>, ReadonlySet<string>]> = POLE_AXES_RAW.map(
+  ([a, b]) =>
+    [
+      new Set(a.map((w) => stem(stripAccents(w.toLowerCase())))),
+      new Set(b.map((w) => stem(stripAccents(w.toLowerCase())))),
+    ] as const,
+);
+
+/** El pliegue de matchLevel (senales del diseño): normaliza grafías. */
+function poleFold(s: string): string {
+  let t = s.replaceAll("ph", "f").replaceAll("qu", "c").replaceAll("ct", "t").replaceAll("pt", "t");
+  t = t.replaceAll("y", "i");
+  t = t.replace(/(.)\1/g, "$1");
+  for (const suf of ["cion", "tion", "sion", "cao", "dad", "dade", "tud", "tude"]) {
+    if (t.length - suf.length >= 3 && t.endsWith(suf)) {
+      t = t.slice(0, t.length - suf.length);
+      break;
+    }
+  }
+  if (t.length >= 5 && "aeo".includes(t[t.length - 1]!)) t = t.slice(0, -1);
+  return t;
+}
+
+/** Levenshtein acotado a k (el edit_le del diseño). */
+function poleEditLe(a: string, b: string, k: number): boolean {
+  if (Math.abs(a.length - b.length) > k) return false;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let rowMin = k + 1;
+    for (let j = 1; j <= b.length; j++) {
+      const v = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+      cur.push(v);
+      if (j >= Math.max(0, i - k - 1) && j <= Math.min(b.length, i + k) && v < rowMin) rowMin = v;
+    }
+    if (rowMin > k) return false;
+    prev = cur;
+  }
+  return prev[b.length]! <= k;
+}
+
+/** 0 sin match, 1 crudo, 2 por pliegues, 3 suave (el match_level del diseño). */
+function poleMatchLevel(a: string, b: string): number {
+  if (a === b) return 1;
+  const fa = poleFold(a);
+  const fb = poleFold(b);
+  if (fa === fb && fa.length >= 3) return 2;
+  if (
+    Math.min(fa.length, fb.length) >= 4 &&
+    (fa.startsWith(fb.slice(0, 4)) || fb.startsWith(fa.slice(0, 4))) &&
+    poleEditLe(fa, fb, 2)
+  ) {
+    return 3;
+  }
+  return 0;
+}
+
+/** Los polos de un texto, como «eje:lado», con el puenteo medido. */
+function clausePoles(text: string): Set<string> {
+  const stems = new Set(contentStems(text));
+  const out = new Set<string>();
+  POLE_AXES.forEach(([ladoA, ladoB], i) => {
+    for (const s of stems) {
+      for (const e of ladoA) {
+        const m = poleMatchLevel(s, e);
+        if (m > 0 && m <= 3) { out.add(`${i}:0`); break; }
+      }
+      for (const e of ladoB) {
+        const m = poleMatchLevel(s, e);
+        if (m > 0 && m <= 3) { out.add(`${i}:1`); break; }
+      }
+    }
+  });
+  return out;
+}
+
+const SEM_POLE_TAU = 0.82;
+const SEM_POLE_DELTA = 0.06;
+/**
+ * T-26 (H-1 de la re-auditoría 0.1.99): la banda del empate cruzado
+ * de idioma. Cuando la lectura fiel — la mejor fuente del MISMO
+ * polo — es casi-gemela (≥ SEM_POLE_TAU) pero vive en un chunk de
+ * otro idioma que el de la respuesta, su similitud llega descontada
+ * por el hueco de idioma, y la gemela opuesta puede «ganarle» sin
+ * decir nada más verdadero: en matriz-a-348, «…with the engine hot»
+ * (0,8348) le ganaba a la lectura fiel de la propia cláusula,
+ * «Add coolant only when the engine is cold» (0,8248), por 0,0099,
+ * y la cirugía cortaba una cláusula fiel palabra a palabra. Dentro
+ * de esta banda la comparación cruzada no distingue: es el empate
+ * de la doctrina («el empate es de la fiel») medido a través del
+ * idioma, y la fiel protege. Fuera del ámbito — mismo idioma, sin
+ * lectura fiel casi-gemela, o idiomas no detectados — manda la
+ * comparación de siempre, sin tocar. Medido sobre la caza entera
+ * con contexto: los únicos cortes en ámbito son 348 (el fiel,
+ * 0,0099) y 066 (0,0018; su frase la caza SUELO igualmente); el
+ * corte cruzado más cercano fuera de la banda por la condición de
+ * casi-gemela es 360 (gap 0,0609 con misma 0,7954 < tau).
+ *
+ * El coste medido de la banda, en su filo exacto (re-auditoría
+ * zona 1, ronda 2, sondas NV-3/3c/3d): la protección no distingue
+ * a la fiel de una cláusula INVENTADA cuya lectura de polo propio
+ * sea casi-gemela cruzada. La inventada peligrosa «add coolant
+ * only when the engine is hot», con su polo apoyado en una
+ * prohibición casi-gemela en otro idioma (misma 0,82, en tau) y la
+ * opuesta fiel ganando por solo 0,02 (opp 0,84, dentro de la
+ * banda), escapa entera; con opp 0,86, fuera de la banda, la
+ * misma configuración se corta (NV-3b): la banda es la causa
+ * aislada del escape. Y el filo está donde esta constante dice,
+ * sin zona gris (NV-6/6b): con misma cruzada 0,8248,
+ * opp = misma + EPS − 0,0002 sobrevive y opp = misma + EPS +
+ * 0,0002 se corta.
+ */
+const SEM_POLE_XLANG_EPS = 0.03;
+
+/**
+ * La pierna semántica de la cirugía (F-06): corta las cláusulas de
+ * la frase cuyo polo es el opuesto del de su gemela semántica. Una
+ * cláusula cae solo si su mejor cláusula fuente con el polo
+ * OPUESTO (y sin el suyo) es casi-gemela (≥ tau y a delta o menos
+ * de su mejor similitud) Y ninguna cláusula fuente con su MISMO
+ * polo la alcanza: la lectura fiel protege, con el empate a favor
+ * de la fiel, como en dropFlippedClauses — sin esa protección la
+ * pierna rompía las fieles 061/062/063 en el prototipo medido. El
+ * desenlace es el de la cirugía de la casa: cortada la primera
+ * cláusula sin una principal fiel detrás (≥3 raíces y máx-sim
+ * ≥ 0,87 entre las que quedan), cae la frase entera; si la hay,
+ * lo fiel se queda. Medido en prototipo contra la batería entera
+ * con el GGUF: caza 512 y 527 (y 066/180/258/471, que las puertas
+ * también cazan) con 0 rotas A/B.
+ *
+ * T-26 (H-1): la protección de la lectura fiel no puede perder por
+ * el hueco de idioma — si la fiel es casi-gemela (≥ tau) y su chunk
+ * es de otro idioma que la respuesta, la opuesta debe ganarle por
+ * SEM_POLE_XLANG_EPS, no por cualquier margen: la re-auditoría
+ * midió una fiel cortada (matriz-a-348) por 0,0099 de descuento
+ * cruzado ES↔EN, invisible a la vara del marcador.
+ */
+function dropOpposedClauses(
+  sentence: string,
+  semClauses: SemAnswerClause[],
+  data: SemGateData,
+): { text: string; dropped: number } {
+  const segs = sentence.split(clauseSplitExtCaptureRe(sentence));
+  // Los segmentos pares con ≥8 caracteres son, en orden, las
+  // cláusulas de splitClausesWithSep: el mismo troceo que alineó
+  // los vectores del contexto.
+  const segIdx: number[] = [];
+  for (let i = 0; i < segs.length; i += 2) {
+    if (segs[i]!.trim().length >= 8) segIdx.push(i);
+  }
+  if (segIdx.length !== semClauses.length) return { text: sentence, dropped: 0 };
+  const drop = new Set<number>(); // posiciones dentro de segIdx
+  for (let j = 0; j < segIdx.length; j++) {
+    const c = semClauses[j]!;
+    const poles = clausePoles(c.text);
+    if (poles.size === 0) continue;
+    let amax = 0;
+    const sims = data.sources.map((src) => {
+      const v = cosineSimilarity(c.vec, src.vec);
+      if (v > amax) amax = v;
+      return v;
+    });
+    for (const polo of poles) {
+      const [eje, lado] = polo.split(":");
+      const opuesto = `${eje}:${lado === "0" ? "1" : "0"}`;
+      if (poles.has(opuesto)) continue;
+      let opp = 0;
+      let misma = 0;
+      let mismaChunk = -1;
+      data.sources.forEach((src, si2) => {
+        if (src.poles.has(opuesto) && !src.poles.has(polo) && sims[si2]! > opp) opp = sims[si2]!;
+        if (src.poles.has(polo) && sims[si2]! > misma) {
+          misma = sims[si2]!;
+          mismaChunk = src.chunk;
+        }
+      });
+      // T-26: si la lectura fiel es casi-gemela y se lee a través
+      // del hueco de idioma (su chunk no es del idioma de la
+      // respuesta), la opuesta tiene que ganarle por la banda
+      // entera, no por el descuento del idioma: ver
+      // SEM_POLE_XLANG_EPS. El ámbito se mide por caso (idioma de
+      // la respuesta contra idioma del chunk de la fiel), como el
+      // de TIE2: la variante por cláusula la contradijo la batería
+      // de T-21 (087 y f10-4, asentado en semGateFire).
+      const fielCruzada =
+        misma >= SEM_POLE_TAU &&
+        mismaChunk >= 0 &&
+        data.answerLang !== null &&
+        data.chunkLangs[mismaChunk] != null &&
+        data.chunkLangs[mismaChunk] !== data.answerLang;
+      const umbralMisma = fielCruzada ? misma + SEM_POLE_XLANG_EPS : misma;
+      if (opp >= SEM_POLE_TAU && opp >= amax - SEM_POLE_DELTA && opp > umbralMisma) {
+        drop.add(j);
+        break;
+      }
+    }
+  }
+  if (drop.size === 0) return { text: sentence, dropped: 0 };
+  // ¿Queda una principal fiel? (la vara del prototipo medido)
+  const quedaFiel = semClauses.some(
+    (c, j) => !drop.has(j) && c.stems.size >= 3 && semMaxSim(c.vec, data) >= SEM_FLOOR,
+  );
+  if (drop.has(0) && !quedaFiel) return { text: "", dropped: drop.size };
+  const kill = new Set<number>();
+  for (const j of drop) {
+    const i = segIdx[j]!;
+    kill.add(i);
+    if (i > 0) kill.add(i - 1);
+    else if (segs.length > 1) kill.add(1);
+  }
+  const text = segs
+    .filter((_, i) => !kill.has(i))
+    .join("")
+    .replace(/\s+([,;:.!?])/g, "$1")
+    .trim();
+  return { text, dropped: drop.size };
+}
+
+export function verifyGroundedAnswer(
+  answer: string,
+  chunks: GroundingChunk[],
+  lang: GroundingLang,
+  /**
+   * La pregunta del usuario (R-05: la regla del dato pedido la
+   * necesita; sin ella, la regla no actúa). Obligatoria desde T-05
+   * (V-02 de la auditoría): con el valor por defecto de antes, una
+   * llamada heredada de 3 argumentos dejaba sin actuar en silencio
+   * las piernas que dependen de ella; ahora esa llamada es un error
+   * de tipos y quien no tenga pregunta pasa "" a la vista. La
+   * pierna de cantidades NO depende de este parámetro (es
+   * aritmética contra la evidencia) y juzga siempre.
+   */
+  query: string,
+  /**
+   * C-07: la fecha del turno contra la que se juzgan las fechas de la
+   * respuesta (R1–R5 de dates.ts). Opcional: sin ella, el día de hoy.
+   * ChatScreen pasa la marca temporal del mensaje del usuario cuando
+   * el mensaje la lleva; si no, el instante de finalización. Las
+   * relativas («ayer», «mañana») se juzgan contra ese día, que es lo
+   * que el humano quiso decir.
+   */
+  referenceDate: Date = new Date(),
+  /**
+   * T-20 (0.1.99, núcleo del juez): el contexto semántico precomputado
+   * por la capa de recuperación (semanticContext.ts) — vectores de las
+   * cláusulas de los chunks y de la respuesta y similitudes
+   * pregunta→chunk, del perfil multilingüe activo. El juez lo VALIDA
+   * (usableSemanticContext: perfil, longitudes y alineación de
+   * cláusulas contra su propio troceo); sin contexto, o con un
+   * contexto que no cuadra, el veredicto es byte a byte el de
+   * siempre. Desde T-21 lo leen las puertas semánticas (SUELO,
+   * TIE2, N8, TRAS-tema y la cirugía de polos F-06, junto a
+   * prepareSemGates): solo actúan con un contexto válido.
+   */
+  semanticContext?: JudgeSemanticContext,
+): GroundingResult {
+  const trimmed = (answer ?? "").trim();
+  if (!trimmed) return { text: trimmed, status: "skipped", removed: 0, kept: 0, judgeMode: "lexical" };
+  if (chunks.length === 0) {
+    // Sin fuentes: todo lo que dice es del modelo, salvo que diga no saber.
+    const sentences = splitSentences(trimmed).map((s) => ({
+      text: s,
+      origin: isPureAbstention(s) ? ({ kind: "abstain" } as const) : ({ kind: "model", reason: "no-sources" } as const),
+    }));
+    return { text: trimmed, status: "skipped", removed: 0, kept: 0, sentences, judgeMode: "lexical" };
+  }
+  // Modelos razonadores (bloques <think>): la UI los trata aparte; no se tocan.
+  if (/<think>/i.test(trimmed)) {
+    return { text: trimmed, status: "skipped", removed: 0, kept: 0, judgeMode: "lexical" };
+  }
+
+  const cleaned = stripInvalidCitations(trimmed, chunks.length);
+  const sentences = splitSentences(cleaned);
+  const chunkTexts = chunks.map((c) => `${c.title}. ${c.body}`);
+
+  // Idioma de la respuesta vs. idioma de la fuente PRINCIPAL.
+  // Caso llanta (probado en el dispositivo del dueño, 2026-11-13): la
+  // detección sobre la unión de todos los chunks dejaba que el ruido
+  // recuperado tras la guía (dos textos en inglés que no venían al
+  // caso) degradara la respuesta entera a la rama débil, donde una
+  // instrucción inventada sin cifras ni dosis ni fechas pasaba. La
+  // fuente principal es la que encabeza la respuesta y ancla la cita
+  // [1]: su idioma manda. Si su idioma no se puede detectar, no hay
+  // degradación (null sigue contando como mismo idioma).
+  const answerLang = detectTextLang(cleaned);
+  const sourceLang = chunkTexts.length > 0 ? detectTextLang(chunkTexts[0]) : null;
+  const sameLanguage = answerLang === null || sourceLang === null || answerLang === sourceLang;
+  // CL-1 (caza 0.1.97): la degradación por idioma era global a la
+  // respuesta — si el primer chunk venía en otro idioma (la guía
+  // segunda, tras ruido extranjero), TODO se juzgaba en la rama
+  // débil aunque la guía del idioma de la respuesta estuviera entre
+  // las fuentes. La rama principal juzga también cuando existe una
+  // fuente SUSTANTIVA en el idioma de la respuesta: un chunk de ese
+  // idioma que comparte el tema de la pregunta (≥2 raíces con la
+  // pregunta). Un chunk en el idioma de la respuesta pero ajeno al
+  // tema (el ruido que acompaña a una guía extranjera en la cruzada)
+  // NO abre la rama principal: la frase fiel traducida moriría por
+  // falta de apoyo léxico contra ese ruido, y la doctrina cruzada
+  // manda conservarla como no verificada.
+  const chunkLangs = chunkTexts.map((t) => detectTextLang(t));
+  const questionStems = new Set(contentStems(query ?? ""));
+  // CL-10 (caza 0.1.97): la relación de cada chunk con la pregunta.
+  // La recuperación ordena pero el juez no ponderaba: una frase
+  // fundada solo en la guía del sentido competidor pasaba como
+  // respuesta. Relevante = comparte ≥2 raíces con la pregunta y
+  // está a ≤1 de la mejor relación; la pierna se arma solo si hay
+  // una fuente claramente del tema (mejor relación ≥3) y al menos
+  // una fuera.
+  const chunkQuestionRel = chunkTexts.map((tx) => contentStems(tx).filter((w) => questionStems.has(w)).length);
+  const maxQuestionRel = Math.max(0, ...chunkQuestionRel);
+  const relevantIdx = new Set(
+    chunkTexts.map((_, i) => i).filter((i) => chunkQuestionRel[i] >= 2 && chunkQuestionRel[i] >= maxQuestionRel - 1),
+  );
+  const relevanceArmed = maxQuestionRel >= 3 && relevantIdx.size > 0 && relevantIdx.size < chunkTexts.length;
+  const hasTopicSameLangChunk =
+    answerLang !== null &&
+    chunkTexts.some((tx, i) => chunkLangs[i] === answerLang && contentStems(tx).filter((w) => questionStems.has(w)).length >= 2);
+
+  const evidenceNums = evidenceNumberValues(chunkTexts);
+  // CL-4/CL-5: las cantidades con unidad de la evidencia, para la
+  // pierna de cantidades (la cifra con su unidad, no suelta).
+  const evidenceQty = evidenceQuantities(chunkTexts);
+  // C-08: los rangos de la evidencia sostienen su interior («39 °C»
+  // contra «entre 37 y 40 °C»): sin esto, la respuesta exacta de la
+  // guía abstenía por no ser ni el mínimo ni el máximo.
+  const chunkRanges = evidenceRanges(chunkTexts);
+  // Auditoría 0.1.70: las dosis medidas de toda la evidencia.
+  const evidenceDoses = chunks.flatMap((ch) => doseMeasuresOf(ch.body));
+
+  // Las frases de las fuentes, por chunk (la negación de 0.1.59 las usa
+  // por chunk; la regla de idioma de R-04 las recorre todas con su chunk).
+  const chunkSentences = chunks.map((c) => splitSentences(c.body.trim()).map((x) => x.replace(/^[-•*\d.)\s]+/, "").trim()).filter(Boolean));
+  const sourceRecs: SourceSentenceRec[] = [];
+  chunkSentences.forEach((ss, i) => {
+    for (const text of ss) sourceRecs.push({ text, chunk: i });
+  });
+  // T-20: el contexto semántico queda validado contra el troceo
+  // propio del juez en cuanto existen las frases de las fuentes.
+  // Ninguna puerta lo lee en esta tanda (eso es T-21): la validación
+  // vive ya aquí para que la desalineación se descubra en el primer
+  // consumidor, no en la primera puerta.
+  const semanticCtx = usableSemanticContext(semanticContext, chunks, sentences, chunkSentences);
+  // T-21: las puertas semánticas leen el contexto validado. Solo
+  // existen datos con contexto válido (prepareSemGates devuelve
+  // null también sin cláusulas fuente): sin ellos, ninguna puerta
+  // actúa y el juez es byte a byte el de T-19. La nota de T-20
+  // («ninguna puerta lo lee todavía») queda superada por esta tanda.
+  const semData = semanticCtx
+    ? prepareSemGates(semanticCtx, chunks, chunkSentences, sentences, chunkTexts, query, answerLang, sourceLang)
+    : null;
+  // M-7: la marca del modo sigue a usableSemanticContext — contexto
+  // usable, puertas semánticas armadas: "full"; sin él, el juez corre
+  // su capa léxica de siempre: "lexical".
+  const judgeMode: "lexical" | "full" = semanticCtx ? "full" : "lexical";
+  // C-07: las menciones de fecha de las fuentes, parseadas una sola
+  // vez: la pierna de fechas juzga cada frase contra ellas (dates.ts).
+  const sourceDateSentences = parseSourceDateSentences(chunkSentences.flat(), referenceDate);
+  // CL-6: el mapa número → dueños de las fuentes y si la pregunta
+  // ya arma la regla del dato para teléfonos (entonces manda ella,
+  // que sustituye por el dato correcto en vez de solo retirar).
+  const attributions = phoneAttributions(sourceRecs);
+  const datumArmedPhone =
+    datumTypeOfText(query ?? "") === "phone" || PHONE_QUESTION_RE.test(foldForCues(query ?? ""));
+  // La pierna de dueño dentro del bucle cede ante CUALQUIER regla
+  // del dato armada por la pregunta, no solo la de teléfonos: si la
+  // pregunta pide la tarjeta y la respuesta le atribuye el número
+  // de teléfono, el desenlace sellado (ADV-G1) es la SUSTITUCIÓN
+  // por la frase de la tarjeta, y retirar la frase en el bucle por
+  // conflicto de dueño lo impedía (la respuesta entera caía a la
+  // abstención). La post-pasada tras applyDatumRule sigue juzgando
+  // lo que quede en pie.
+  const datumArmedAny =
+    datumArmedPhone || datumTypeOfText(query ?? "") !== null;
+  // Frontera de T-J1, actualizada por T-05 (V-02 de la auditoría):
+  // la familia del DATO sigue sin actuar sin pregunta (es su
+  // frontera sellada: applyDatumRule y las puertas de arriba leen
+  // la pregunta directamente). La pierna de cantidades ya no
+  // comparte esa puerta: es aritmética de la frase contra la
+  // evidencia, su firma ni siquiera recibe la pregunta, y dejarla
+  // fuera por un llamador sin pregunta era el hueco de V-02 — una
+  // llamada de 3 argumentos la apagaba en silencio. Como la
+  // pregunta ahora es parámetro obligatorio, el llamador sin
+  // pregunta ya no compila; y quien pasa "" a la vista obtiene el
+  // juicio de cantidades entero, que es el comportamiento seguro.
+
+  // T-19 (V5b): los pares cifra↔rol de la evidencia, calculados una
+  // sola vez por llamada: la unión de pares de TODAS las frases
+  // fuente (es lo medido; la condición conjuntiva del disparo es lo
+  // que lo hace seguro), los roles que la evidencia empareja y sus
+  // cifras con las lecturas de la casa.
+  const sourceRolePairs = new Set<string>();
+  for (const ss of chunkSentences) {
+    for (const st of ss) {
+      for (const p of valueRolePairs(st)) sourceRolePairs.add(p);
+    }
+  }
+  const sourceRoles = new Set<string>();
+  for (const key of sourceRolePairs) sourceRoles.add(key.slice(key.lastIndexOf("|") + 1));
+  // Las cifras de la evidencia para el disparo son las de los tokens
+  // en dígitos (numberValueSet: las lecturas de parseNumberToken de
+  // numberTokens), NO las lecturas en letra de evidenceNumberValues:
+  // el paseo de pares es de dígitos, y contar el «dos» de «dos veces
+  // al día» como cifra suelta hacía disparar la pierna contra la
+  // prosa fiel que lo trae en dígitos («tome el jarabe 2 veces al
+  // día», controles de A3-03 y T-J1). Es la forma medida en el
+  // diseño, cuyo numeros() es de dígitos.
+  const sourceRoleNumbers = numberValueSet(chunkSentences.flat().join(" "));
+
+  if (!sameLanguage && !hasTopicSameLangChunk) {
+    // Sin comparación léxica válida: solo cifras (independientes del idioma).
+    // Tanda 1 del programa bounty: la comparación ya no es por dígitos
+    // exactos — «16,4 millones» es la misma cifra que «16,431,599» —
+    // sino por valor con redondeo y escala (evidenceNumbers.ts).
+    // R-04: la copia literal en el idioma equivocado SÍ se puede juzgar
+    // en esta rama (copia y gemela no necesitan comparación léxica
+    // general), y se juzga: sustituida por su gemela o retirada. Si al
+    // final no queda ninguna frase «del modelo», el estado ya no es
+    // «unverified»: lo que queda es verbatim de las fuentes.
+    let removed = 0;
+    let sourceFixed = 0;
+    const kept: string[] = [];
+    const langProv: SentenceProvenance[] = [];
+    // CL-4 paso B (rama cruzada): la evidencia de cifras de la
+    // frase es la de la fuente primaria y la de los chunks que
+    // comparten el tema de la pregunta — el ruido en el idioma de
+    // la respuesta (ajeno al tema) no lava cifras aquí tampoco.
+    const weakLocalIdx = new Set<number>([primarySourceIndex(chunks)]);
+    chunkTexts.forEach((tx, i) => {
+      if (contentStems(tx).filter((w) => questionStems.has(w)).length >= 2) weakLocalIdx.add(i);
+    });
+    // Sin pregunta (o con pregunta pobre), la localidad de la
+    // fuente primaria por título dejaba fuera al chunk del que la
+    // respuesta COPIA: la copia portuguesa del jarabe se juzgaba
+    // contra las cifras de la fotosíntesis (ninguna) y caía antes
+    // de que la pierna de copia pudiera sustituirla por su gemela
+    // (R-04). La casa de cada frase también es localidad: los
+    // chunks que comparten ≥2 raíces con la respuesta entran.
+    const answerStems = new Set(sentences.flatMap((s) => contentStems(s)));
+    chunkTexts.forEach((tx, i) => {
+      if (contentStems(tx).filter((w) => answerStems.has(w)).length >= 2) weakLocalIdx.add(i);
+    });
+    const weakLocalTexts = [...weakLocalIdx].map((i) => chunkTexts[i]);
+    const weakNums = evidenceNumberValues(weakLocalTexts);
+    const weakQty = evidenceQuantities(weakLocalTexts);
+    const weakRanges = evidenceRanges(weakLocalTexts);
+    for (let si = 0; si < sentences.length; si++) {
+      const s = sentences[si]!;
+      // C2-H1: solo la abstención pura se conserva sin juicio.
+      // 0.1.104: la negativa pura, igual (ver isPureRefusal).
+      if (isPureAbstention(s) || isPureRefusal(s)) {
+        kept.push(s);
+        langProv.push({ text: s, origin: { kind: "abstain" } });
+        continue;
+      }
+      if (!sentenceNumbersSupported(s, weakNums, weakRanges)) {
+        removed++;
+        continue;
+      }
+      // Auditoría 0.1.70: la dosis medida de un dígito (o en letra).
+      if (measuredDoseConflict(s, evidenceDoses)) {
+        removed++;
+        continue;
+      }
+      // CL-4/CL-5: las cantidades con unidad también son
+      // independientes del idioma (la unidad se normaliza igual en
+      // las tres lenguas) — juzgan también en esta rama. Desde
+      // T-05 (V-02) juzgan sin puerta de pregunta: ver la frontera
+      // de T-J1 actualizada junto a datumArmedAny.
+      if (quantityConflict(s, weakQty, weakNums, weakRanges)) {
+        removed++;
+        continue;
+      }
+      // T-19 (V5b): la cifra↔rol también es independiente del
+      // idioma — la cifra y el rol se atan por orden, sin léxico
+      // que comparar — y juzga en esta rama con los pares globales
+      // de la evidencia (012 y 297 viven aquí).
+      if (valueRoleConflict(s, sourceRolePairs, sourceRoles, sourceRoleNumbers)) {
+        removed++;
+        continue;
+      }
+      // CL-6: la identidad del dato también es independiente del
+      // idioma — el número correcto con el dueño cambiado se retira
+      // también en esta rama.
+      if (!datumArmedAny && phoneOwnerConflict(s, attributions)) {
+        removed++;
+        continue;
+      }
+      // C-07: las fechas son independientes del idioma, como las
+      // cifras — la pierna de fechas también juzga en esta rama.
+      if (dateConflictForSentence(s, sourceDateSentences, referenceDate)) {
+        removed++;
+        continue;
+      }
+      const fix = foreignCopyFix(s, sourceRecs, lang);
+      if (fix?.kind === "remove") {
+        removed++;
+        continue;
+      }
+      if (fix?.kind === "replace") {
+        const fixed = addCitation(fix.text, fix.chunk + 1);
+        kept.push(fixed);
+        langProv.push({ text: fixed, origin: { kind: "source", n: fix.chunk + 1, support: 1, replaced: true } });
+        sourceFixed++;
+        continue;
+      }
+      // T-04 (M-01 de la auditoría): la abstención que AFIRMA (la red
+      // C2-H1 la despoja del privilegio de abstención y la juzga por
+      // lo que afirma) no tiene en esta rama juicio léxico que la
+      // sostenga ni la tumbe. Si tras las piernas independientes del
+      // idioma no le queda ningún ancla comprobable (ni una cifra ni
+      // una dosis medida que esas piernas hayan podido contrastar),
+      // su afirmación cae como caería en la rama principal por falta
+      // de apoyo, y lo que se sirve es la abstención honesta. La que
+      // trae un ancla y la pasa («não sei, mas são 5 ml» con la dosis
+      // de la guía) se conserva no verificada, como manda CL-2 para
+      // el resto de frases del modelo en esta rama.
+      if (isAbstention(s) && numberTokens(s).length === 0 && doseMeasuresOf(s).length === 0) {
+        removed++;
+        continue;
+      }
+      // CL-2 (caza 0.1.97), forma medida: en la rama cruzada juzgan
+      // las piernas independientes del idioma (cifras, cantidades,
+      // dosis, fechas, copia, dato). Lo demás se conserva como no
+      // verificado: la medición de la caza probó que ningún anclaje
+      // léxico separa la traducción fiel de la invención en otro
+      // idioma (8 de 16 frases fieles comparten <2 raíces con su
+      // guía; 50 de 150 invenciones comparten ≥2), así que retirar
+      // «lo ajeno» por raíces mataría traducciones fieles. El
+      // residuo sin cifras queda asentado como límite del juez
+      // determinista, no como regalo: su estado es unverified.
+      // T-21: las puertas semánticas son la vara que esta rama no
+      // tenía — el residuo sin cifras de CL-2 era el límite del
+      // LÉXICO, no del juez con embeddings. Solo actúan con contexto
+      // válido y sobre la frase que llega viva hasta aquí (la que
+      // esta rama conservaría); la excepción de jurisdicción del
+      // dato de N8 se computa igual que en la rama principal.
+      if (semData) {
+        const datumJurisdiction =
+          (datumArmedAny && assertsDatumIdentity(s)) ||
+          (datumTypeOfText(query ?? "") !== null &&
+            isTypedDatumOffender(s, datumTypeOfText(query ?? "")!, sourceRecs, questionStems)) ||
+          (datumTypeOfText(s) !== null &&
+            isTypedDatumOffender(s, datumTypeOfText(s)!, sourceRecs, questionStems));
+        if (semGateFire(semData, si, new Set(contentStems(s)), datumJurisdiction) !== null) {
+          removed++;
+          continue;
+        }
+        // F-06 también aquí: la gemela cruzada de 512 es 527, y su
+        // cláusula opuesta («keep the engine running») no la caza
+        // ninguna puerta de frase entera — la caza la cirugía, con
+        // su desenlace: si la opuesta cae y queda principal fiel,
+        // se sirve lo fiel como no verificado; si no queda, cae.
+        const pole = dropOpposedClauses(s, semData.answerClauses[si]!, semData);
+        if (pole.dropped > 0) {
+          if (!pole.text) {
+            removed++;
+            continue;
+          }
+          kept.push(pole.text);
+          langProv.push({ text: pole.text, origin: { kind: "model", reason: "unverified-language" } });
+          continue;
+        }
+      }
+      kept.push(s);
+      langProv.push({ text: s, origin: { kind: "model", reason: "unverified-language" } });
+    }
+    // R-05: la regla del dato pedido también manda en esta rama — la
+    // puerta de cifras sola no basta contra una falsedad sin cifras.
+    const datumFix = applyDatumRule(kept, langProv, query, sourceRecs);
+    removed += datumFix.removedExtra;
+    if (datumFix.replaced) sourceFixed++;
+    // CL-6, post-pasada: si la pregunta SÍ pedía el dato, la pierna
+    // por frase cedió el paso a la regla del dato; lo que ella no
+    // resolvió y trae el dueño cambiado se retira aquí.
+    for (let i = kept.length - 1; i >= 0; i--) {
+      if (phoneOwnerConflict(kept[i], attributions)) {
+        kept.splice(i, 1);
+        langProv.splice(i, 1);
+        removed++;
+      }
+    }
+    if (kept.length === 0) {
+      return abstainedResult(chunks, lang, removed, judgeMode);
+    }
+    let text = kept.join(" ");
+    if (removed > 0) {
+      const note = NOTE.removed[lang].split("{{n}}").join(String(removed));
+      text += `\n\n${note}`;
+      langProv.push({ text: note, origin: { kind: "fixed" } });
+    }
+    const anyModel = langProv.some((p) => p.origin.kind === "model");
+    const status: GroundingStatus = anyModel ? "unverified" : sourceFixed > 0 ? (removed > 0 ? "partial" : "grounded") : "unverified";
+    return { text, status, removed, kept: kept.length, sentences: langProv, judgeMode };
+  }
+
+  const chunkStemSets = chunkTexts.map((t) => new Set(contentStems(t)));
+  // T-19 (V6): la relevancia de la polisemia se cuenta por PRESENCIA
+  // (raíces de la pregunta presentes en el chunk, sin repetir), no
+  // por ocurrencias como chunkQuestionRel: con ocurrencias, la guía
+  // del sentido competidor empata a la buena a base de repetir la
+  // palabra polisémica (polisemia-114 empata 3 a 3 y la pierna no se
+  // arma) y por presencia es 2 a 1, que es lo medido en el diseño.
+  // Su armado (≥2) y su disparo viven junto a CL-10 en el bucle.
+  const questionRelPresence = chunkStemSets.map((set) => {
+    let n = 0;
+    for (const w of questionStems) if (set.has(w)) n++;
+    return n;
+  });
+  const maxQuestionRelPresence = Math.max(0, ...questionRelPresence);
+  const relevanceArmedLow = maxQuestionRelPresence >= 2 && chunkTexts.length >= 2;
+  // CL-3: las cláusulas de todas las frases fuente, para la pierna
+  // de polaridad (el vocabulario de una contradicción puede venir
+  // repartido entre chunks, así que no se limita al mejor chunk).
+  const sourceClauses = sourceClauseRecs(chunkSentences.flat());
+  let removed = 0;
+  let negationFixed = 0; // counted for tests and logs; replaced sentences are verbatim, so still "grounded"
+  let languageFixed = 0; // R-04: copias sustituidas por su gemela en el idioma de la pregunta
+  let abstained = false;
+  let judgedKept = 0;
+  const kept: string[] = [];
+  const prov: SentenceProvenance[] = [];
+  // 0.1.105 (cáscara 01105): los títulos de la lista, para retirar
+  // sus ecos antes de que la frase corta los deje pasar.
+  const titleEchoForms = chunkTitleEchoForms(chunks);
+  for (let si = 0; si < sentences.length; si++) {
+    let s = sentences[si]!;
+    // C2-H1: solo la abstención pura se conserva sin juicio; la que afirma
+    // un dato se juzga por ese dato, como cualquier frase del modelo.
+    // 0.1.104: la negativa pura declina igual que la abstención pura —
+    // sin esta línea, «No puedo ayudarte con eso.» se servía como
+    // respuesta con la guía delante (ver isPureRefusal).
+    if (isPureAbstention(s) || isPureRefusal(s)) {
+      abstained = true;
+      kept.push(s);
+      prov.push({ text: s, origin: { kind: "abstain" } });
+      continue;
+    }
+    // 0.1.105 (cáscara 01105): el eco del título de un fragmento no
+    // es una respuesta (cita y encabezado, sin contenido del
+    // cuerpo): se retira antes de juzgarla, como cualquier frase
+    // sin fundamento (ver chunkTitleEchoForms).
+    if (isChunkTitleEcho(s, titleEchoForms)) {
+      removed++;
+      continue;
+    }
+    // La jurisdicción del dato de esta frase, calculada al entrar:
+    // la consultan CL-10 y V5b (las dos retiran por su cuenta y las
+    // dos ceden ante la regla del dato, cuyo desenlace sellado es
+    // la sustitución: ver la excepción junto a CL-10).
+    const datumJurisdiction =
+      (datumArmedAny && assertsDatumIdentity(s)) ||
+      (datumTypeOfText(query ?? "") !== null &&
+        isTypedDatumOffender(s, datumTypeOfText(query ?? "")!, sourceRecs, questionStems)) ||
+      (datumTypeOfText(s) !== null &&
+        isTypedDatumOffender(s, datumTypeOfText(s)!, sourceRecs, questionStems));
+    const sup = sentenceSupport(s, chunkStemSets);
+    // CL-4 paso B (caza 0.1.97): la evidencia de cifras de ESTA
+    // frase es la de sus chunks de apoyo (su mejor chunk y los que
+    // comparten ≥2 raíces con ella), no la unión global: un número
+    // lavado por un chunk ajeno al tema de la frase (el «37 cm»
+    // sostenido por el chunk del lago Ness) ya no la sostiene. Sin
+    // chunk de apoyo identificable, manda la evidencia global.
+    const sStems = new Set(contentStems(s));
+    const localIdx = new Set<number>();
+    if (sup.bestChunk >= 0) localIdx.add(sup.bestChunk);
+    chunkStemSets.forEach((set, i) => {
+      let hits = 0;
+      for (const w of sStems) if (set.has(w)) hits++;
+      if (hits >= 2) localIdx.add(i);
+    });
+    const localTexts = localIdx.size > 0 ? [...localIdx].map((i) => chunkTexts[i]) : chunkTexts;
+    const localNums = localIdx.size > 0 ? evidenceNumberValues(localTexts) : evidenceNums;
+    const localQty = localIdx.size > 0 ? evidenceQuantities(localTexts) : evidenceQty;
+    const localRanges = localIdx.size > 0 ? evidenceRanges(localTexts) : chunkRanges;
+    // Tanda 1 del programa bounty (post-chequeo de citas de Commonplace):
+    // una cifra que no sale de la evidencia tumba la frase aunque sus
+    // palabras estén apoyadas — «fundada en 1904» contra la fuente
+    // «1804» pasaba con el apoyo léxico solo, porque la cifra errónea
+    // contaba como una palabra nueva más. Vale el redondeo honesto:
+    // «26,5» por 26,52 y «16,4 millones» por 16.431.599 no se tocan.
+    if (!sentenceNumbersSupported(s, localNums, localRanges)) {
+      removed++;
+      continue;
+    }
+    // CL-4/CL-5 (caza 0.1.97): la cantidad con su unidad. La vara de
+    // valores apoyaba «500» igual en mg que en g, y no veía el
+    // número en letra fuera de los portillos de dosis. Desde T-05
+    // (V-02) juzga sin puerta de pregunta.
+    if (quantityConflict(s, localQty, localNums, localRanges)) {
+      removed++;
+      continue;
+    }
+    // T-19 (V5b): la cifra fiel con el rol cambiado no es un
+    // conflicto de cantidad — la cifra y el rol existen en la
+    // evidencia, pero nunca emparejados así. changedNumberCopy cubre
+    // la copia casi idéntica con la cifra cambiada; esta pierna, el
+    // caso sin copia y el mismo idioma (295/296 viven aquí), con los
+    // pares globales de la evidencia. Cede ante la maquinaria del
+    // dato, como measuredDoseConflict cede ante la afirmación con
+    // categoría y cópula: la frase que afirma un dato (la dosis
+    // falsa de T-J2, la rescatada por unión de R2-11) tiene su
+    // desenlace sellado en esa maquinaria — sustitución o rescate —
+    // y retirarla aquí lo convertía en abstención. La jurisdicción
+    // del dato de CL-10 manda por la misma razón.
+    const datumAssertion = DATUM_CATEGORY_RE.test(foldForCues(s)) && hasDatumCopula(s);
+    if (
+      !datumJurisdiction &&
+      !datumAssertion &&
+      valueRoleConflict(s, sourceRolePairs, sourceRoles, sourceRoleNumbers)
+    ) {
+      removed++;
+      continue;
+    }
+    // CL-6 (caza 0.1.97): la identidad del dato por frase — el
+    // número correcto de la guía atribuido a otro dueño (el de
+    // información como emergencias) es infracción aunque la
+    // pregunta no pida ningún teléfono.
+    if (!datumArmedAny && phoneOwnerConflict(s, attributions)) {
+      removed++;
+      continue;
+    }
+    // Auditoría 0.1.70: la dosis medida que la vara de cifras no ve
+    // (el dígito único, el número en letra pegado a su unidad).
+    if (measuredDoseConflict(s, evidenceDoses)) {
+      removed++;
+      continue;
+    }
+    // C-07: la pierna de fechas, cosida tras el juicio de cifras de la
+    // frase — una mención falsa por calendario (R1) o contradicha por
+    // la fuente (R4/R5) retira la frase como una cifra falsa, porque
+    // es una cifra falsa con nombre de día. Vive AL LADO de la
+    // maquinaria de cifras y no depende de sus interiores
+    // (digitsMatchType / carriesDatumOfType, terreno de ADV3): su
+    // único juez es dates.ts, y ni el apoyo léxico ni la tolerancia
+    // ±1 de las cifras la salvan ni la condenan.
+    if (dateConflictForSentence(s, sourceDateSentences, referenceDate)) {
+      removed++;
+      continue;
+    }
+    if (!isSupported(sup)) {
+      removed++;
+      continue;
+    }
+    // CL-10: si la frase se apoya en la unión pero NO en las
+    // fuentes relevantes para la pregunta, su único respaldo es
+    // ruido de otro sentido: se retira como tal. Excepción de
+    // jurisdicción: la frase que afirma la identidad de un dato o
+    // infringe su tipo es de la regla del dato (applyDatumRule),
+    // cuyo desenlace sellado es la SUSTITUCIÓN por la frase fuente
+    // (R-05, H-02): retirarla aquí por relevancia convertía la
+    // sustitución en abstención.
+    if (relevanceArmed && !datumJurisdiction) {
+      const relSupport = sentenceSupport(s, chunkStemSets.filter((_, i) => relevantIdx.has(i)));
+      if (!isSupported(relSupport)) {
+        removed++;
+        continue;
+      }
+    }
+    // T-19 (V6): si la frase se apoya sobre todo (≥ 0,5) en un chunk
+    // que no es de los de máxima relación con la pregunta, y ningún
+    // chunk de máxima relación la apoya ni a medias (< 0,5), su
+    // único respaldo real es la guía del sentido competidor: se
+    // retira como en CL-10, cuya excepción de jurisdicción del dato
+    // se aplica igual (su desenlace sellado es la sustitución). Es
+    // la red léxica de la polisemia para cuando la puerta semántica
+    // (N8 de T-21) no está activa; con margen 1, medido: el margen 2
+    // ya no caza 114 y el listón 3 es el de CL-10, que no la alcanza.
+    if (relevanceArmedLow && !datumJurisdiction) {
+      const chunkSupports = chunkStemSets.map((set) => sentenceSupport(s, [set]).support);
+      let bestSupported = 0;
+      for (let i = 1; i < chunkSupports.length; i++) {
+        if (chunkSupports[i] > chunkSupports[bestSupported]) bestSupported = i;
+      }
+      let relevantSupport = 0;
+      questionRelPresence.forEach((rel, i) => {
+        if (rel === maxQuestionRelPresence && chunkSupports[i] > relevantSupport) {
+          relevantSupport = chunkSupports[i];
+        }
+      });
+      if (
+        chunkSupports[bestSupported] >= 0.5 &&
+        questionRelPresence[bestSupported] <= maxQuestionRelPresence - 1 &&
+        relevantSupport < 0.5
+      ) {
+        removed++;
+        continue;
+      }
+    }
+    // T-21: las puertas semánticas, en su punto de conservación de
+    // esta rama: la frase llegó viva al final del juicio léxico
+    // (pasó apoyo, relevancia, dato, cantidades, fechas y las
+    // piernas V5b/V6) y aún no ha sido sustituida por ninguna copia
+    // — las sustituciones verbatim no se juzgan, porque su texto es
+    // el de la fuente. Solo con contexto válido; la excepción de
+    // jurisdicción del dato (la de CL-10/V6) la hereda N8.
+    if (semData && semGateFire(semData, si, sStems, datumJurisdiction) !== null) {
+      removed++;
+      continue;
+    }
+    // R-04: una copia literal en el idioma equivocado pasa el apoyo
+    // (la frase ESTÁ en el chunk, en su bloque de otro idioma). Antes
+    // de la negación: la gemela trae la negación de la fuente, así que
+    // sustituir por ella es estrictamente mejor que comparar negaciones.
+    const langFix = foreignCopyFix(s, sourceRecs, lang);
+    if (langFix?.kind === "remove") {
+      removed++;
+      continue;
+    }
+    if (langFix?.kind === "replace") {
+      if (sup.total >= MIN_JUDGED_TERMS) judgedKept++;
+      languageFixed++;
+      const fixed = addCitation(langFix.text, langFix.chunk + 1);
+      kept.push(fixed);
+      prov.push({ text: fixed, origin: { kind: "source", n: langFix.chunk + 1, support: 1, replaced: true } });
+      continue;
+    }
+    if (sup.total >= MIN_JUDGED_TERMS) judgedKept++;
+    // 0.1.59: a sentence that copies a source sentence but flips a negation
+    // is replaced by the source sentence itself, word for word.
+    // T-J7: la vía principal exige el umbral de juzgadas y deja
+    // fuera a la copia corta por construcción; la gemela corta
+    // (closestShortCopySentence) la alcanza sin bajar la vara: solo
+    // entra cuando la copia está demostrada raíz a raíz.
+    if (sup.bestChunk >= 0) {
+      const copySrc = sup.total >= MIN_JUDGED_TERMS ? closestSourceSentence(s, chunkSentences[sup.bestChunk]) : null;
+      const src = copySrc ?? closestShortCopySentence(s, chunkSentences[sup.bestChunk]);
+      if (src && negationCount(s.replace(/\[\d+\]/g, "")) !== negationCount(src)) {
+        negationFixed++;
+        const fixed = addCitation(src, sup.bestChunk + 1);
+        kept.push(fixed);
+        prov.push({ text: fixed, origin: { kind: "source", n: sup.bestChunk + 1, support: 1, negationFixed: true, replaced: true } });
+        continue;
+      }
+      // T-04 (P-06): la copia que perdió el condicional inicial de
+      // su fuente se sustituye por la fuente, como la negación
+      // volcada: el «si» vuelve a su sitio palabra por palabra.
+      if (copySrc && droppedConditional(s, copySrc)) {
+        negationFixed++;
+        const fixed = addCitation(copySrc, sup.bestChunk + 1);
+        kept.push(fixed);
+        prov.push({ text: fixed, origin: { kind: "source", n: sup.bestChunk + 1, support: 1, negationFixed: true, replaced: true } });
+        continue;
+      }
+      // Auditoría de la 0.1.70 (5b): la corta que quita (o pone) la
+      // negación de una cláusula de una frase fuente larga.
+      const clauseSrc = src ? null : negatedClauseSource(s, chunkSentences[sup.bestChunk], chunkSentences.flat());
+      if (clauseSrc) {
+        negationFixed++;
+        const fixed = addCitation(clauseSrc, sup.bestChunk + 1);
+        kept.push(fixed);
+        prov.push({ text: fixed, origin: { kind: "source", n: sup.bestChunk + 1, support: 1, negationFixed: true, replaced: true } });
+        continue;
+      }
+      // T-04 (M-06): la volcada de una raíz se retira; con una raíz
+      // no hay copia que demostrar y no cabe la sustitución.
+      if (flippedSingleStem(s, chunkSentences[sup.bestChunk], chunkSentences.flat())) {
+        removed++;
+        continue;
+      }
+      // T-05 (residuo 0197): la copia casi idéntica con la cifra
+      // cambiada de rol («90 golpes» por «5 golpes») se retira; no
+      // cabe sustitución porque la frase fuente de la que copia no
+      // es única candidata a servir el turno entero.
+      if (changedNumberCopy(s, chunkSentences.flat())) {
+        removed++;
+        continue;
+      }
+    }
+    // T-21 (F-06): la pierna semántica de la cirugía, antes que la
+    // léxica y sobre la frase intacta: la cláusula que dice el polo
+    // contrario de su gemela («mantén el motor en marcha» contra
+    // «apaga el motor») no trae negación que contar — su falsedad
+    // es de polo, no de polaridad — y solo el embedding la ve. Si
+    // corta, su desenlace es el de la cirugía: la cláusula cae y
+    // la fiel se queda (512), o la frase entera cae si la opuesta
+    // abre la frase y no queda principal fiel detrás. La misma
+    // pierna corre en la rama cruzada, en su punto de conservación
+    // (527 vive allí).
+    if (semData) {
+      const pole = dropOpposedClauses(s, semData.answerClauses[si]!, semData);
+      if (pole.dropped > 0) {
+        if (!pole.text) {
+          removed++;
+          continue;
+        }
+        negationFixed++;
+        s = pole.text;
+      }
+    }
+    // CL-3 (caza 0.1.97): la polaridad por cláusulas. Lo que las vías
+    // de copia no alcanzaron (la contradicción repartida o con
+    // cláusula extra) se corta cláusula a cláusula; si no queda
+    // nada de la frase, la frase entera cae como retirada.
+    const surgery = dropFlippedClauses(s, sourceClauses);
+    if (surgery.dropped > 0) {
+      if (!surgery.text) {
+        removed++;
+        continue;
+      }
+      negationFixed++;
+      s = surgery.text;
+    }
+    // Enlace afirmación → fuente: si la frase no cita, se le pone la [n] de
+    // la fuente que más palabras comparte con ella.
+    const out =
+      !hasCitation(s) && sup.total >= MIN_JUDGED_TERMS && sup.bestChunk >= 0
+        ? addCitation(s, sup.bestChunk + 1)
+        : s;
+    kept.push(out);
+    prov.push({
+      text: out,
+      origin:
+        sup.total >= MIN_JUDGED_TERMS && sup.bestChunk >= 0
+          ? { kind: "source", n: sup.bestChunk + 1, support: sup.support }
+          : { kind: "model", reason: "too-short-to-check" },
+    });
+  }
+
+  // R-05: la regla del dato pedido sobre lo conservado — la falsedad
+  // por sustitución sin cifras pasó todas las puertas de arriba
+  // (cifras vacua, apoyo por unión de chunks). El recuento de
+  // juzgadas se rehace si la regla tocó algo: una sustitución cuenta
+  // como conservada de la fuente; una retirada, como retirada.
+  const datumFix = applyDatumRule(kept, prov, query, sourceRecs);
+  removed += datumFix.removedExtra;
+  // CL-6, post-pasada: con la pregunta pidiendo el dato manda la
+  // regla del dato (sustituye); lo que quede con el dueño cambiado
+  // tras su pasada se retira por identidad, como en la otra rama.
+  let ownerRemoved = 0;
+  for (let i = kept.length - 1; i >= 0; i--) {
+    if (phoneOwnerConflict(kept[i], attributions)) {
+      kept.splice(i, 1);
+      prov.splice(i, 1);
+      removed++;
+      ownerRemoved++;
+    }
+  }
+  if (datumFix.removedExtra > 0 || datumFix.replaced || ownerRemoved > 0) {
+    judgedKept = kept.reduce(
+      (acc, s, i) => acc + (prov[i].origin.kind !== "abstain" && new Set(contentStems(s)).size >= MIN_JUDGED_TERMS ? 1 : 0),
+      0,
+    );
+  }
+
+  // Nada verificable sobrevivió (todo inventado, o solo "no lo sé"):
+  // "no lo sé" honesto + lo que la fuente sí dice.
+  if (judgedKept === 0 && (removed > 0 || abstained)) {
+    return abstainedResult(chunks, lang, removed, judgeMode);
+  }
+
+  let text = kept.join(" ").replace(/\s+\n/g, "\n").trim();
+  if (removed > 0) {
+    const note = NOTE.removed[lang].split("{{n}}").join(String(removed));
+    text += `\n\n${note}`;
+    prov.push({ text: note, origin: { kind: "fixed" } });
+    return { text, status: "partial", removed, kept: kept.length, sentences: prov, judgeMode };
+  }
+  return { text, status: "grounded", removed: 0, kept: kept.length, sentences: prov, judgeMode };
+}
+
+/** «No lo sé» honesto + lo que la fuente sí dice, con su procedencia. */
+function abstainedResult(chunks: GroundingChunk[], lang: GroundingLang, removed: number, judgeMode: "lexical" | "full"): GroundingResult {
+  const sentences: SentenceProvenance[] = [{ text: IDK_TEXT[lang], origin: { kind: "abstain" } }];
+  if (chunks.length > 0) {
+    const i = primarySourceIndex(chunks);
+    sentences.push({ text: EXTRACT_INTRO[lang].split("{{title}}").join(chunks[i].title), origin: { kind: "fixed" } });
+    sentences.push({ text: extractiveSnippet(chunks[i], i, 320, lang), origin: { kind: "source", n: i + 1, support: 1, replaced: true } });
+  }
+  return { text: honestAbstention(chunks, lang), status: "abstained", removed, kept: 0, sentences, judgeMode };
+}
+
+// ------------------------------------------- "no lo sé" antes de generar
+
+const FACTUAL_QUESTION_RE = new RegExp(
+  [
+    // es («qué día»/«qué fecha» añadidos por R-06-P3: la pregunta de la
+    // ronda —«¿Qué día y a qué hora es la cita?»— no era "de hechos" para
+    // esta red y el «no lo sé» determinista no habría disparado ni en la
+    // rama protegida)
+    "^[¿¡]?\\s*(qu[eé] (es|son|fue|fueron|significa|causa|hace)|qu[eé] (d[ií]a|fecha)|qui[eé]n(es)? (es|son|fue|fueron|invent[oó]|descubri[oó]|escribi[oó])|cu[aá]ndo|d[oó]nde|cu[aá]l(es)? (es|son|fue)|cu[aá]nt[oa]s?|por qu[eé]|c[oó]mo (funciona|funcionan|se (forma|hace|produce))|expl[ií]ca(me)?|define)(?![\\p{L}\\p{N}])",
+    // en
+    "^\\s*(what (is|are|was|were|does|causes)|who (is|was|were|invented|discovered|wrote)|when (is|was|were|did)|where (is|are|was|were)|which|how (many|much|does|do|is)|why|explain|define)(?![\\p{L}\\p{N}])",
+    // pt
+    "^\\s*(o que (é|e|são|sao|foi)|quem (é|e|foi|inventou|descobriu|escreveu)|quando|onde|qual|quais|quant[oa]s?|por que|como (funciona|se forma)|explique|explica|defina)(?![\\p{L}\\p{N}])",
+  ].join("|"),
+  "iu",
+);
+
+/** ¿Es una pregunta de hechos (no una petición creativa ni de opinión)? */
+export function isFactualQuestion(query: string): boolean {
+  const q = (query ?? "").trim();
+  if (!q || q.length > 300) return false;
+  // Creativo / opinión: el modelo puede contestar sin fuentes.
+  if (/\b(poema|poem|poesia|cuento|story|historia corta|chiste|joke|piada|opini[oó]n|opinion|opini[aã]o|imagina|imagine|escribe|write|escreva|redacta|traduce|translate|traduza|resume|summari[sz]e|resuma)\b/i.test(q)) {
+    return false;
+  }
+  return FACTUAL_QUESTION_RE.test(q);
+}
+
+const NO_SOURCES_TEXT: Record<GroundingLang, string> = {
+  es:
+    "No encontré información sobre esto en las fuentes offline de NIDO, así que prefiero no inventar una respuesta. " +
+    "Puedes reformular la pregunta, añadir tus propios documentos o descargar un paquete de conocimiento más grande en Ajustes.",
+  en:
+    "I couldn't find anything about this in NIDO's offline sources, so I'd rather not make up an answer. " +
+    "You can rephrase the question, add your own documents, or download a larger knowledge pack in Settings.",
+  pt:
+    "Não encontrei informação sobre isso nas fontes offline do NIDO, então prefiro não inventar uma resposta. " +
+    "Você pode reformular a pergunta, adicionar seus próprios documentos ou baixar um pacote de conhecimento maior nas Configurações.",
+};
+
+/** Respuesta determinista cuando la recuperación no trajo nada para una pregunta de hechos. */
+export function noSourcesAnswer(lang: GroundingLang): string {
+  return NO_SOURCES_TEXT[lang];
+}
+

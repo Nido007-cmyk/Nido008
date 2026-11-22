@@ -1,0 +1,426 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ */
+
+/**
+ * packImport.test.ts — the signed-pack door's trust core, proven against
+ * REAL pack bytes: the store's SALVORA pack 1 (both editions, signed with
+ * the SALVORA key) and NIDO's Esencial (both editions, attested by the
+ * catalog pin), read from the store zips in the workspace. The pack-1
+ * zip resolves from the SALVORA_PACK1_ZIP environment variable when set,
+ * else from the house default path below. The real-bytes blocks run only
+ * when those zips are present (they are not part of the repo — packs are
+ * never committed); everywhere else the pure-helper tests still run —
+ * including synthetic-signature acceptance against a fixture key
+ * generated in memory — and the real-bytes cases skip visibly instead of
+ * passing silently.
+ *
+ * PC recreation (E5 block, step 2): the fixture keys are Ed25519 pairs
+ * from Node's crypto (the platform's signer/verifier pair), where the
+ * source battery used tweetnacl; the judgment under test is the same.
+ */
+import { createHash, generateKeyPairSync, sign as cryptoSign, type KeyObject } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { inflateRawSync } from "node:zlib";
+import { DatabaseSync } from "node:sqlite";
+import { describe, expect, it } from "vitest";
+import {
+  canonicalPackManifestJSON,
+  isCatalogCorpusPin,
+  parsePackManifest,
+  summarizePackMeta,
+  validatePackSchema,
+  verifyPackOrigin,
+  verifySalvoraManifestSignature,
+  PACK_MAX_CHUNKS,
+  PACK_MAX_FACTS,
+  PACK_MAX_GUIDES,
+  PACK_MAX_REGIONS,
+  PACK_ORIGIN_LABEL,
+  SALVORA_PACKS_PUBLIC_KEY_BASE64,
+  type PackManifest,
+  type PackSchemaDescriptor,
+} from "./packImport.js";
+
+const PACKS_DIR = join(homedir(), "workspace/your_files/salvora-packs");
+const SALVORA_ZIP =
+  process.env.SALVORA_PACK1_ZIP ?? join(PACKS_DIR, "salvora-emergencias-casa-edicion-2026-11.zip");
+const ESENCIAL_ZIP = join(PACKS_DIR, "salvora-esencial-edicion-2026-11.zip");
+const REAL_ZIPS_PRESENT = existsSync(SALVORA_ZIP) && existsSync(ESENCIAL_ZIP);
+if (!REAL_ZIPS_PRESENT) {
+  // Declared skip, never a failure: the real-bytes suites below are
+  // skipped by describe.runIf and this line is the visible notice.
+  console.warn(
+    `[packImport.test] real store zips NOT found (pack 1: ${SALVORA_ZIP}; esencial: ${ESENCIAL_ZIP})` +
+      " — real-bytes cases SKIPPED. Set SALVORA_PACK1_ZIP to the pack-1 zip to run them."
+  );
+}
+
+/** Minimal read-only ZIP reader (stored + deflate entries) for fixtures. */
+function zipEntries(zipPath: string): Map<string, Buffer> {
+  const buf = readFileSync(zipPath);
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 65536); i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error(`no end-of-central-directory in ${zipPath}`);
+  const count = buf.readUInt16LE(eocd + 10);
+  let off = buf.readUInt32LE(eocd + 16);
+  const out = new Map<string, Buffer>();
+  for (let n = 0; n < count; n++) {
+    if (buf.readUInt32LE(off) !== 0x02014b50) throw new Error("bad central directory");
+    const method = buf.readUInt16LE(off + 10);
+    const csize = buf.readUInt32LE(off + 20);
+    const nameLen = buf.readUInt16LE(off + 28);
+    const extraLen = buf.readUInt16LE(off + 30);
+    const commentLen = buf.readUInt16LE(off + 32);
+    const localOff = buf.readUInt32LE(off + 42);
+    const name = buf.toString("utf8", off + 46, off + 46 + nameLen);
+    const lNameLen = buf.readUInt16LE(localOff + 26);
+    const lExtraLen = buf.readUInt16LE(localOff + 28);
+    const dataStart = localOff + 30 + lNameLen + lExtraLen;
+    const raw = buf.subarray(dataStart, dataStart + csize);
+    out.set(name, method === 8 ? inflateRawSync(raw) : Buffer.from(raw));
+    off += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
+}
+
+function sha256Hex(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** An Ed25519 fixture pair in the shapes the door consumes. */
+interface FixtureKey {
+  publicB64: string;
+  sign: (message: Uint8Array) => Buffer;
+}
+
+function fixtureKeyPair(): FixtureKey {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const spki = (publicKey as KeyObject).export({ format: "der", type: "spki" });
+  const raw = Buffer.from(spki).subarray(spki.length - 32);
+  return {
+    publicB64: raw.toString("base64"),
+    sign: (message: Uint8Array) => cryptoSign(null, Buffer.from(message), privateKey),
+  };
+}
+
+function readMeta(sqliteBytes: Buffer): Record<string, string> {
+  const dir = join(process.cwd(), ".tmp-vitest");
+  mkdirSync(dir, { recursive: true });
+  const tmp = join(dir, `.packimport-test-${process.pid}.sqlite`);
+  writeFileSync(tmp, sqliteBytes);
+  try {
+    const db = new DatabaseSync(tmp, { readOnly: true });
+    const rows = db.prepare("SELECT key, value FROM meta").all() as Array<{
+      key: string;
+      value: string;
+    }>;
+    db.close();
+    return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  } finally {
+    unlinkSync(tmp);
+  }
+}
+
+describe("packImport · pure helpers (always run)", () => {
+  it("parsePackManifest rejects non-JSON, non-objects and bad hashes", () => {
+    expect(parsePackManifest("not json")).toBeNull();
+    expect(parsePackManifest("[1,2]")).toBeNull();
+    expect(parsePackManifest("{}")).toBeNull();
+    expect(parsePackManifest('{"sha256":"xyz"}')).toBeNull();
+    expect(parsePackManifest('{"sha256":"' + "a".repeat(64) + '"}')).not.toBeNull();
+  });
+
+  it("canonical form drops the signing fields and sorts the rest", () => {
+    const m = {
+      b: 2,
+      a: 1,
+      signedBy: "X",
+      signingPublicKey: "Y",
+      signature: "Z",
+      signedAt: "T",
+    } as PackManifest;
+    expect(canonicalPackManifestJSON(m)).toBe('{"a":1,"b":2}');
+  });
+
+  it("the Esencial's real hash is a catalog corpus pin; a random one is not", () => {
+    expect(isCatalogCorpusPin("b57fa32a3849a0edda89c84b96f2eab526489df195a168e59f8536fc78fd5d60")).toBe(true);
+    expect(isCatalogCorpusPin("c4d49aa945199520af9273cf5fd02f52d26eda7f82b1c41c65f121a635706c92")).toBe(true);
+    expect(isCatalogCorpusPin("0".repeat(64))).toBe(false);
+  });
+
+  it("summarizePackMeta accepts only the pack formats openPack accepts", () => {
+    expect(summarizePackMeta({})).toBeNull();
+    expect(summarizePackMeta({ format: "something-else" })).toBeNull();
+    const ok = summarizePackMeta({
+      format: "nido-knowledge-pack",
+      formatVersion: "2",
+      embeddingModelSha256: "ec38",
+      name: "Pack",
+    });
+    expect(ok).toMatchObject({ formatVersion: 2, embeddingModelSha256: "ec38", name: "Pack" });
+    // El formato legado se rechaza desde la purga de la cadena: la
+    // puerta solo abre el formato propio.
+    expect(summarizePackMeta({ format: "legacy-knowledge-pack" })).toBeNull();
+  });
+
+  it("a manifest signed by a foreign key never verifies, in either disguise", () => {
+    const foreign = fixtureKeyPair();
+    const base: PackManifest = { id: "fake", sha256: "a".repeat(64), sizeBytes: 3 };
+    const signWith = (kp: FixtureKey, declaredKey: string): PackManifest => {
+      const m: PackManifest = { ...base, signedBy: "SALVORA PACKS", signingPublicKey: declaredKey, signedAt: "2026-11-07T00:00:00.000Z" };
+      const sig = kp.sign(new TextEncoder().encode(canonicalPackManifestJSON(m)));
+      return { ...m, signature: sig.toString("base64") };
+    };
+    // Disguise 1: declares its own key honestly — still not ours.
+    expect(verifySalvoraManifestSignature(signWith(foreign, foreign.publicB64))).toBe(false);
+    // Disguise 2: declares OUR key but was signed by the foreign one.
+    expect(
+      verifySalvoraManifestSignature(
+        signWith(foreign, "HfH4rO39agZVzybigFmWW1PPjqwb9bAFZBHkMqz/sHQ=")
+      )
+    ).toBe(false);
+    // And at the door: right hash, foreign signature → not-signed-by-us.
+    expect(verifyPackOrigin(signWith(foreign, foreign.publicB64), "a".repeat(64))).toEqual({
+      ok: false,
+      reason: "not-signed-by-us",
+    });
+  });
+
+  it("an unsigned manifest for bytes that are not a catalog pin is not ours", () => {
+    const m: PackManifest = { id: "third-party", sha256: "b".repeat(64) };
+    expect(verifyPackOrigin(m, "b".repeat(64))).toEqual({ ok: false, reason: "not-signed-by-us" });
+    expect(verifyPackOrigin(m, "c".repeat(64))).toEqual({ ok: false, reason: "hash-mismatch" });
+  });
+
+  it("a manifest signed by a fixture key verifies when that key is injected (synthetic pack)", () => {
+    // Acceptance coverage that runs everywhere, without the store zips:
+    // a minimal manifest over synthetic bytes, signed in this test with
+    // an Ed25519 pair generated in memory, accepted only through the
+    // injected-key seam of the pure core.
+    const fixture = fixtureKeyPair();
+    const bytes = Buffer.from("synthetic pack bytes for the door's trust core");
+    const hash = sha256Hex(bytes);
+    const unsigned: PackManifest = {
+      id: "synthetic-fixture",
+      sha256: hash,
+      sizeBytes: bytes.length,
+      signedBy: "FIXTURE",
+      signingPublicKey: fixture.publicB64,
+      signedAt: "2026-11-07T00:00:00.000Z",
+    };
+    const sig = fixture.sign(new TextEncoder().encode(canonicalPackManifestJSON(unsigned)));
+    const signed: PackManifest = { ...unsigned, signature: sig.toString("base64") };
+
+    expect(verifySalvoraManifestSignature(signed, fixture.publicB64)).toBe(true);
+    expect(verifyPackOrigin(signed, hash, fixture.publicB64)).toEqual({ ok: true, origin: "salvora" });
+    // The very same manifest does NOT pass against the embedded
+    // production key (no injection): the seam changes nothing in
+    // production, it only lets tests name their own trust anchor.
+    expect(verifySalvoraManifestSignature(signed)).toBe(false);
+    expect(verifyPackOrigin(signed, hash)).toEqual({ ok: false, reason: "not-signed-by-us" });
+    // And step 2 still binds first: a wrong file hash fails before the
+    // signature is even judged, injected key or not.
+    expect(verifyPackOrigin(signed, "0".repeat(64), fixture.publicB64)).toEqual({
+      ok: false,
+      reason: "hash-mismatch",
+    });
+  });
+
+  it("with a fixture key injected, a signature made by a different key still fails", () => {
+    const declared = fixtureKeyPair();
+    const signer = fixtureKeyPair();
+    const m: PackManifest = {
+      id: "synthetic-mismatch",
+      sha256: "d".repeat(64),
+      signedBy: "FIXTURE",
+      signingPublicKey: declared.publicB64,
+      signedAt: "2026-11-07T00:00:00.000Z",
+    };
+    const sig = signer.sign(new TextEncoder().encode(canonicalPackManifestJSON(m)));
+    const forged: PackManifest = { ...m, signature: sig.toString("base64") };
+    expect(verifySalvoraManifestSignature(forged, declared.publicB64)).toBe(false);
+    expect(verifyPackOrigin(forged, "d".repeat(64), declared.publicB64)).toEqual({
+      ok: false,
+      reason: "not-signed-by-us",
+    });
+  });
+
+  it("D-1: the embedded key and the SALVORA PACKS label are the sealed values", () => {
+    // AUDITORIA-PINS-PACKCATALOG D-1, charged in this step: the key
+    // character for character against the value the pin audit fixed,
+    // and the origin label in the exact interface name of the source
+    // (its sealed comment commands the exact name).
+    expect(SALVORA_PACKS_PUBLIC_KEY_BASE64).toBe("HfH4rO39agZVzybigFmWW1PPjqwb9bAFZBHkMqz/sHQ=");
+    expect(PACK_ORIGIN_LABEL.salvora).toBe("SALVORA PACKS");
+    expect(PACK_ORIGIN_LABEL.nido).toBe("NIDO");
+  });
+});
+
+describe.runIf(REAL_ZIPS_PRESENT)("packImport · real store bytes", () => {
+  // The zips load lazily, on first use inside a test — never in this
+  // suite body. Vitest executes the body at collection time even when
+  // runIf skips the suite, and reading the files here is what failed CI
+  // with ENOENT on machines without the store fixtures.
+  let salvoraCache: Map<string, Buffer> | undefined;
+  let esencialCache: Map<string, Buffer> | undefined;
+  const salvora = () => (salvoraCache ??= zipEntries(SALVORA_ZIP));
+  const esencial = () => (esencialCache ??= zipEntries(ESENCIAL_ZIP));
+
+  const cases: Array<{
+    zip: () => Map<string, Buffer>;
+    sqlite: string;
+    origin: "nido" | "salvora";
+  }> = [
+    { zip: salvora, sqlite: "salvora-emergencias-casa.sqlite", origin: "salvora" },
+    { zip: salvora, sqlite: "salvora-emergencias-casa-e5.sqlite", origin: "salvora" },
+    { zip: esencial, sqlite: "nido-esencial.sqlite", origin: "nido" },
+    { zip: esencial, sqlite: "nido-esencial-e5.sqlite", origin: "nido" },
+  ];
+
+  for (const c of cases) {
+    it(`accepts ${c.sqlite} with origin ${c.origin}`, () => {
+      const bytes = c.zip().get(c.sqlite);
+      const manifestText = c.zip().get(`${c.sqlite}.json`)?.toString("utf8");
+      expect(bytes).toBeDefined();
+      expect(manifestText).toBeDefined();
+      const manifest = parsePackManifest(manifestText!);
+      expect(manifest).not.toBeNull();
+      expect(verifyPackOrigin(manifest!, sha256Hex(bytes!))).toEqual({ ok: true, origin: c.origin });
+      const meta = summarizePackMeta(readMeta(bytes!));
+      expect(meta).not.toBeNull();
+      expect(meta!.format).toBe("nido-knowledge-pack");
+      expect(meta!.name).toBeTruthy();
+    });
+  }
+
+  it("the canonical form is byte-identical against the real store manifest", () => {
+    // The signature over the real manifest verifies only if the
+    // canonical bytes are exactly the signer's: this is the pin.
+    const manifest = parsePackManifest(salvora().get("salvora-emergencias-casa.sqlite.json")!.toString("utf8"))!;
+    expect(verifySalvoraManifestSignature(manifest)).toBe(true);
+    const reordered: PackManifest = {};
+    for (const k of Object.keys(manifest).reverse()) reordered[k] = manifest[k];
+    expect(canonicalPackManifestJSON(reordered)).toBe(canonicalPackManifestJSON(manifest));
+  });
+
+  it("rejects the SALVORA pack with a single changed byte (hash-mismatch)", () => {
+    const bytes = Buffer.from(salvora().get("salvora-emergencias-casa.sqlite")!);
+    const manifest = parsePackManifest(salvora().get("salvora-emergencias-casa.sqlite.json")!.toString("utf8"))!;
+    bytes[Math.floor(bytes.length / 2)] ^= 0xff;
+    expect(verifyPackOrigin(manifest, sha256Hex(bytes))).toEqual({
+      ok: false,
+      reason: "hash-mismatch",
+    });
+  });
+
+  it("rejects a truncated copy of the SALVORA pack (hash-mismatch)", () => {
+    const bytes = salvora().get("salvora-emergencias-casa.sqlite")!.subarray(0, 100_000);
+    const manifest = parsePackManifest(salvora().get("salvora-emergencias-casa.sqlite.json")!.toString("utf8"))!;
+    expect(verifyPackOrigin(manifest, sha256Hex(bytes))).toEqual({
+      ok: false,
+      reason: "hash-mismatch",
+    });
+  });
+
+  it("rejects the SALVORA manifest re-signed with a foreign key (not-signed-by-us)", () => {
+    const bytes = salvora().get("salvora-emergencias-casa.sqlite")!;
+    const manifest = parsePackManifest(salvora().get("salvora-emergencias-casa.sqlite.json")!.toString("utf8"))!;
+    const foreign = fixtureKeyPair();
+    const forged: PackManifest = {
+      ...manifest,
+      signingPublicKey: foreign.publicB64,
+    };
+    const sig = foreign.sign(new TextEncoder().encode(canonicalPackManifestJSON(forged)));
+    forged.signature = sig.toString("base64");
+    expect(verifyPackOrigin(forged, sha256Hex(bytes))).toEqual({
+      ok: false,
+      reason: "not-signed-by-us",
+    });
+  });
+
+  it("rejects a manifest whose declared hash belongs to a different real file", () => {
+    // The Esencial's manifest stapled onto the SALVORA pack's bytes.
+    const manifest = parsePackManifest(esencial().get("nido-esencial.sqlite.json")!.toString("utf8"))!;
+    const bytes = salvora().get("salvora-emergencias-casa.sqlite")!;
+    expect(verifyPackOrigin(manifest, sha256Hex(bytes))).toEqual({
+      ok: false,
+      reason: "hash-mismatch",
+    });
+  });
+});
+
+describe("packImport · esquema interno y topes (M-35: m-91 y P-39)", () => {
+  const v2 = (): PackSchemaDescriptor => ({
+    tables: {
+      meta: ["key", "value"],
+      chunks: ["id", "title", "body", "source", "scale", "vec", "guide", "keys"],
+      guides: ["id", "key", "lang", "title", "category", "region", "sources", "verified"],
+      regions: ["code", "names", "aliases", "phrases"],
+      facts: ["id", "region", "key", "value", "label", "note", "source_title", "source_url", "quote", "checked"],
+    },
+    counts: { chunks: 500, guides: 12, regions: 3, facts: 40 },
+  });
+
+  it("acepta el esquema v2 completo del constructor", () => {
+    expect(validatePackSchema(2, v2())).toBe(true);
+  });
+
+  it("un pack de hechos sin guías también es válido: las tablas existen, los conteos pueden ser cero", () => {
+    const s = v2();
+    s.counts.guides = 0;
+    expect(validatePackSchema(2, s)).toBe(true);
+  });
+
+  it("rechaza una tabla ausente y una columna ausente", () => {
+    const noGuides = v2();
+    delete noGuides.tables.guides;
+    expect(validatePackSchema(2, noGuides)).toBe(false);
+    const noKeys = v2();
+    noKeys.tables.chunks = noKeys.tables.chunks.filter((c) => c !== "keys");
+    expect(validatePackSchema(2, noKeys)).toBe(false);
+  });
+
+  it("rechaza un pack sin trozos: firmado o no, no es un pack de conocimiento", () => {
+    const s = v2();
+    s.counts.chunks = 0;
+    expect(validatePackSchema(2, s)).toBe(false);
+  });
+
+  it("rechaza conteos por encima de cada tope y acepta el tope exacto", () => {
+    const over = (patch: Partial<PackSchemaDescriptor["counts"]>) => {
+      const s = v2();
+      Object.assign(s.counts, patch);
+      return validatePackSchema(2, s);
+    };
+    expect(over({ chunks: PACK_MAX_CHUNKS + 1 })).toBe(false);
+    expect(over({ guides: PACK_MAX_GUIDES + 1 })).toBe(false);
+    expect(over({ regions: PACK_MAX_REGIONS + 1 })).toBe(false);
+    expect(over({ facts: PACK_MAX_FACTS + 1 })).toBe(false);
+    expect(
+      over({ chunks: PACK_MAX_CHUNKS, guides: PACK_MAX_GUIDES, regions: PACK_MAX_REGIONS, facts: PACK_MAX_FACTS })
+    ).toBe(true);
+  });
+
+  it("la v1 heredada solo exige meta y chunks con sus columnas de lectura", () => {
+    const s: PackSchemaDescriptor = {
+      tables: { meta: ["key", "value"], chunks: ["id", "title", "body", "source", "vec"] },
+      counts: { chunks: 10, guides: 0, regions: 0, facts: 0 },
+    };
+    expect(validatePackSchema(1, s)).toBe(true);
+    const broken: PackSchemaDescriptor = {
+      tables: { meta: ["key", "value"], chunks: ["id", "title", "body"] },
+      counts: { chunks: 10, guides: 0, regions: 0, facts: 0 },
+    };
+    expect(validatePackSchema(1, broken)).toBe(false);
+  });
+});

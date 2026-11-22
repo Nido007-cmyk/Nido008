@@ -1,25 +1,162 @@
-# NIDO for PC
+> **Language:** English · [Español](README.es.md)
 
-**A personal AI assistant that runs 100% offline on your computer.**
+# NIDO PC
 
-NIDO for PC is in active development. This repository is its public home, opened early so anyone can follow the work and check the code as it lands. There is no release yet: when the first version is ready, it will be published here with its installer and its verification hashes.
+**Your agent, your world, on your computer.**
 
-[README en español](README.es.md)
+NIDO PC is a private personal assistant for desktop that runs large
+language models on your own machine, 100% offline after the initial
+download. No accounts, no telemetry, no cloud. Your conversations,
+notes, reminders and personal documents live in an encrypted local
+database that only your password opens. It shares the soul of the
+[NIDO mobile app](https://github.com/Nido007-cmyk/Nido) and adds what
+a computer unlocks: larger models by default, long contexts, and the
+full tool catalog always present.
 
-## What it is
+> **In development.** NIDO PC is not finished and there is no public
+> release yet. This repository is its public home: the source code is
+> published as it is built, as a snapshot of the current development
+> state. When the first alpha is ready, it will be published in
+> [Releases](https://github.com/Nido007-cmyk/Nido008/releases) with
+> its installer and its verification hash.
 
-Everything runs on your own machine. No account, no cloud, no internet connection needed.
+## What it does today
 
-- Local chat with AI models that live on your computer, including large models for PCs with more RAM
-- Memory, reminders and an agenda kept on the device, inside an encrypted vault
-- An offline library with guides and knowledge packs
-- Emergency guidance that works with no connection at all
-- Every tool the assistant can use has its own switch in Settings
+- **Chat with a large local model.** Pick from a catalog of open
+  models sized for your machine, from small and fast to 7B and 8B
+  class models on machines with the memory for them. NIDO tells you
+  plainly what fits your computer and what does not.
+- **Answers checked against sources.** A grounding judge checks
+  what the model claims against the sources at hand, sentence by
+  sentence, and each answer carries a badge that says how it was
+  checked.
+- **Official knowledge packs.** Local knowledge packs (the NIDO and
+  SALVORA packs, the same ones the mobile app uses) answer from
+  verified local content with no network at all.
+- **Your own documents.** Import your documents and ask about them;
+  answers cite the document and the page.
+- **Memory, calendar and reminders on your machine.** What NIDO
+  remembers for you, your calendar and your contacts live inside
+  the app, encrypted, and never sync anywhere.
+- **Scheduled tasks.** Create tasks that run later or on a schedule,
+  inside the app, and read their results when you come back.
+- **A built-in guide.** The Learn section inside the Library
+  teaches every feature with examples you can tap, written only
+  for what the app really does.
+- **Three languages.** The whole interface speaks English, Spanish
+  and Portuguese.
 
-## The Android version
+## Watch
 
-NIDO already runs on Android, free and open source: [github.com/Nido007-cmyk/Nido](https://github.com/Nido007-cmyk/Nido)
+A first look at NIDO PC running, recorded during development:
+the [sneak peek video](https://github.com/Nido007-cmyk/Nido008/issues/1),
+in this repo's first issue (2 minutes).
 
-## License
+## Install
+
+There is nothing to install yet: no installer is published while
+the app is in development. The first alpha will ship as a Windows
+installer from this repo's Releases page, published next to a
+`.sha256` file so you can verify your download before opening it:
+
+```bat
+certutil -hashfile NIDO-PC-Setup-0.1.0.exe SHA256
+```
+
+Windows will show a SmartScreen notice because the installer
+carries no commercial code-signing certificate. That is expected,
+and it is a decision, not an oversight: NIDO PC is free and open
+source, and its guarantee is the open code plus the matching hash,
+not a purchased signature.
+
+Until then, the way to run NIDO PC is to build it from source,
+below.
+
+## Privacy and security
+
+- Everything runs on your machine. After the downloads you approve
+  (models and knowledge packs, each verified by its hash), the app
+  needs no network and opens no listening ports.
+- No accounts, no telemetry, no analytics, nothing phones home.
+- Your data is stored encrypted. Lose the password and the data is
+  gone: there is no recovery, by design.
+- The full statement is in [PRIVACY.md](PRIVACY.md), and how to
+  report a vulnerability privately is in
+  [SECURITY.md](SECURITY.md).
+
+## Status
+
+NIDO PC is in active development, version 0.1.0. The code in this
+repository is a snapshot of the development branch taken on
+2026-11-21. Working today: the chat, the model catalog with its
+verified downloads, the encrypted memory, the calendar, contacts
+and reminders, scheduled tasks, the document library and the
+built-in guide. In development right now: on-device voice
+(dictation and speech), the stage currently being built.
+
+At the last verified milestone, the test battery ran 6,989 tests:
+6,976 passing, 13 expected failures and no unexpected failures.
+
+NIDO PC is early alpha software. It can fail, and it will change.
+What every version promises is fewer failures than the one before
+it, and release notes that say plainly what got better.
+
+## NIDO on your phone
+
+NIDO also lives on Android, with the same promise: fully offline,
+private, no accounts. Get the current Android release,
+[v0.1.109-alpha](https://github.com/Nido007-cmyk/Nido/releases/tag/v0.1.109-alpha),
+from the mobile repository.
+
+## Build from source
+
+```sh
+npm install
+npm test            # the full test battery (the core, src/)
+npm run typecheck   # typecheck the core
+npm run catalog     # per-machine-class catalog verdicts
+npm run probe       # engine smoke test from the terminal
+```
+
+The desktop shell lives in `app/`:
+
+```sh
+cd app
+npm install
+npm run typecheck
+npm run build:vite  # build the app
+npm run dist:dir    # package it, unpacked, with electron-builder
+```
+
+The public architecture overview lives in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The rules for
+contributing are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Project layout
+
+- `src/`: the core of the app (agent, retrieval, grounding,
+  models, security), shared logic with no platform code.
+- `app/`: the desktop shell (Electron), its services and the
+  interface.
+- `scripts/`: the public build and verification scripts (the
+  catalog report, the engine probe and the knowledge-pack
+  library the tests use).
+- `knowledge-packs/`: the official packs this app accepts.
+- `assets/`: the bundled packs and the retrieval corpus the app
+  ships with.
+- `docs/`: the project's constitution and principles, and the
+  architecture overview.
+
+## Credits and license
+
+NIDO PC is original code, written from scratch for the desktop,
+under NIDO's own MIT license. The mobile line's history and
+attributions live in the mobile repository. Third-party components
+keep their own licenses, listed in each release's notices file;
+the AI models you download keep their own licenses too, and the
+app never redistributes model weights: you download each model
+from its publisher.
 
 MIT. See [LICENSE](LICENSE).
+
+Copyright (c) 2026 NIDO contributors.

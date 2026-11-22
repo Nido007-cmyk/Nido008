@@ -1,0 +1,137 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ */
+
+/**
+ * confirmText.ts — NIDO: texto del diálogo de confirmación de la política.
+ *
+ * TOOLS-AUDIT 2026-10-11: el diálogo que pide confirmar una llamada o un SMS
+ * decía, en inglés, "Tool 'place_call' is irreversible and requires human
+ * confirmation. Riesgo: critical" — sin el número ni el texto. Un
+ * consentimiento que no dice QUÉ se va a hacer no es informado. Aquí se
+ * construye un texto claro, en el idioma del usuario, con los datos exactos
+ * que el despachador va a ejecutar (los mismos args validados).
+ *
+ * Puro, sin dependencias.
+ */
+
+import type { PolicyDecision } from "./policyEngine.js";
+
+export type ConfirmLang = "es" | "en" | "pt";
+
+export interface ConfirmDialogText {
+  title: string;
+  message: string;
+}
+
+const T = {
+  deleteNoteTitle: { es: "Borrar nota", en: "Delete note", pt: "Apagar nota" },
+  deleteNoteMessage: {
+    es: "¿Borrar la nota «{{label}}»?\n\nNo se puede deshacer.",
+    en: "Delete the note “{{label}}”?\n\nThis can't be undone.",
+    pt: "Apagar a nota “{{label}}”?\n\nIsso não pode ser desfeito.",
+  },
+  deleteReminderTitle: { es: "Borrar recordatorio", en: "Delete reminder", pt: "Apagar lembrete" },
+  deleteReminderMessage: {
+    es: "¿Borrar el recordatorio «{{label}}»?\n\nNo se puede deshacer.",
+    en: "Delete the reminder “{{label}}”?\n\nThis can't be undone.",
+    pt: "Apagar o lembrete “{{label}}”?\n\nIsso não pode ser desfeito.",
+  },
+  deleteMemoryTitle: { es: "Olvidar recuerdo", en: "Forget memory", pt: "Esquecer lembrança" },
+  deleteMemoryMessage: {
+    es: "¿Olvidar «{{label}}»?\n\nNo se puede deshacer.",
+    en: "Forget “{{label}}”?\n\nThis can't be undone.",
+    pt: "Esquecer “{{label}}”?\n\nIsso não pode ser desfeito.",
+  },
+  saveTitle: { es: "Confirmar guardado", en: "Confirm save", pt: "Confirmar salvamento" },
+  saveMessage: {
+    es: "En esta conversación hay contenido externo (un mensaje, archivo o nota). Revisa lo que se va a guardar:\n\n«{{content}}»",
+    en: "This conversation includes outside content (a message, file or note). Check what will be saved:\n\n“{{content}}”",
+    pt: "Esta conversa inclui conteúdo externo (uma mensagem, arquivo ou nota). Confira o que será salvo:\n\n“{{content}}”",
+  },
+  genericTitle: { es: "Confirmar acción", en: "Confirm action", pt: "Confirmar ação" },
+  genericMessage: {
+    es: "NIDO va a usar «{{tool}}». Esta acción necesita tu confirmación.",
+    en: "NIDO is about to use “{{tool}}”. This action needs your confirmation.",
+    pt: "NIDO vai usar “{{tool}}”. Esta ação precisa da sua confirmação.",
+  },
+  riskCritical: {
+    es: "No se puede deshacer.",
+    en: "This can't be undone.",
+    pt: "Isso não pode ser desfeito.",
+  },
+  // RED TEAM 2026-11-08: aviso de procedencia sospechosa. Se añade al final
+  // del mensaje de confirmación cuando la política detectó un intento de
+  // inyección en el contenido no confiable del turno: la acción se presenta
+  // igual que siempre (mismos datos exactos), pero el usuario sabe que la
+  // idea vino de contenido marcado como sospechoso, no de él.
+  suspiciousOrigin: {
+    es: "Ojo: esta idea viene de contenido marcado como sospechoso ({{origin}}), no de lo que tú escribiste. Confírmala solo si de verdad quieres hacerla.",
+    en: "Careful: this idea comes from content flagged as suspicious ({{origin}}), not from what you wrote. Confirm only if you really mean to do it.",
+    pt: "Atenção: esta ideia vem de conteúdo marcado como suspeito ({{origin}}), não do que você escreveu. Confirme apenas se você realmente quer fazê-la.",
+  },
+} as const;
+
+function fill(s: string, vars: Record<string, string>): string {
+  let out = s;
+  for (const [k, v] of Object.entries(vars)) out = out.split(`{{${k}}}`).join(v);
+  return out;
+}
+
+function str(v: unknown): string {
+  return v == null ? "" : String(v);
+}
+
+export function describePolicyConfirmation(
+  decision: Pick<PolicyDecision, "risk" | "reason" | "injectionOrigin">,
+  action: { tool: string; args: Record<string, unknown> } | undefined,
+  lang: ConfirmLang = "es",
+): ConfirmDialogText {
+  const tool = action?.tool ?? "";
+  const args = action?.args ?? {};
+  // RED TEAM 2026-11-08: si la decisión trae procedencia de inyección, el
+  // aviso va al final de CUALQUIER texto de confirmación (el específico de
+  // la herramienta y el genérico), sin tocar los datos exactos que el
+  // usuario aprueba.
+  const withOrigin = (d: ConfirmDialogText): ConfirmDialogText =>
+    decision.injectionOrigin
+      ? {
+          title: d.title,
+          message: `${d.message}\n\n${fill(T.suspiciousOrigin[lang], { origin: decision.injectionOrigin })}`,
+        }
+      : d;
+  if (tool === "delete_note" || tool === "delete_reminder") {
+    // 0.1.20 (P3-9): el consentimiento informado exige NOMBRAR lo que se
+    // borra. La etiqueta (título/texto) viaja en los args validados; sin
+    // ella se cae al texto genérico crítico, nunca a un borrado a ciegas
+    // descrito como si fuera específico.
+    const label = str(tool === "delete_note" ? args.title : args.text).trim();
+    if (label) {
+      return withOrigin(
+        tool === "delete_note"
+          ? { title: T.deleteNoteTitle[lang], message: fill(T.deleteNoteMessage[lang], { label }) }
+          : { title: T.deleteReminderTitle[lang], message: fill(T.deleteReminderMessage[lang], { label }) },
+      );
+    }
+  }
+  if (tool === "delete_memory") {
+    const label = str(args.content).trim();
+    if (label) return withOrigin({ title: T.deleteMemoryTitle[lang], message: fill(T.deleteMemoryMessage[lang], { label }) });
+  }
+  if (tool === "remember_fact" || tool === "save_note" || tool === "create_reminder") {
+    const content =
+      tool === "save_note"
+        ? [str(args.title), str(args.body)].filter(Boolean).join(" — ")
+        : tool === "create_reminder"
+          ? [str(args.text), str(args.at)].filter(Boolean).join(" — ")
+          : str(args.content);
+    return withOrigin({ title: T.saveTitle[lang], message: fill(T.saveMessage[lang], { content }) });
+  }
+  const base = fill(T.genericMessage[lang], { tool: tool || "?" });
+  return withOrigin({
+    title: T.genericTitle[lang],
+    message: decision.risk === "critical" ? `${base} ${T.riskCritical[lang]}` : base,
+  });
+}

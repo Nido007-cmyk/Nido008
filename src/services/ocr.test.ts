@@ -1,0 +1,176 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ */
+
+/**
+ * ocr.test.ts — la batería del contrato de OCR recreada del
+ * móvil (13 declaraciones, su aserción entera): la costura se
+ * prueba con dobles del nativo, como allí. El motor de verdad
+ * (tesseract.js empaquetado) lo cobra ocrEngine.test.ts y la
+ * puerta D-5 lo cobra entero contra la base.
+ */
+import { describe, expect, it } from "vitest";
+import {
+  _setOcrNativeForTests,
+  isOcrAvailable,
+  OCR_PROVENANCE_NOTE,
+  recognizeImageText,
+  recognizePdfPagesText,
+  recognizeScannedPdfText,
+  sanitizeOcrPages,
+  TESSDATA_LANG,
+} from "./ocr.js";
+
+describe("la costura de OCR", () => {
+  it("sin módulo nativo (todas las versiones actuales): no disponible y error UNAVAILABLE", async () => {
+    _setOcrNativeForTests(null);
+    await expect(isOcrAvailable()).resolves.toBe(false);
+    await expect(recognizeImageText("file:///pagina.jpg", "es")).rejects.toMatchObject({
+      name: "OcrError",
+      code: "UNAVAILABLE",
+    });
+  });
+
+  it("con módulo, reconoce y le pasa el código tessdata del idioma", async () => {
+    const seen: Array<[string, string]> = [];
+    _setOcrNativeForTests({
+      recognize: async (uri, tessdataLang) => {
+        seen.push([uri, tessdataLang]);
+        return "texto reconocido";
+      },
+    });
+    await expect(isOcrAvailable()).resolves.toBe(true);
+    await expect(recognizeImageText("file:///pagina.jpg", "pt")).resolves.toBe("texto reconocido");
+    expect(seen).toEqual([["file:///pagina.jpg", "por+spa+eng"]]);
+    expect(TESSDATA_LANG).toEqual({ es: "spa", en: "eng", pt: "por" });
+    _setOcrNativeForTests(null);
+  });
+
+  it("un fallo del módulo se traduce a OCR_FAILED con su mensaje", async () => {
+    _setOcrNativeForTests({
+      recognize: async () => {
+        throw new Error("tesseract init failed");
+      },
+    });
+    await expect(recognizeImageText("file:///x.png", "en")).rejects.toMatchObject({
+      name: "OcrError",
+      code: "OCR_FAILED",
+      message: "tesseract init failed",
+    });
+    _setOcrNativeForTests(null);
+  });
+});
+
+describe("la costura de páginas de PDF (carril OCR 2026-10-31)", () => {
+  it("sin módulo o sin la entrada de páginas: UNAVAILABLE", async () => {
+    _setOcrNativeForTests(null);
+    await expect(recognizeScannedPdfText("file:///doc.pdf", "es")).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    _setOcrNativeForTests({ recognize: async () => "" });
+    await expect(recognizeScannedPdfText("file:///doc.pdf", "es")).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    _setOcrNativeForTests(null);
+  });
+
+  it("con módulo, pasa las páginas saneadas y el código tessdata", async () => {
+    const seen: Array<[string, number[], string]> = [];
+    _setOcrNativeForTests({
+      recognize: async () => "",
+      recognizePdfPages: async (uri, pages, tessdataLang) => {
+        seen.push([uri, pages, tessdataLang]);
+        return "páginas reconocidas";
+      },
+    });
+    await expect(recognizePdfPagesText("file:///doc.pdf", [3, 1, 3, -2, 2.5], "es")).resolves.toBe(
+      "páginas reconocidas",
+    );
+    expect(seen).toEqual([["file:///doc.pdf", [1, 3], "spa+eng+por"]]);
+    await expect(recognizeScannedPdfText("file:///doc.pdf", "pt")).resolves.toBe("páginas reconocidas");
+    expect(seen[1]).toEqual(["file:///doc.pdf", [], "por+spa+eng"]);
+    _setOcrNativeForTests(null);
+  });
+
+  it("un fallo del módulo en páginas se traduce a OCR_FAILED", async () => {
+    _setOcrNativeForTests({
+      recognize: async () => "",
+      recognizePdfPages: async () => {
+        throw new Error("renderer died");
+      },
+    });
+    await expect(recognizeScannedPdfText("file:///doc.pdf", "en")).rejects.toMatchObject({
+      code: "OCR_FAILED",
+      message: "renderer died",
+    });
+    _setOcrNativeForTests(null);
+  });
+
+  it("sanitizeOcrPages aplica el tope de la política de adjuntos (30)", () => {
+    const many = Array.from({ length: 45 }, (_, i) => i);
+    expect(sanitizeOcrPages(many)).toHaveLength(30);
+    expect(sanitizeOcrPages([])).toEqual([]);
+  });
+
+  it("la marca de procedencia existe en los tres idiomas y nombra el OCR", () => {
+    for (const lang of ["es", "en", "pt"] as const) {
+      expect(OCR_PROVENANCE_NOTE[lang]).toContain("OCR");
+      expect(OCR_PROVENANCE_NOTE[lang].length).toBeGreaterThan(20);
+    }
+  });
+});
+
+describe("auditoría completa: páginas escaneadas y códigos del nativo", () => {
+  it("F-1: sin páginas escaneadas devuelve null y no arranca el motor", async () => {
+    let ran = false;
+    _setOcrNativeForTests({
+      recognize: async () => "",
+      findScannedPdfPages: async () => [],
+      recognizePdfPages: async () => {
+        ran = true;
+        return "";
+      },
+    });
+    await expect(recognizeScannedPdfText("file:///texto.pdf", "es")).resolves.toBeNull();
+    expect(ran).toBe(false);
+    _setOcrNativeForTests(null);
+  });
+
+  it("F-1, par: con páginas escaneadas reconoce SOLO esas y devuelve su texto (vacío si no lee nada)", async () => {
+    const seen: number[][] = [];
+    _setOcrNativeForTests({
+      recognize: async () => "",
+      findScannedPdfPages: async () => [4, 1, 1],
+      recognizePdfPages: async (_u, pages) => {
+        seen.push(pages);
+        return "";
+      },
+    });
+    await expect(recognizeScannedPdfText("file:///mixto.pdf", "pt")).resolves.toBe("");
+    expect(seen).toEqual([[1, 4]]);
+    _setOcrNativeForTests(null);
+  });
+
+  it("F-1: un nativo anterior sin la detección conserva la vía antigua", async () => {
+    _setOcrNativeForTests({ recognize: async () => "", recognizePdfPages: async () => "viejo" });
+    await expect(recognizeScannedPdfText("file:///a.pdf", "en")).resolves.toBe("viejo");
+    _setOcrNativeForTests(null);
+  });
+
+  it("F-4: el fallo de integridad de los datos conserva su código OCR_UNAVAILABLE", async () => {
+    _setOcrNativeForTests({
+      recognize: async () => {
+        throw Object.assign(new Error("The bundled OCR data for 'spa' failed its integrity check"), { code: "OCR_UNAVAILABLE" });
+      },
+    });
+    await expect(recognizeImageText("file:///x.png", "es")).rejects.toMatchObject({ code: "OCR_UNAVAILABLE" });
+    _setOcrNativeForTests(null);
+  });
+});
+
+describe("tessdataSpec (0.1.75): las tres lenguas, la de la app primero", () => {
+  it("orden y sin repetidos", async () => {
+    const { tessdataSpec } = await import("./ocr.js");
+    expect(tessdataSpec("es")).toBe("spa+eng+por");
+    expect(tessdataSpec("en")).toBe("eng+spa+por");
+    expect(tessdataSpec("pt")).toBe("por+spa+eng");
+  });
+});

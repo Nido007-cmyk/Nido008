@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/Nido007-cmyk/Nido008/security/advisories/new
+    about: Security problems go through the private channel, never a public issue. See SECURITY.md.
+  - name: Questions and ideas
+    url: https://github.com/Nido007-cmyk/Nido008/discussions
+    about: General questions and open ended ideas live in Discussions. Bugs still go in the forms here.
+  - name: Report a problem from the app
+    url: https://github.com/Nido007-cmyk/Nido008/issues/new
+    about: The same door the app's Report a problem opens. Pick the form that fits and tell us what happened.

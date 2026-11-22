@@ -1,0 +1,1289 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ */
+
+/**
+ * Asiento de PC (E3, tanda 2 · J-1): batería recreada del 0.1.108
+ * bajo la decisión de puerta firmada en la apertura de la tanda
+ * (estudios/E3-J1-PUERTA.md). Adaptaciones, todas asentadas:
+ *   - Extensiones `.js` en las importaciones (NodeNext).
+ *   - `estimatePromptTokens` y `assertPromptBudget` vienen del
+ *     adelanto A1 (`src/agent/loop/agentLoop.ts` parcial, sede de
+ *     la tanda 13): el primero es la delegación misma sobre el
+ *     estimador de la tanda 1 y el segundo, la función copiada
+ *     entera; los casos que los usan corren contra la superficie
+ *     verdadera.
+ *   - UN caso DIFERIDO con nombre y tanda, no podado: la regresión
+ *     «hey, what's up?» ejercita `classifyTask` e
+ *     `isRetrievalIrrelevant` de `routing/classify`, pieza de la
+ *     tanda 11 (E3.4). COBRADO en la tanda 11: el caso corre contra
+ *     la pieza real recreada y acreditada allí con sus baterías
+ *     propias, y la fixture `__fixtures__/diferidosJ1.ts` perdió
+ *     las dos declaraciones de classify (quedan las cuatro del
+ *     planificador, diferidas a E4). Su mitad pura (prompt sin
+ *     sección de contexto cuando no hay fragmentos, historial que
+ *     sobrevive) está cubierta además por casos herméticos de esta
+ *     misma batería.
+ */
+
+import { describe, it, expect } from "vitest";
+import {
+  cosineSimilarity,
+  assemblePrompt,
+  assembleChatMessages,
+  buildLexicalQuery,
+  contextualizeQuery,
+  degradableGenTokens,
+  dropUnfoundedCorpus,
+  fitChunksToBudget,
+  serializeEmbedding,
+  deserializeEmbedding,
+} from "./pure.js";
+import { assertPromptBudget, estimatePromptTokens } from "../agent/loop/agentLoop.js";
+import { classifyTask, isRetrievalIrrelevant } from "../routing/classify.js";
+import type { RetrievedChunk } from "./retrieve.types.js";
+
+describe("cosineSimilarity", () => {
+  it("is 1 for identical vectors", () => {
+    const v = new Float32Array([1, 2, 3]);
+    expect(cosineSimilarity(v, v)).toBeCloseTo(1);
+  });
+
+  it("is 0 for orthogonal vectors", () => {
+    const a = new Float32Array([1, 0]);
+    const b = new Float32Array([0, 1]);
+    expect(cosineSimilarity(a, b)).toBeCloseTo(0);
+  });
+
+  it("is -1 for opposite vectors", () => {
+    const a = new Float32Array([1, 0]);
+    const b = new Float32Array([-1, 0]);
+    expect(cosineSimilarity(a, b)).toBeCloseTo(-1);
+  });
+
+  it("returns 0 for zero-norm vectors instead of NaN", () => {
+    const a = new Float32Array([0, 0]);
+    const b = new Float32Array([1, 1]);
+    expect(cosineSimilarity(a, b)).toBe(0);
+  });
+});
+
+describe("assemblePrompt", () => {
+  const chunks: RetrievedChunk[] = [
+    {
+      chunkId: "1",
+      docId: "1",
+      title: "Doc One",
+      body: "Body one.",
+      score: 0.9,
+      matchType: "hybrid",
+    },
+  ];
+
+  it("includes the question and numbered citations", () => {
+    const prompt = assemblePrompt("What is X?", chunks);
+    expect(prompt).toContain("Question: What is X?");
+    expect(prompt).toContain("[1] Doc One");
+    expect(prompt).toContain("Body one.");
+  });
+
+  it("still produces a valid prompt with no context", () => {
+    const prompt = assemblePrompt("What is X?", []);
+    expect(prompt).toContain("Question: What is X?");
+  });
+
+  it("uses the default instruction when no system prompt is given", () => {
+    const prompt = assemblePrompt("What is X?", []);
+    expect(prompt).toContain("You are an offline research assistant.");
+  });
+
+  it("substitutes a custom system prompt for the default instruction", () => {
+    const prompt = assemblePrompt("What is X?", [], "You are a pirate.");
+    expect(prompt).toContain("You are a pirate.");
+    expect(prompt).not.toContain("You are an offline research assistant.");
+  });
+
+  it("still appends the citation instruction with a custom system prompt, when there's context to cite", () => {
+    const prompt = assemblePrompt("What is X?", chunks, "You are a pirate.");
+    expect(prompt).toContain("cite sources as [n]");
+  });
+
+  // Regression: an empty-but-present "Context:\n\n" section (with the
+  // "cite sources as [n]" instruction still attached) nudged a small model
+  // toward inventing content to fill it instead of answering conversationally
+  // - this is what let unrelated retrieved corpus chunks ("Pikachu",
+  // "Deadmau5", "Weezer") leak into a "hey, what's up?" response even after
+  // isRetrievalIrrelevant correctly gated retrieve() itself. With zero
+  // chunks, the whole context/citation section must be absent, not empty.
+  it("omits the entire context/citation section when there are no chunks", () => {
+    const prompt = assemblePrompt("hey, what's up?", []);
+    expect(prompt).not.toContain("Context:");
+    expect(prompt).not.toContain("cite sources as [n]");
+  });
+
+  describe("noSourcesFoundNote (honest no-result, 2026-09-28)", () => {
+    it("adds the no-sources instruction when retrieval ran and found nothing", () => {
+      const prompt = assemblePrompt("What is X?", [], undefined, undefined, undefined, true);
+      expect(prompt).toContain("No relevant sources were found in the offline index");
+      // FIX 2026-10-09 (Phase 3): stronger instruction - do NOT invent facts,
+      // say honestly that you don't know for factual questions without sources.
+      expect(prompt).toMatch(/do NOT invent facts/i);
+      expect(prompt).toMatch(/say honestly that you don't know/i);
+    });
+
+    it("omits the no-sources instruction by default", () => {
+      const prompt = assemblePrompt("What is X?", []);
+      expect(prompt).not.toContain("No relevant sources were found");
+    });
+
+    it("omits the no-sources instruction when chunks exist even if the flag is set", () => {
+      const prompt = assemblePrompt("What is X?", chunks, undefined, undefined, undefined, true);
+      expect(prompt).not.toContain("No relevant sources were found");
+    });
+
+    it("adds the no-sources instruction in chat-template messages too", () => {
+      const messages = assembleChatMessages("What is X?", [], undefined, undefined, undefined, true);
+      const system = messages.find((m) => m.role === "system");
+      expect(system?.content).toContain("No relevant sources were found in the offline index");
+    });
+
+    it("omits the no-sources instruction in chat-template messages by default", () => {
+      const messages = assembleChatMessages("What is X?", []);
+      const system = messages.find((m) => m.role === "system");
+      expect(system?.content).not.toContain("No relevant sources were found");
+    });
+  });
+
+  it("falls back to the default instruction for an empty/whitespace system prompt", () => {
+    const prompt = assemblePrompt("What is X?", [], "   ");
+    expect(prompt).toContain("You are an offline research assistant.");
+  });
+
+  it("includes recent turns verbatim when history is given", () => {
+    const prompt = assemblePrompt("What is X?", [], undefined, {
+      turns: [
+        { role: "user", text: "My name is Alex." },
+        { role: "assistant", text: "Nice to meet you, Alex." },
+      ],
+    });
+    expect(prompt).toContain("User: My name is Alex.");
+    expect(prompt).toContain("Assistant: Nice to meet you, Alex.");
+  });
+
+  it("includes a conversation summary when history has one", () => {
+    const prompt = assemblePrompt("What is X?", [], undefined, {
+      summary: "User is planning a trip to Japan.",
+    });
+    expect(prompt).toContain("Summary of earlier conversation:");
+    expect(prompt).toContain("User is planning a trip to Japan.");
+  });
+
+  it("omits history sections entirely when no history is given", () => {
+    const prompt = assemblePrompt("What is X?", []);
+    expect(prompt).not.toContain("Summary of earlier conversation:");
+    expect(prompt).not.toContain("Recent conversation:");
+  });
+
+  it("omits history sections when history is given but empty", () => {
+    const prompt = assemblePrompt("What is X?", [], undefined, { summary: null, turns: [] });
+    expect(prompt).not.toContain("Summary of earlier conversation:");
+    expect(prompt).not.toContain("Recent conversation:");
+  });
+
+  // Regression: "wake up" -> "morning alarm set / room temperature
+  // adjusted" (a hallucinated action the upstream app has no ability to perform). The
+  // grounding instruction is universal (not a hardcoded response to any
+  // specific phrase) - always present regardless of query, persona, or
+  // retrieval state.
+  it("always includes the no-real-world-actions grounding instruction", () => {
+    const prompt = assemblePrompt("wake up", []);
+    expect(prompt).toContain("no ability to control real-world devices or take physical actions");
+    expect(prompt).toContain("Never claim to have done something");
+  });
+
+  it("includes the grounding instruction regardless of persona", () => {
+    const prompt = assemblePrompt("wake up", [], "You are a pirate.");
+    expect(prompt).toContain("no ability to control real-world devices or take physical actions");
+  });
+
+  it("includes the grounding instruction even with retrieved context and history", () => {
+    const prompt = assemblePrompt("wake up", chunks, undefined, {
+      turns: [{ role: "user", text: "hi" }],
+    });
+    expect(prompt).toContain("no ability to control real-world devices or take physical actions");
+  });
+
+  // End-to-end regression mirroring ChatScreen.send()'s exact decision
+  // logic (classifyTask -> isRetrievalIrrelevant gates whether retrieve()
+  // is even called -> assemblePrompt) for the real-device report: "hey,
+  // what's up?" produced a response with unrelated retrieved corpus chunks
+  // (Pikachu, Deadmau5, Weezer) leaking in. The final prompt must contain
+  // no retrieved-context/citation section at all for a greeting - but
+  // conversation history is a SEPARATE mechanism (assemblePrompt's
+  // summary/turns params, unconditional, untouched by the retrieval gate)
+  // and must still work, so "what did I just tell you?" keeps functioning.
+  //
+  // COBRADO en la tanda 11 (E3.4) — asiento de la decisión de puerta
+  // de J-1: el caso ejercita routing/classify, recreada y acreditada
+  // en esa tanda con sus baterías propias; se cobra literal contra la
+  // pieza real (las dos funciones se importan de ../routing/classify
+  // y la fixture diferidosJ1.ts perdió sus dos declaraciones).
+  it('regression: "hey, what\'s up?" produces a prompt with no retrieved context, but conversation history survives', () => {
+    const query = "hey, what's up?";
+    expect(classifyTask(query)).toBe("greeting");
+
+    // Exactly ChatScreen.send()'s branch: retrieve() is never even called
+    // when isRetrievalIrrelevant is true - chunks is [] by construction,
+    // not because retrieve() happened to return nothing.
+    const chunksForThisQuery = isRetrievalIrrelevant(classifyTask(query)) ? [] : chunks;
+    expect(chunksForThisQuery).toEqual([]);
+
+    const prompt = assemblePrompt(query, chunksForThisQuery, undefined, {
+      turns: [
+        { role: "user", text: "My favorite color is blue." },
+        { role: "assistant", text: "Got it, blue it is." },
+      ],
+    });
+
+    expect(prompt).not.toContain("Context:");
+    expect(prompt).not.toContain("cite sources as [n]");
+    expect(prompt).not.toContain("Doc One");
+    expect(prompt).not.toContain("Body one.");
+    // Conversation history is unaffected by the retrieval gate.
+    expect(prompt).toContain("Recent conversation:");
+    expect(prompt).toContain("My favorite color is blue.");
+  });
+});
+
+describe("assemblePrompt style reminder", () => {
+  it("goes right after the question", () => {
+    const chunks: RetrievedChunk[] = [
+      { chunkId: "1", docId: "1", title: "Doc One", body: "Body one.", score: 0.9, matchType: "hybrid" },
+    ];
+    const prompt = assemblePrompt("Why?", chunks, "You are Nido.", undefined, "Be brief.");
+    expect(prompt).toContain("Body one.");
+    expect(prompt.endsWith("Question: Why?\n\n(Response style: Be brief.)\n\nAnswer:")).toBe(true);
+  });
+});
+
+describe("assembleChatMessages", () => {
+  const chunks: RetrievedChunk[] = [
+    { chunkId: "1", docId: "1", title: "Doc One", body: "Body one.", score: 0.9, matchType: "hybrid" },
+  ];
+
+  it("puts the instruction and grounding boundary in a single system message, and the query as the final user message", () => {
+    const messages = assembleChatMessages("hey!", [], "You are a pirate.");
+    expect(messages[0]).toMatchObject({ role: "system" });
+    expect(messages[0].content).toContain("You are a pirate.");
+    expect(messages[0].content).toContain("no ability to control real-world devices");
+    expect(messages[messages.length - 1]).toEqual({ role: "user", content: "hey!" });
+  });
+
+  it("appends the tone's style reminder to the current question only", () => {
+    const history = { turns: [{ role: "user" as const, text: "earlier" }, { role: "assistant" as const, text: "reply" }] };
+    const messages = assembleChatMessages("q", chunks, "You are Nido.", history, "Be thorough.");
+    // RAG-GROUNDING 2026-10-11: con fuentes, el turno actual es
+    // "Sources … Question: q" y el recordatorio de estilo sigue al final.
+    expect(messages[messages.length - 1].content.endsWith("Question: q\n\n(Response style: Be thorough.)")).toBe(true);
+    expect(messages[1].content).toBe("earlier");
+    expect(messages[0].content).not.toContain("Response style:");
+  });
+
+  it("leaves the question alone without a reminder", () => {
+    const messages = assembleChatMessages("q", [], "You are Nido.");
+    expect(messages[messages.length - 1].content).toBe("q");
+    const withSources = assembleChatMessages("q", chunks, "You are Nido.");
+    expect(withSources[withSources.length - 1].content.endsWith("Question: q")).toBe(true);
+    expect(withSources[withSources.length - 1].content).not.toContain("Response style:");
+  });
+
+  it("uses the default instruction when no system prompt is given", () => {
+    const messages = assembleChatMessages("hi", []);
+    expect(messages[0].content).toContain("You are an offline research assistant.");
+  });
+
+  // RAG-GROUNDING 2026-10-11: la regla de citar sigue en el sistema, pero
+  // las fuentes van en el turno del usuario, pegadas a la pregunta.
+  it("puts the grounding rule in the system message and the sources right before the question", () => {
+    const messages = assembleChatMessages("What is X?", chunks);
+    expect(messages[0].content).toContain("cite sources as [n]");
+    expect(messages[0].content).not.toContain("Body one.");
+    const last = messages[messages.length - 1];
+    expect(last.role).toBe("user");
+    expect(last.content).toContain("[1] Doc One");
+    expect(last.content).toContain("Body one.");
+    expect(last.content.indexOf("Body one.")).toBeLessThan(last.content.indexOf("Question: What is X?"));
+  });
+
+  it("never tells the model to fall back on general knowledge when there are sources (fotosíntesis evidence)", () => {
+    const messages = assembleChatMessages("What is X?", chunks);
+    const all = messages.map((m) => m.content).join("\n");
+    expect(all).not.toMatch(/general knowledge/i);
+    expect(all).toContain("Answer ONLY with facts written in those sources");
+    expect(all).toContain("say that you don't know");
+    expect(assemblePrompt("What is X?", chunks)).not.toMatch(/answer from general knowledge/i);
+  });
+
+  it("keeps sources next to the question even with long history in between", () => {
+    const history = {
+      turns: [
+        { role: "user" as const, text: "earlier question" },
+        { role: "assistant" as const, text: "earlier answer" },
+      ],
+    };
+    const messages = assembleChatMessages("What is X?", chunks, "sys", history);
+    expect(messages[1].content).toBe("earlier question");
+    expect(messages[messages.length - 1].content).toContain("Body one.");
+    expect(messages[1].content).not.toContain("Body one.");
+  });
+
+  it("omits the context/citation framing entirely when there are no chunks", () => {
+    const messages = assembleChatMessages("hey!", []);
+    expect(messages[0].content).not.toContain("cite sources as [n]");
+    expect(messages[0].content).not.toContain("Context:");
+  });
+
+  it("threads conversation history in as separate role-tagged messages, between system and the current query", () => {
+    const messages = assembleChatMessages("What did I just tell you?", [], undefined, {
+      turns: [
+        { role: "user", text: "My favorite color is blue." },
+        { role: "assistant", text: "Got it, blue it is." },
+      ],
+    });
+    expect(messages).toEqual([
+      expect.objectContaining({ role: "system" }),
+      { role: "user", content: "My favorite color is blue." },
+      { role: "assistant", content: "Got it, blue it is." },
+      { role: "user", content: "What did I just tell you?" },
+    ]);
+  });
+
+  it("includes a conversation summary in the system message when history has one", () => {
+    const messages = assembleChatMessages("hi", [], undefined, { summary: "User is planning a trip to Japan." });
+    expect(messages[0].content).toContain("Summary of earlier conversation:");
+    expect(messages[0].content).toContain("User is planning a trip to Japan.");
+  });
+
+  it("P2.3: without a budget, long history is appended unbounded (legacy behavior)", () => {
+    const big = "x".repeat(5000);
+    const history = {
+      turns: [
+        { role: "user" as const, text: big },
+        { role: "assistant" as const, text: big },
+        { role: "user" as const, text: big },
+      ],
+    };
+    const messages = assembleChatMessages("q", [], "sys", history);
+    // system + 3 history + current = 5 messages, nothing cut.
+    expect(messages).toHaveLength(5);
+  });
+
+  it("P2.3: with a budget, history is cut recent-first and the invariant holds", () => {
+    const big = "x".repeat(5000); // ~1716 tokens each by the conservative counter
+    const history = {
+      turns: [
+        { role: "user" as const, text: big },
+        { role: "assistant" as const, text: big },
+        { role: "user" as const, text: big },
+        { role: "assistant" as const, text: big },
+      ],
+    };
+    const messages = assembleChatMessages("q", [], "sys", history, undefined, false, {
+      nCtx: 4096,
+      reserveGeneration: 512,
+    });
+    // Fewer than the unbounded 6 messages; system first, current query last.
+    expect(messages.length).toBeLessThan(6);
+    expect(messages[0].role).toBe("system");
+    expect(messages[messages.length - 1]).toEqual({ role: "user", content: "q" });
+    // No orphaned assistant turn at the start of the kept history.
+    const firstHistory = messages[1];
+    if (messages.length > 2) expect(firstHistory.role).not.toBe("assistant");
+  });
+});
+
+describe("serializeEmbedding/deserializeEmbedding", () => {
+  it("round-trips a Float32Array", () => {
+    const original = new Float32Array([0.1, 0.2, 0.3, 0.4]);
+    const bytes = serializeEmbedding(original);
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(bytes.byteLength).toBe(16); // 4 floats * 4 bytes
+
+    const restored = deserializeEmbedding(bytes, 4);
+    expect(restored).toBeInstanceOf(Float32Array);
+    expect(restored.length).toBe(4);
+    // Float32 precision: compare with tolerance
+    for (let i = 0; i < 4; i++) {
+      expect(restored[i]).toBeCloseTo(original[i], 6);
+    }
+  });
+
+  it("throws on dimension mismatch", () => {
+    const original = new Float32Array([0.1, 0.2, 0.3]);
+    const bytes = serializeEmbedding(original);
+
+    expect(() => deserializeEmbedding(bytes, 4)).toThrow(
+      "Embedding dimension mismatch: expected 4, got 3"
+    );
+  });
+
+  it("handles empty arrays", () => {
+    const original = new Float32Array(0);
+    const bytes = serializeEmbedding(original);
+    expect(bytes.byteLength).toBe(0);
+
+    const restored = deserializeEmbedding(bytes, 0);
+    expect(restored.length).toBe(0);
+  });
+});
+
+describe("0.1.61: prefijo estable del mensaje de sistema (caché de llama.rn)", () => {
+  it("con y sin fuentes, el sistema empieza igual: identidad, estilo y límites antes de lo que cambia", () => {
+    const sys = "You are Nido.";
+    const withSources = assembleChatMessages("q", [{ chunkId: "a", docId: "a", title: "T", body: "Body.", score: 1, matchType: "semantic" } as never], sys)[0].content;
+    const without = assembleChatMessages("q", [], sys)[0].content;
+    const noSources = assembleChatMessages("q", [], sys, undefined, undefined, true)[0].content;
+    let common = 0;
+    while (common < without.length && withSources[common] === without[common] && noSources[common] === without[common]) common++;
+    expect(withSources.slice(0, common)).toContain("no ability to control real-world devices");
+    expect(common).toBeGreaterThanOrEqual(without.length - 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-01 (ronda física 0.1.68): presupuesto de contexto en la ruta fija.
+// El escenario de la ronda: chat con una respuesta de guía larga en el
+// historial + el documento importado; la pregunta de la cita moría con
+// «prompt excede el contexto del modelo (estimado 3565 tokens + 512 a
+// generar > nCtx 3072) en chat-directo» porque la ruta fija ensamblaba
+// sin presupuesto y applyContextBudget no sabe recortar fuentes.
+// ---------------------------------------------------------------------------
+
+const R01_NCTX = 3072;
+const R01_RESERVE = 512;
+
+/** Cuerpo de frases completas y repetibles, ~71 caracteres por frase. */
+function sentenceBody(marker: string, sentences: number): string {
+  return `El dato ${marker} queda en la sala doscientos catorce del segundo piso. `.repeat(sentences);
+}
+
+function r01Chunk(id: string, title: string, body: string): RetrievedChunk {
+  return { chunkId: id, docId: id, title, body, score: 1, matchType: "hybrid" };
+}
+
+/** Render de las entradas tal como lo hacen los dos ensambladores. */
+function renderedEntries(chunks: RetrievedChunk[]): string {
+  return chunks.map((c, i) => `[${i + 1}] ${c.title}\n${c.body}`).join("\n\n");
+}
+
+describe("fitChunksToBudget (R-01)", () => {
+  it("no toca la lista cuando todo cabe", () => {
+    const fixedText = "F".repeat(600);
+    const chunks = [r01Chunk("1", "Doc 1", sentenceBody("a", 6)), r01Chunk("2", "Doc 2", sentenceBody("b", 6))];
+    const out = fitChunksToBudget(chunks, fixedText, R01_NCTX, R01_RESERVE);
+    expect(out).toHaveLength(2);
+    expect(out[0].body).toBe(chunks[0].body);
+    expect(out[1].body).toBe(chunks[1].body);
+  });
+
+  it("descarta fragmentos desde el final (menor rango primero) hasta que cabe", () => {
+    const fixedText = "F".repeat(1500);
+    const chunks = [1, 2, 3, 4].map((n) =>
+      r01Chunk(String(n), `Doc ${n}`, sentenceBody(`m${n}`, 34))
+    );
+    const out = fitChunksToBudget(chunks, fixedText, R01_NCTX, R01_RESERVE);
+    expect(out.map((c) => c.title)).toEqual(["Doc 1", "Doc 2"]);
+    expect(out[0].body).toBe(chunks[0].body);
+    expect(out[1].body).toBe(chunks[1].body);
+    expect(
+      estimatePromptTokens(fixedText + renderedEntries(out)) + R01_RESERVE
+    ).toBeLessThanOrEqual(R01_NCTX);
+  });
+
+  it("con un solo fragmento gigante, trunca el cuerpo por la última frase completa que cabe", () => {
+    const fixedText = "F".repeat(1500);
+    const big = r01Chunk("1", "Doc Grande", sentenceBody("g", 120));
+    const out = fitChunksToBudget([big], fixedText, R01_NCTX, R01_RESERVE);
+    expect(out).toHaveLength(1);
+    expect(out[0].body.length).toBeLessThan(big.body.length);
+    expect(big.body.startsWith(out[0].body)).toBe(true);
+    expect(out[0].body.endsWith(".")).toBe(true);
+    // El fragmento original no se muta.
+    expect(big.body).toBe(sentenceBody("g", 120));
+    expect(
+      estimatePromptTokens(fixedText + renderedEntries(out)) + R01_RESERVE
+    ).toBeLessThanOrEqual(R01_NCTX);
+  });
+
+  it("devuelve [] cuando ni un fragmento mínimo cabe (manda el «sin fuentes»)", () => {
+    const fixedText = "F".repeat(9000);
+    const chunks = [r01Chunk("1", "Doc 1", sentenceBody("a", 6))];
+    expect(fitChunksToBudget(chunks, fixedText, R01_NCTX, R01_RESERVE)).toEqual([]);
+  });
+});
+
+describe("ruta fija con presupuesto (R-01): el escenario de la ronda", () => {
+  const query = "¿Qué día y a qué horas es la cita?";
+  const chunks: RetrievedChunk[] = [
+    r01Chunk("1", "Documento de la cita", sentenceBody("cita", 25)),
+    r01Chunk("2", "Doc 2", sentenceBody("dos", 25)),
+    r01Chunk("3", "Doc 3", sentenceBody("tres", 25)),
+    r01Chunk("4", "Doc 4", sentenceBody("cuatro", 25)),
+  ];
+  const history = {
+    turns: [
+      { role: "user" as const, text: "Quiero la guía completa del tema" },
+      { role: "assistant" as const, text: sentenceBody("GUIA", 36) },
+      { role: "user" as const, text: "Vale, gracias" },
+      { role: "assistant" as const, text: "De nada, aquí estoy." },
+    ],
+  };
+
+  it("sin presupuesto reproduce el fallo: la aserción lanza el error de la ronda", () => {
+    const messages = assembleChatMessages(query, chunks, undefined, history);
+    const joined = messages.map((m) => m.content).join("\n");
+    expect(() =>
+      assertPromptBudget([{ role: "user", content: joined }], R01_NCTX, R01_RESERVE, "chat-directo")
+    ).toThrow(/prompt excede el contexto/);
+  });
+
+  it("con presupuesto responde dentro de la ventana, conserva el rango 1 y el turno reciente", () => {
+    const messages = assembleChatMessages(query, chunks, undefined, history, undefined, false, {
+      nCtx: R01_NCTX,
+      reserveGeneration: R01_RESERVE,
+    });
+    const joined = messages.map((m) => m.content).join("\n");
+    expect(() =>
+      assertPromptBudget([{ role: "user", content: joined }], R01_NCTX, R01_RESERVE, "chat-directo")
+    ).not.toThrow();
+    // La fuente principal (el documento) sobrevive al recorte.
+    expect(joined).toContain("Documento de la cita");
+    // El fragmento de menor rango es el que se sacrifica.
+    expect(joined).not.toContain("Doc 4");
+    // El historial viejo (la guía) se corta antes que las fuentes; el
+    // turno más reciente se conserva.
+    expect(joined).not.toContain("GUIA");
+    expect(joined).toContain("De nada, aquí estoy.");
+  });
+
+  it("la vía sin plantilla (assemblePrompt) con presupuesto también cabe y conserva el rango 1", () => {
+    const prompt = assemblePrompt(query, chunks, undefined, history, undefined, false, {
+      nCtx: R01_NCTX,
+      reserveGeneration: R01_RESERVE,
+    });
+    expect(estimatePromptTokens(prompt) + R01_RESERVE).toBeLessThanOrEqual(R01_NCTX);
+    expect(prompt).toContain("Documento de la cita");
+    expect(prompt).not.toContain("Doc 4");
+  });
+
+  it("regresión: con ventana amplia y conversación corta, el resultado es idéntico al de sin presupuesto", () => {
+    const shortChunks = [r01Chunk("1", "Doc 1", sentenceBody("a", 2))];
+    const shortHistory = {
+      turns: [
+        { role: "user" as const, text: "hola" },
+        { role: "assistant" as const, text: "hola, ¿qué tal?" },
+      ],
+    };
+    const withBudget = assembleChatMessages("¿qué es X?", shortChunks, "You are Nido.", shortHistory, undefined, false, {
+      nCtx: 4096,
+      reserveGeneration: 512,
+    });
+    const withoutBudget = assembleChatMessages("¿qué es X?", shortChunks, "You are Nido.", shortHistory);
+    expect(withBudget).toEqual(withoutBudget);
+    expect(
+      assemblePrompt("¿qué es X?", shortChunks, "You are Nido.", shortHistory, undefined, false, {
+        nCtx: 4096,
+        reserveGeneration: 512,
+      })
+    ).toBe(assemblePrompt("¿qué es X?", shortChunks, "You are Nido.", shortHistory));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Adversaria H-07 + H-12 (2026-11-01): el presupuesto no mutila en
+// silencio ni acorta sin nota. La sonda de la adversaria: señuelo de
+// 2.309 caracteres en el rango 1 y el fragmento bueno y corto en el 2,
+// con una ventana donde no caben los dos — el ajuste dejaba [señuelo]
+// truncado a 113 caracteres SIN MARCA y sacrificaba el bueno por rango.
+// ---------------------------------------------------------------------------
+
+/** Frase de ~113 caracteres, como las del señuelo de la sonda. */
+const H07_SENTENCE =
+  "La pintura al óleo sobre lienzo exige capas muy finas, secado lento entre mano y mano, y barniz final mate. ";
+
+function h07Chunk(id: string, title: string, body: string): RetrievedChunk {
+  return { chunkId: id, docId: id, title, body, score: 1, matchType: "hybrid" };
+}
+
+describe("fitChunksToBudget (adversaria H-07): ni muñones ni restos sin marca", () => {
+  // Sala total de caracteres: (3072 − 512 − 50) × 3 ≈ 7.530. Con este
+  // fixedText quedan ~140 para las entradas: el señuelo solo entra
+  // truncado a ~una frase (~5 % de su cuerpo) y el bueno entra entero.
+  // El relleno va en minúscula a propósito: desde m-30 (T-10, 0.1.99)
+  // un relleno de mayúsculas («F»×N) ES la clase de mayúsculas del
+  // estimador y paga su recargo medido, así que dejó de ser neutro
+  // para calibrar presupuestos; en minúscula la estimación del relleno
+  // es la de siempre y la aritmética de esta sala se mantiene.
+  const TIGHT_FIXED = "f".repeat(7390);
+  const decoyBody = H07_SENTENCE.repeat(21).trimEnd();
+  const goodBody = "La cita es el martes 10 de noviembre a las 9:30 en la sala 214 del segundo piso.";
+
+  it("la sonda de la adversaria: el señuelo mutilado no entra — entra el fragmento bueno, entero", () => {
+    const decoy = h07Chunk("1", "Pintura al óleo", decoyBody);
+    const good = h07Chunk("2", "Documento de la cita", goodBody);
+    const out = fitChunksToBudget([decoy, good], TIGHT_FIXED, R01_NCTX, R01_RESERVE);
+    expect(out.map((c) => c.title)).toEqual(["Documento de la cita"]);
+    expect(out[0].body).toBe(goodBody);
+    expect(out[0].truncated).toBeUndefined();
+  });
+
+  it("un resto por debajo de utilidad no entra ni solo: [] antes que un muñón", () => {
+    const decoy = h07Chunk("1", "Pintura al óleo", decoyBody);
+    expect(fitChunksToBudget([decoy], TIGHT_FIXED, R01_NCTX, R01_RESERVE)).toEqual([]);
+  });
+
+  it("el truncado que sí entra viaja marcado, por frases completas y sin mutar el original", () => {
+    const fixedText = "f".repeat(1500);
+    const big = h07Chunk("1", "Doc Grande", H07_SENTENCE.repeat(80));
+    const out = fitChunksToBudget([big], fixedText, R01_NCTX, R01_RESERVE);
+    expect(out).toHaveLength(1);
+    expect(out[0].truncated).toBe(true);
+    expect(out[0].body.length).toBeLessThan(big.body.length);
+    expect(big.body.startsWith(out[0].body)).toBe(true);
+    expect(out[0].body.endsWith(".")).toBe(true);
+    expect(big.truncated).toBeUndefined();
+    expect(
+      estimatePromptTokens(fixedText + renderedEntries(out)) + R01_RESERVE
+    ).toBeLessThanOrEqual(R01_NCTX);
+  });
+
+  it("sacrificado el primero inutilizable, el segundo entra como resto útil marcado", () => {
+    // Sala de ~345 caracteres para las entradas: el señuelo es de
+    // frases de ~400 — ni su primera frase cabe, así que no puede
+    // entrar ni como resto; el segundo, de frases cortas, entra
+    // truncado por encima del suelo de utilidad (≥ 320).
+    const midFixed = "f".repeat(7185);
+    const longSentence =
+      "La pintura al óleo sobre lienzo, trabajada con capas muy finas y secado lento entre mano y mano, " +
+      "con veladuras sucesivas de color y un barniz final mate que protege la superficie durante décadas " +
+      "de exposición continua a la luz de la sala principal del taller de restauración. ";
+    const decoy = h07Chunk("1", "Pintura al óleo", longSentence.repeat(6).trimEnd());
+    const big = h07Chunk("2", "Doc Grande", "El óleo exige capas finas y secado lento entre manos. ".repeat(80));
+    const out = fitChunksToBudget([decoy, big], midFixed, R01_NCTX, R01_RESERVE);
+    expect(out.map((c) => c.title)).toEqual(["Doc Grande"]);
+    expect(out[0].truncated).toBe(true);
+    expect(out[0].body.length).toBeGreaterThanOrEqual(320);
+  });
+
+  it("los ensambladores avisan qué lista entró (onFitted) y el prompt lleva exactamente esa", () => {
+    let fitted: RetrievedChunk[] | undefined;
+    const messages = assembleChatMessages(
+      "¿Qué día es la cita?",
+      [
+        h07Chunk("1", "Doc 1", H07_SENTENCE.repeat(30)),
+        h07Chunk("2", "Doc 2", H07_SENTENCE.repeat(30)),
+        h07Chunk("3", "Doc 3", H07_SENTENCE.repeat(30)),
+      ],
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { nCtx: R01_NCTX, reserveGeneration: R01_RESERVE },
+      (f) => {
+        fitted = f;
+      }
+    );
+    expect(fitted).toBeDefined();
+    expect(fitted!.length).toBeGreaterThan(0);
+    expect(fitted!.length).toBeLessThan(3);
+    const joined = messages.map((m) => m.content).join("\n");
+    for (const c of fitted!) expect(joined).toContain(c.title);
+    expect(joined).not.toContain("Doc 3");
+  });
+});
+
+describe("degradableGenTokens (adversaria H-12): el suelo degradado se sabe", () => {
+  it("sin aprieto: lo pedido, sin marca de recorte", () => {
+    expect(degradableGenTokens(512, 2000)).toEqual({ genTokens: 512, spaceCut: false });
+  });
+
+  it("el camino de degradación a 64: genera con 64 y el recorte por espacio queda marcado", () => {
+    expect(degradableGenTokens(512, 30)).toEqual({ genTokens: 64, spaceCut: true });
+  });
+
+  it("degradación intermedia: lo que cabe, marcado", () => {
+    expect(degradableGenTokens(1024, 300)).toEqual({ genTokens: 300, spaceCut: true });
+  });
+
+  it("un tope propio del usuario no es recorte por espacio (sin nota)", () => {
+    expect(degradableGenTokens(200, 300)).toEqual({ genTokens: 200, spaceCut: false });
+  });
+});
+
+describe("contextualizeQuery (R-03): el seguimiento desnudo hereda el tema", () => {
+  // La conversación de la ronda: primero la cita, después la sala a secas.
+  const history = {
+    turns: [
+      { role: "user" as const, text: "¿Qué día y a qué horas es la cita?" },
+      { role: "assistant" as const, text: "Su cita es el martes 10 de noviembre de 2026 a las 9:30 de la mañana." },
+    ],
+  };
+
+  it("seguimiento fino + historial ⇒ la consulta de recuperación une los términos de las dos preguntas", () => {
+    const effective = contextualizeQuery("¿En qué sala?", history);
+    expect(effective).toBe("¿En qué sala? ¿Qué día y a qué horas es la cita?");
+    // La unión de términos de contenido es lo que la puerta léxica ve:
+    // «sala» ya no viaja sola, y la cobertura exige también «cita».
+    const terms = buildLexicalQuery(effective)!.terms.map((t) => t.forms[0]);
+    expect(terms).toEqual(expect.arrayContaining(["sala", "cita", "dia", "horas"]));
+  });
+
+  it("pregunta autosuficiente (≥ 3 términos de contenido) ⇒ sin cambios aunque haya historial", () => {
+    expect(contextualizeQuery("¿Qué día y a qué horas es la cita?", history)).toBe(
+      "¿Qué día y a qué horas es la cita?"
+    );
+    expect(contextualizeQuery("¿Cómo se hace la maniobra de Heimlich en adultos?", history)).toBe(
+      "¿Cómo se hace la maniobra de Heimlich en adultos?"
+    );
+  });
+
+  it("sin historial, o sin preguntas previas del usuario ⇒ sin cambios", () => {
+    expect(contextualizeQuery("¿En qué sala?")).toBe("¿En qué sala?");
+    expect(contextualizeQuery("¿En qué sala?", null)).toBe("¿En qué sala?");
+    expect(contextualizeQuery("¿En qué sala?", { turns: [] })).toBe("¿En qué sala?");
+    expect(
+      contextualizeQuery("¿En qué sala?", { turns: [{ role: "assistant" as const, text: "Hola, ¿en qué puedo ayudar?" }] })
+    ).toBe("¿En qué sala?");
+  });
+
+  it("el turno actual al final del historial no se usa como su propio ancla", () => {
+    // Los llamadores construyen el historial desde la lista de mensajes,
+    // que ya puede incluir la pregunta en curso como último turno.
+    const withSelf = {
+      turns: [
+        { role: "user" as const, text: "¿Qué día y a qué horas es la cita?" },
+        { role: "assistant" as const, text: "El martes 10 a las 9:30." },
+        { role: "user" as const, text: "¿En qué sala?" },
+      ],
+    };
+    expect(contextualizeQuery("¿En qué sala?", withSelf)).toBe(
+      "¿En qué sala? ¿Qué día y a qué horas es la cita?"
+    );
+  });
+
+  it("un demostrativo ancla aunque la pregunta tenga 3 términos de contenido", () => {
+    const viajes = {
+      turns: [
+        { role: "user" as const, text: "¿Cuánto cuesta el tren a Sevilla?" },
+        { role: "assistant" as const, text: "Cuesta 40 euros." },
+      ],
+    };
+    // «incluye», «desayuno», «cena»: 3 términos de contenido («esta»
+    // es palabra vacía) — sin el demostrativo la pregunta pasaría por
+    // autosuficiente y perdería el tren del que se habla.
+    expect(contextualizeQuery("¿Esta incluye desayuno y cena?", viajes)).toBe(
+      "¿Esta incluye desayuno y cena? ¿Cuánto cuesta el tren a Sevilla?"
+    );
+  });
+
+  it("el tope de términos léxicos se respeta aunque el ancla sea larga", () => {
+    const longAnchor = {
+      turns: [
+        {
+          role: "user" as const,
+          text: "Cuéntame la historia completa del ferrocarril transiberiano y de sus locomotoras de vapor rusas antiguas cruzando Siberia durante el invierno extremo",
+        },
+        { role: "assistant" as const, text: "…" },
+      ],
+    };
+    const effective = contextualizeQuery("¿En qué sala?", longAnchor);
+    const terms = buildLexicalQuery(effective)!.terms.map((t) => t.forms[0]);
+    expect(terms.length).toBeLessThanOrEqual(12);
+    // «sala», el término de la pregunta actual, sobrevive al tope…
+    expect(terms).toContain("sala");
+    // …y lo que el tope sacrifica es la cola del ancla, no la pregunta.
+    expect(terms).not.toContain("extremo");
+  });
+});
+
+describe("contextualizeQuery (H-08): la herencia lleva guarda de tema", () => {
+  // Dos columnas de frases tal como la gente encadena las vueltas.
+  // Columna A — cambio de asunto: la pregunta fina trae su propio tema
+  // (una entidad nueva o un marco de definición) y NO debe arrastrar el
+  // anterior. Columna B — elipsis verdadera: la pregunta fina no se
+  // entiende sin el tema anterior y la herencia se conserva.
+  const tras = (prev: string) => ({
+    turns: [
+      { role: "user" as const, text: prev },
+      { role: "assistant" as const, text: "…" },
+    ],
+  });
+  const CITA = "¿Qué día y a qué hora es la cita del dentista?";
+  const CONSULTA = "Qual é o dia e a hora da consulta do dentista?";
+  const DENTIST_EN = "What day and time is the dentist appointment?";
+
+  // ——— Columna A: la contaminación se corta ———
+
+  it("A: «¿Y en Portugal?» tras la cita NO hereda (la sonda de la adversaria)", () => {
+    expect(contextualizeQuery("¿Y en Portugal?", tras(CITA))).toBe("¿Y en Portugal?");
+  });
+
+  it("A: «¿Cuál es la capital de Francia?» tras la cita NO hereda (entidad nueva)", () => {
+    expect(contextualizeQuery("¿Cuál es la capital de Francia?", tras(CITA))).toBe(
+      "¿Cuál es la capital de Francia?"
+    );
+  });
+
+  it("A: «¿Qué es la fotosíntesis?» tras la cita NO hereda (marco de definición)", () => {
+    expect(contextualizeQuery("¿Qué es la fotosíntesis?", tras(CITA))).toBe("¿Qué es la fotosíntesis?");
+  });
+
+  it("A: el demostrativo no salva a la entidad nueva — «¿Y eso en Portugal?» NO hereda", () => {
+    expect(contextualizeQuery("¿Y eso en Portugal?", tras(CITA))).toBe("¿Y eso en Portugal?");
+  });
+
+  it("A: «¿Y en Portugal?» tras reservar un hotel NO hereda el hotel", () => {
+    expect(contextualizeQuery("¿Y en Portugal?", tras("Reservé en el hotel Miramar"))).toBe(
+      "¿Y en Portugal?"
+    );
+  });
+
+  it("A en: «And in Portugal?» after the appointment does NOT inherit", () => {
+    expect(contextualizeQuery("And in Portugal?", tras(DENTIST_EN))).toBe("And in Portugal?");
+  });
+
+  it("A en: «What is photosynthesis?» after the appointment does NOT inherit", () => {
+    expect(contextualizeQuery("What is photosynthesis?", tras(DENTIST_EN))).toBe(
+      "What is photosynthesis?"
+    );
+  });
+
+  it("A pt: «E em Portugal?» após a consulta NÃO herda", () => {
+    expect(contextualizeQuery("E em Portugal?", tras(CONSULTA))).toBe("E em Portugal?");
+  });
+
+  it("A pt: «O que é a fotossíntese?» após a consulta NÃO herda", () => {
+    expect(contextualizeQuery("O que é a fotossíntese?", tras(CONSULTA))).toBe(
+      "O que é a fotossíntese?"
+    );
+  });
+
+  // ——— Columna B: la herencia legítima se conserva ———
+
+  it("B: «¿Y mañana?» tras la cita hereda (fragmento deíctico)", () => {
+    expect(contextualizeQuery("¿Y mañana?", tras(CITA))).toBe(`¿Y mañana? ${CITA}`);
+  });
+
+  it("B: «¿y para niños?» tras el precio del museo hereda (fragmento)", () => {
+    const prev = "¿Cuánto cuesta la entrada al museo?";
+    expect(contextualizeQuery("¿y para niños?", tras(prev))).toBe(`¿y para niños? ${prev}`);
+  });
+
+  it("B: «¿Y el otro?» tras la cita hereda (anafórico)", () => {
+    expect(contextualizeQuery("¿Y el otro?", tras(CITA))).toBe(`¿Y el otro? ${CITA}`);
+  });
+
+  it("B: «¿Cuánto cuesta?» tras el hotel hereda (pregunta de atributo)", () => {
+    const prev = "Reservé en el hotel Miramar";
+    expect(contextualizeQuery("¿Cuánto cuesta?", tras(prev))).toBe(`¿Cuánto cuesta? ${prev}`);
+  });
+
+  it("B: raíz compartida — «¿Y el tren de vuelta?» tras el tren hereda", () => {
+    const prev = "¿Cuánto cuesta el tren a Sevilla?";
+    expect(contextualizeQuery("¿Y el tren de vuelta?", tras(prev))).toBe(
+      `¿Y el tren de vuelta? ${prev}`
+    );
+  });
+
+  it("B: «¿Qué es esto?» tras la cita hereda (la definición señala a la conversación)", () => {
+    expect(contextualizeQuery("¿Qué es esto?", tras(CITA))).toBe(`¿Qué es esto? ${CITA}`);
+  });
+
+  it("B en: «Which room?» after the appointment inherits", () => {
+    expect(contextualizeQuery("Which room?", tras(DENTIST_EN))).toBe(
+      `Which room? ${DENTIST_EN}`
+    );
+  });
+
+  it("B en: «What is it?» after the appointment inherits (points at the conversation)", () => {
+    expect(contextualizeQuery("What is it?", tras(CITA))).toBe(`What is it? ${CITA}`);
+  });
+
+  it("B pt: «Em que sala?» após a consulta herda", () => {
+    expect(contextualizeQuery("Em que sala?", tras(CONSULTA))).toBe(`Em que sala? ${CONSULTA}`);
+  });
+
+  it("B pt: «E no sábado?» após a consulta herda (fragmento)", () => {
+    expect(contextualizeQuery("E no sábado?", tras(CONSULTA))).toBe(`E no sábado? ${CONSULTA}`);
+  });
+
+  it("fuera de la clase fina ayer y hoy: «¿y cuánto cuesta la noche?» (3 términos) no pasa por la herencia", () => {
+    // Medido sobre el tip: nunca fue fina — es autosuficiente y recupera
+    // por sus propios términos. La guarda no ensancha la clase fina:
+    // hacerlo reabriría la dilución que H-08 denuncia.
+    const prev = "Reservé en el hotel Miramar";
+    expect(contextualizeQuery("¿y cuánto cuesta la noche?", tras(prev))).toBe(
+      "¿y cuánto cuesta la noche?"
+    );
+  });
+});
+
+describe("dropUnfoundedCorpus (C-05): las dos señales de la caída honesta", () => {
+  const hit = (title: string, body: string) => ({ title, body });
+  const termsOf = (q: string) => buildLexicalQuery(q)!.terms;
+
+  // La forma de D2: el pool solo comparte las dos palabras genéricas de la
+  // pregunta (prepara, casa, en los 10 fragmentos) y los dos términos del
+  // tema (suero, oral) no existen en el corpus (df 0).
+  const d2Pool = Array.from({ length: 10 }, (_, i) =>
+    hit(`Fases del ciclón ${i}`, "En casa se prepara la fase de respuesta y se guarda el agua en casa.")
+  );
+
+  it("señal A: el corpus sin el tema cae entero (la forma de D2)", () => {
+    const terms = termsOf("¿Cómo se prepara el suero oral en casa?");
+    const served = d2Pool.slice(0, 6);
+    expect(dropUnfoundedCorpus(d2Pool, served, terms, { query: "¿Cómo se prepara el suero oral en casa?" })).toEqual([]);
+  });
+
+  it("señal A: calla cuando un servido casa un término discriminativo", () => {
+    const terms = termsOf("número de emergencias en Cuba suero");
+    // cuba: df 2/10 (discriminativo, ≤ pool/2); suero: df 0; numero/emergencias: genéricos.
+    const pool = [
+      hit("Cuba emergencias", "El número de emergencias en Cuba es el 104."),
+      hit("Cuba fases", "El número de emergencias y las fases en Cuba."),
+      ...Array.from({ length: 8 }, (_, i) => hit(`Genérico ${i}`, "El número de emergencias del país.")),
+    ];
+    const served = [pool[0], pool[2]];
+    expect(dropUnfoundedCorpus(pool, served, terms, {})).toEqual(served);
+  });
+
+  it("señal A: las guardas de pool y de términos no disparan", () => {
+    const terms = termsOf("¿Cómo se prepara el suero oral en casa?");
+    // Pool < 8: estadística insuficiente, la conducta de hoy no cambia.
+    const small = d2Pool.slice(0, 5);
+    expect(dropUnfoundedCorpus(small, small.slice(0, 2), terms, {})).toEqual(small.slice(0, 2));
+    // Pregunta de < 3 términos: la señal no se forma.
+    const twoTerms = termsOf("emergencia suero");
+    expect(twoTerms.length).toBe(2);
+    expect(dropUnfoundedCorpus(d2Pool, d2Pool.slice(0, 3), twoTerms, {})).toEqual(d2Pool.slice(0, 3));
+  });
+
+  it("señal A: sin término ausente no dispara (la variante enterrada es de C-02/C-03)", () => {
+    const terms = termsOf("¿Cuál es el número de emergencias en Cuba?");
+    // cuba existe en el pool (df 3) pero ningún servido lo casa: el ranking
+    // lo enterró. Sin df 0 no hay firma de «corpus sin tema»: no cae.
+    const pool = [
+      ...Array.from({ length: 3 }, (_, i) => hit(`Cuba ${i}`, "El número de emergencias en Cuba y sus fases.")),
+      ...Array.from({ length: 7 }, (_, i) => hit(`Otro ${i}`, "El número de emergencias del territorio.")),
+    ];
+    const served = pool.slice(3, 6);
+    expect(dropUnfoundedCorpus(pool, served, terms, {})).toEqual(served);
+  });
+
+  // La forma de T2: el único término sin casar nombra el tipo de dato
+  // (dirección) y ese tipo no existe en el pool (df 0/7).
+  const t2Pool = [
+    hit("Cuba: quién avisa", "Según el Consulado de España en La Habana, desde un teléfono móvil se marca un 7 delante."),
+    hit("Cuba: fases", "El consulado de España avisa y La Habana escucha la radio."),
+    ...Array.from({ length: 5 }, (_, i) => hit(`España ${i}`, "España y sus avisos a los viajeros.")),
+  ];
+
+  it("señal B: el tipo de dato ausente hace caer la recuperación (la forma de T2)", () => {
+    const q = "¿Cuál es la dirección del consulado de España en La Habana?";
+    const served = t2Pool.slice(0, 2);
+    expect(dropUnfoundedCorpus(t2Pool, served, termsOf(q), { query: q })).toEqual([]);
+  });
+
+  it("señal B: calla cuando el corpus sí trae el tipo (df > 0, la señal se apaga sola)", () => {
+    const q = "¿Cuál es la dirección del consulado de España en La Habana?";
+    const pool = [...t2Pool, hit("Guía de La Habana", "La dirección del consulado aparece en la guía oficial.")];
+    const served = pool.slice(0, 2);
+    expect(dropUnfoundedCorpus(pool, served, termsOf(q), { query: q })).toEqual(served);
+  });
+
+  it("señal B: la exención del corpus del usuario y la forma interrogativa mandan", () => {
+    const q = "¿Cuál es la dirección del consulado de España en La Habana?";
+    const served = t2Pool.slice(0, 2);
+    // Un fragmento servido es del usuario: la señal B no cae nada.
+    expect(dropUnfoundedCorpus(t2Pool, served, termsOf(q), { query: q, servedFromUser: [true, false] })).toEqual(served);
+    // Sin forma de pregunta de dato no hay señal, aunque el tipo falte (df 0).
+    const explain = "explicame el precio de la luz en España";
+    const pool = Array.from({ length: 6 }, (_, i) => hit(`Luz ${i}`, "La luz en España y su consumo en el hogar."));
+    expect(dropUnfoundedCorpus(pool, pool.slice(0, 2), termsOf(explain), { query: explain })).toEqual(pool.slice(0, 2));
+  });
+
+  it("señal B (C-05b): la forma «¿A qué + tipo…?» dispara como su gemela «¿Cuál es…?» (A8-01)", () => {
+    // Pool < 8 a propósito: la señal A no puede ser la causa. El
+    // fragmento casa solicitud+visa y el tipo (correo) no existe en el
+    // pool; solo el marco decide, y «a qué» no lo formaba.
+    const pool = [
+      hit("Solicitud de la visa", "La solicitud de la visa se manda con el pasaporte y la foto en la ventanilla."),
+      ...Array.from({ length: 4 }, (_, i) => hit(`Trámites ${i}`, "Los trámites y sus fases en la oficina.")),
+    ];
+    const served = pool.slice(0, 1);
+    const gemela = "¿Cuál es el correo para la solicitud de la visa?";
+    expect(dropUnfoundedCorpus(pool, served, termsOf(gemela), { query: gemela })).toEqual([]);
+    const aQue = "¿A qué correo mando la solicitud de la visa?";
+    expect(dropUnfoundedCorpus(pool, served, termsOf(aQue), { query: aQue })).toEqual([]);
+  });
+
+  it("señal B (C-05b): el veto de procedimiento — el tipo mencionado de pasada no hace caer la respuesta (A8-03)", () => {
+    // La forma construida de la adversaria-8: una respuesta real de la
+    // casa que sí responde cómo proceder. «¿Qué hago si…?» es el marco
+    // de procedimiento y «correo» va de pasada: la señal B calla.
+    const q = "¿Qué hago si no me llega el correo de confirmación?";
+    const pool = [
+      hit("Aviso de confirmación", "Si no te llega el aviso, revisa el buzón y espera la confirmación unas horas."),
+      ...Array.from({ length: 4 }, (_, i) => hit(`Avisos ${i}`, "Los avisos y sus fases de entrega.")),
+    ];
+    const served = pool.slice(0, 1);
+    expect(dropUnfoundedCorpus(pool, served, termsOf(q), { query: q })).toEqual(served);
+  });
+
+  it("señal B (C-05b): bajo dictado, el marco se busca en la frase que lleva el tipo (A8-02)", () => {
+    // «Oye, ¿dónde queda eso?» abre y el tipo va en la segunda oración,
+    // gobernado por «Necesito»: la frase que lleva el tipo sí abre como
+    // pregunta de dato dictada, y la señal dispara como en T2.
+    const q = "Oye, ¿dónde queda eso? Necesito la dirección del consulado de España en La Habana, es para un trámite.";
+    const pool = [
+      hit("Consulado de España en La Habana", "El consulado de España en La Habana atiende el trámite de la visa; la cita queda registrada donde indica la oficina."),
+      ...Array.from({ length: 4 }, (_, i) => hit(`Oficinas ${i}`, "Las oficinas y sus avisos a los viajeros.")),
+    ];
+    const served = pool.slice(0, 1);
+    expect(dropUnfoundedCorpus(pool, served, termsOf(q), { query: q })).toEqual([]);
+  });
+
+  // ── C-05c: la familia del veto, no su lista (A9-01) ─────────────────
+  // A9-01 (adversaria-9): el veto de C-05b cubre los verbos que enumera
+  // y no la familia «¿Qué + verbo…?». En todas estas construcciones el
+  // pool es < 8 (la señal A descartada como causa por construcción) y el
+  // servido casa un término discriminativo del tema (confirmación,
+  // consulado, solicitud) con el tipo a df 0: solo el marco decide.
+  const poolAviso = [
+    hit("Aviso de confirmación", "Si no te llega el aviso, revisa el buzón y espera la confirmación unas horas."),
+    ...Array.from({ length: 4 }, (_, i) => hit(`Avisos ${i}`, "Los avisos y sus fases de entrega.")),
+  ];
+  const poolConsulado = [
+    hit("Consulado de España en La Habana", "El consulado de España en La Habana atiende el trámite de la visa; la cita queda registrada donde indica la oficina."),
+    ...Array.from({ length: 4 }, (_, i) => hit(`Oficinas ${i}`, "Las oficinas y sus avisos a los viajeros.")),
+  ];
+  const poolVisa = [
+    hit("Solicitud de la visa", "La solicitud de la visa se manda con el pasaporte y la foto en la ventanilla."),
+    ...Array.from({ length: 4 }, (_, i) => hit(`Trámites ${i}`, "Los trámites y sus fases en la oficina.")),
+  ];
+  const senal = (pool: Array<{ title: string; body: string }>, q: string) =>
+    dropUnfoundedCorpus(pool, pool.slice(0, 1), termsOf(q), { query: q });
+
+  it("señal B (C-05c, §3.6): la forma dañina construida con «pasa» — la respuesta de la casa que sí responde qué hacer si el aviso no llega no cae", () => {
+    // La gemela de la fixture de A8-03 de arriba con el verbo cambiado:
+    // sobre la base de arranque caía (la señal B la retiraba), que es el
+    // daño de A8-03 reproducido con otro verbo sobre una respuesta
+    // verdadera, sin vecinos incidentales que lo disculpen.
+    const q = "¿Qué pasa si no me llega el correo de confirmación?";
+    expect(senal(poolAviso, q)).toEqual(poolAviso.slice(0, 1));
+  });
+
+  // La batería de familia del §5 del encargo, nacida por regla: tres
+  // clases de verbo (suceso, obligación —con «hacer», y la impersonal
+  // sin «hacer»—, modo/procedimiento) × dos tiempos (presente y
+  // condicional) × tres términos de tipo del vocabulario cerrado
+  // llevados de pasada (correo, dirección, precio: el dato mencionado
+  // dentro de la pregunta, nunca pedido). La regla de generación es
+  // esta tabla: 20 formas de verbo × 3 cláusulas = 60 preguntas, y cada
+  // una debe dar fundada = puerta (aquí: la señal no retira el servido).
+  // Sobre la base de arranque caían 45 (todo el suceso, la obligación no
+  // enumerada y el modo en condicional); las 15 con verbos del
+  // inventario viejo (debo hacer, tengo que hacer, hago, hacemos, se
+  // hace) ya servían y son el control interno de la batería.
+  const CLAUSULAS_FAMILIA: Array<{ tipo: string; texto: (v: string) => string; pool: typeof poolAviso }> = [
+    { tipo: "correo", texto: (v) => `¿Qué ${v} si no me llega el correo de confirmación?`, pool: poolAviso },
+    { tipo: "dirección", texto: (v) => `¿Qué ${v} si no tengo la dirección del consulado?`, pool: poolConsulado },
+    { tipo: "precio", texto: (v) => `¿Qué ${v} si sube el precio del trámite?`, pool: poolVisa },
+  ];
+  const FORMAS_FAMILIA: Array<{ clase: string; forma: string }> = [
+    { clase: "suceso presente", forma: "pasa" },
+    { clase: "suceso presente", forma: "ocurre" },
+    { clase: "suceso presente", forma: "sucede" },
+    { clase: "suceso condicional", forma: "pasaría" },
+    { clase: "suceso condicional", forma: "ocurriría" },
+    { clase: "suceso condicional", forma: "sucedería" },
+    { clase: "obligación presente", forma: "debo hacer" },
+    { clase: "obligación presente", forma: "tengo que hacer" },
+    { clase: "obligación presente", forma: "hay que hacer" },
+    { clase: "obligación condicional", forma: "debería hacer" },
+    { clase: "obligación condicional", forma: "tendría que hacer" },
+    { clase: "obligación condicional", forma: "habría que hacer" },
+    { clase: "obligación impersonal", forma: "se debe" },
+    { clase: "obligación impersonal", forma: "se debería" },
+    { clase: "modo presente", forma: "hago" },
+    { clase: "modo presente", forma: "hacemos" },
+    { clase: "modo presente", forma: "se hace" },
+    { clase: "modo condicional", forma: "haría" },
+    { clase: "modo condicional", forma: "se haría" },
+    { clase: "modo condicional", forma: "haríamos" },
+  ];
+  for (const { clase, forma } of FORMAS_FAMILIA) {
+    for (const clausula of CLAUSULAS_FAMILIA) {
+      it(`familia (C-05c) ${clase}: «¿Qué ${forma}…» con ${clausula.tipo} de pasada no funda la señal B`, () => {
+        const q = clausula.texto(forma);
+        expect(senal(clausula.pool, q)).toEqual(clausula.pool.slice(0, 1));
+      });
+    }
+  }
+
+  // Las formas de la familia 2 del juego de la adversaria de C-05c,
+  // regeneradas con su regla y su sesgo (ningún verbo de esta lista
+  // estaba en el inventario viejo del veto ni en los ejemplos del
+  // encargo): si la cura es la clase, las cubre sin haberlas visto en
+  // la batería de arriba. Sobre la base de arranque caían las 14.
+  const FORMAS_ADVERSARIA: Array<{ q: string; pool: typeof poolAviso }> = [
+    { q: "¿Qué acontece si no me llega el correo de confirmación?", pool: poolAviso },
+    { q: "¿Qué se produce si no me llega el correo de confirmación?", pool: poolAviso },
+    { q: "¿Qué acontecería si no me llegara el correo de confirmación?", pool: poolAviso },
+    { q: "¿Qué seguiría si no me llegara el correo de confirmación?", pool: poolAviso },
+    { q: "¿Qué toca hacer si no me llega el correo de confirmación?", pool: poolAviso },
+    { q: "¿Qué toca si no me llega el correo de confirmación?", pool: poolAviso },
+    { q: "¿Qué hace falta si no tengo la dirección del consulado?", pool: poolConsulado },
+    { q: "¿Qué haría falta si no tuviera la dirección del consulado?", pool: poolConsulado },
+    { q: "¿Qué procede si no me llega el correo de confirmación?", pool: poolAviso },
+    { q: "¿Qué aplica si no me llega el correo de confirmación?", pool: poolAviso },
+    { q: "¿Qué procedería si no me llegara el correo de confirmación?", pool: poolAviso },
+    { q: "¿Qué se produciría si subiera el precio del trámite?", pool: poolVisa },
+    { q: "¿Qué se necesita si el precio del trámite cambia a última hora?", pool: poolVisa },
+    { q: "¿Qué se recomienda si el precio de la cita sube?", pool: poolVisa },
+  ];
+  for (const { q, pool } of FORMAS_ADVERSARIA) {
+    it(`familia regenerada (C-05c): «${q}» no funda la señal B`, () => {
+      expect(senal(pool, q)).toEqual(pool.slice(0, 1));
+    });
+  }
+
+  it("señal B (C-05c, 6.7): «¿Qué es necesario hacer si no me llega el correo de confirmación?» sirve: tras la cópula no hay tipo, hay obligación — es procedimiento", () => {
+    // La gemela de desenlace opuesto de 6.6: sobre la base caía, porque
+    // el marco desnudo «¿qué…?» fundaba con el tipo de pasada. El par se
+    // juzga junto: la regla lee qué sigue a la cópula, no la cópula.
+    const q = "¿Qué es necesario hacer si no me llega el correo de confirmación?";
+    expect(senal(poolAviso, q)).toEqual(poolAviso.slice(0, 1));
+  });
+
+  // Las formas de dato genuino, intocables (§5, precio expreso): su
+  // desenlace medido sobre la base de arranque no cambia en ninguna
+  // dirección. Todas caen (la señal dispara) salvo donde se asienta
+  // otra cosa con su porqué.
+  it("control dato (C-05c, 6.6): «¿Qué es la dirección del consulado de España en La Habana?» cae: tras la cópula va el tipo", () => {
+    const q = "¿Qué es la dirección del consulado de España en La Habana?";
+    expect(senal(poolConsulado, q)).toEqual([]);
+  });
+
+  it("control dato (C-05c, 6.3): «¿Qué dirección tiene el consulado de España en La Habana?» cae: el tipo va tras «qué» y «tiene» llega después del tipo", () => {
+    const q = "¿Qué dirección tiene el consulado de España en La Habana?";
+    expect(senal(poolConsulado, q)).toEqual([]);
+  });
+
+  it("control dato (C-05c, 6.9): «¿Qué precio es el del trámite de la visa?» cae como su clase de dato con el dato ausente", () => {
+    const q = "¿Qué precio es el del trámite de la visa?";
+    expect(senal(poolVisa, q)).toEqual([]);
+  });
+
+  it("control dato (C-05c, 6.10): «¿Qué precio tiene el trámite de la visa?» cae como su clase de dato con el dato ausente", () => {
+    const q = "¿Qué precio tiene el trámite de la visa?";
+    expect(senal(poolVisa, q)).toEqual([]);
+  });
+
+  it("control dato (C-05c, 3.6): «Necesito la dirección del consulado de España en La Habana.» sola dispara: la necesidad con el tipo dentro de su frase funda la señal", () => {
+    const q = "Necesito la dirección del consulado de España en La Habana.";
+    expect(senal(poolConsulado, q)).toEqual([]);
+  });
+
+  // Resto nombrado medido en la base de arranque (fuera de la sede de
+  // esta tanda): las plurales «correos»/«emails»/«mails» no forman la
+  // señal porque la caza del tipo dentro de isDatumQuestion es por
+  // token exacto y el vocabulario cerrado no lista el plural de
+  // correo/email/mail (sí los de dirección/precio: «direcciones»,
+  // «precios»). Las tres sirven sobre la construcción de la
+  // adversaria-8 en la base, y esta tanda —que no toca el vocabulario—
+  // las fija con ese desenlace como controles de no-movimiento.
+  it("control resto (C-05c, 3.10): «¿Cuáles son los correos de contacto para la solicitud de la visa?» sirve como en la base: «correos» no es token del vocabulario cerrado", () => {
+    const q = "¿Cuáles son los correos de contacto para la solicitud de la visa?";
+    expect(senal(poolVisa, q)).toEqual(poolVisa.slice(0, 1));
+  });
+
+  it("control resto (C-05c, 3.11): «What are the contact emails for the visa application?» sirve como en la base: «emails» no es token del vocabulario cerrado", () => {
+    const q = "What are the contact emails for the visa application?";
+    expect(senal(poolVisa, q)).toEqual(poolVisa.slice(0, 1));
+  });
+
+  it("control resto (C-05c, 3.12): «Quais são os e-mails de contato para o pedido de visto?» sirve como en la base: «mails» no es token del vocabulario cerrado", () => {
+    const q = "Quais são os e-mails de contato para o pedido de visto?";
+    expect(senal(poolVisa, q)).toEqual(poolVisa.slice(0, 1));
+  });
+
+  it("control (C-05c, 6.8): «¿Qué hay en el correo que me llegó de la oficina?» no se veta como procedimiento: con el servido del usuario, la exención lo sirve", () => {
+    const q = "¿Qué hay en el correo que me llegó de la oficina?";
+    const served = poolAviso.slice(0, 1);
+    expect(dropUnfoundedCorpus(poolAviso, served, termsOf(q), { query: q, servedFromUser: [true] })).toEqual(served);
+  });
+
+  // Los tres precios declarados de C-05b, re-fixturados como controles
+  // (§4 del encargo; adversaria-9 los midió B-1 5/5, B-2 3/3, B-3 3/3 y
+  // la cota de rellenos en sus dos lados): la cura estructural no los
+  // renegocia.
+  it("precio B-1 (C-05c, 5.1): «¿Cómo es la dirección del consulado de España en La Habana?» se sirve: «cómo» queda del lado del veto", () => {
+    const q = "¿Cómo es la dirección del consulado de España en La Habana?";
+    expect(senal(poolConsulado, q)).toEqual(poolConsulado.slice(0, 1));
+  });
+
+  it("precio B-1 (C-05c, 5.2): «How is the address of the consulate of Spain in Havana?» se sirve y su gemela «What is the address…?» cae: el precio es bilingüe", () => {
+    const how = "How is the address of the consulate of Spain in Havana?";
+    expect(senal(poolConsulado, how)).toEqual(poolConsulado.slice(0, 1));
+    const what = "What is the address of the consulate of Spain in Havana?";
+    expect(senal(poolConsulado, what)).toEqual([]);
+  });
+
+  it("precio B-1 por frase (C-05c, 5.3): «Quiero resolver un trámite de la visa. ¿Cómo es el correo para la solicitud?» tampoco funda la señal", () => {
+    const q = "Quiero resolver un trámite de la visa. ¿Cómo es el correo para la solicitud?";
+    expect(senal(poolVisa, q)).toEqual(poolVisa.slice(0, 1));
+  });
+
+  it("precio B-2 (C-05c, 5.4): la mixta con primer marco de procedimiento queda vetada entera, aunque su segunda frase sola dispararía", () => {
+    const q = "¿Qué hago si no me llega el aviso de la cita? Necesito la dirección del consulado de España en La Habana.";
+    expect(senal(poolConsulado, q)).toEqual(poolConsulado.slice(0, 1));
+  });
+
+  it("precio B-2 espejo (C-05c, 5.5): dato primero y procedimiento después sí dispara: el veto es posicional, no de contenido", () => {
+    const q = "Necesito la dirección del consulado de España en La Habana. ¿Qué hago si no me llega el aviso de la cita?";
+    expect(senal(poolConsulado, q)).toEqual([]);
+  });
+
+  it("precio B-3 (C-05c, 5.6): la necesidad de otra cosa con el tipo mencionado en otra frase se sirve: la apertura de necesidad sola no dispara", () => {
+    const q = "Necesito renovar el pasaporte esta semana. La carta llegó al correo de la oficina.";
+    expect(senal(poolAviso, q)).toEqual(poolAviso.slice(0, 1));
+  });
+
+  it("precio B-3 (C-05c, 5.7): «Necesito el correo de la oficina para renovar el pasaporte.» dispara: el tipo dentro de la frase de necesidad", () => {
+    const q = "Necesito el correo de la oficina para renovar el pasaporte.";
+    expect(senal(poolAviso, q)).toEqual([]);
+  });
+
+  it("precio B-3 (C-05c, 5.8): «Necesito el correo de confirmación.» en declarativo cuenta como petición a efectos de la señal y dispara", () => {
+    const q = "Necesito el correo de confirmación.";
+    expect(senal(poolAviso, q)).toEqual([]);
+  });
+
+  it("cota de rellenos (C-05c, 5.9): con tres rellenos apilados el marco se alcanza y la señal dispara", () => {
+    const q = "Oye, bueno, mira, necesito la dirección del consulado de España en La Habana.";
+    expect(dropUnfoundedCorpus(t2Pool, t2Pool.slice(0, 2), termsOf(q), { query: q })).toEqual([]);
+  });
+
+  it("cota de rellenos (C-05c, 5.10): con cuatro rellenos el marco queda fuera y el fragmento se sirve", () => {
+    const q = "Oye, bueno, mira, hola, necesito la dirección del consulado de España en La Habana.";
+    expect(dropUnfoundedCorpus(t2Pool, t2Pool.slice(0, 2), termsOf(q), { query: q })).toEqual(t2Pool.slice(0, 2));
+  });
+
+  it("cota de rellenos (C-05c, 5.11): con cinco rellenos también se sirve: la cota vigente es 3", () => {
+    const q = "Oye, bueno, mira, hola, hey, necesito la dirección del consulado de España en La Habana.";
+    expect(dropUnfoundedCorpus(t2Pool, t2Pool.slice(0, 2), termsOf(q), { query: q })).toEqual(t2Pool.slice(0, 2));
+  });
+});

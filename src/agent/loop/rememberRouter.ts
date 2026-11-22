@@ -1,0 +1,999 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ */
+
+/**
+ * rememberRouter.ts — NIDO: pre-router determinístico para intents de memoria.
+ *
+ * BUG-4-2026-10-06 (root cause): el modelo 0.5B a veces responde "Listo"
+ * sin generar el bloque ```tool para remember_fact. El research externo
+ * confirmó que esto es un comportamiento documentado en modelos sub-1B
+ * (no un misterio de NIDO) y que la solución más confiable es hacer la
+ * persistencia de memoria system-driven, no agent-driven.
+ *
+ * Este módulo implementa el patrón `sheetmemory`/`guardian-agent`: antes
+ * de invocar al LLM, se hace match determinístico de intents explícitos
+ * de memoria ("recuerda que X") y se extrae el contenido directamente.
+ * Si hay match, el caller guarda el hecho sin pasar por el modelo.
+ *
+ * Puro, sin dependencias, 100% testeable.
+ */
+
+import { INTERROGATIVE_START_RE, isOrderLead, stripDateWords } from "./actionRouter.js";
+
+/** Resultado de la extracción determinística. */
+export interface RememberExtraction {
+  /** El contenido a guardar, en palabras del usuario. */
+  content: string;
+  /** Categoría sugerida basada en el contenido. */
+  category: "general" | "preference" | "goal" | "event";
+}
+
+/**
+ * Patrones de extracción: [regex, índice del grupo de captura].
+ * Ordenados de más específico a más general.
+ */
+const EXTRACTION_PATTERNS: Array<{
+  re: RegExp;
+  group: number;
+  /** F-PC55: la apertura comparte forma con la tarea; si el contenido
+   * abre con infinitivo, la captura es recordatorio y aquí cede. */
+  cedeInfinitivo?: boolean;
+}> = [
+  // "recuerda que el cumpleaños de mi mamá es el 15 de marzo"
+  { re: /recuerda( que|te que)?[:\s]+(.+)/i, group: 2, cedeInfinitivo: true },
+  // "recuérdame que X" / "recuerdame que X" (con pronombre "me")
+  { re: /recu[eé]rdame( que)?[:\s]+(.+)/i, group: 2 },
+  // "acuérdate de que X" / "acuérdate que X"
+  { re: /acu[eé]rdate( de)?( que)?[:\s]+(.+)/i, group: 3, cedeInfinitivo: true },
+  // 0.1.41 (prueba física): «que no se te olvide que el martes pago la
+  // renta» iba a conversación y el modelo lo repetía como «La respuesta
+  // es: …». Formas con «se»: «no se te olvide», «que no se te pase».
+  { re: /^(?:que\s+)?no\s+se\s+te\s+(?:olvide|pase)(?:\s+de)?(?:\s+que)?[:\s]+(.+)/i, group: 1, cedeInfinitivo: true },
+  // "no olvides que X" / "no te olvides de que X"
+  { re: /no (te )?olvides( de)?( que)?[:\s]+(.+)/i, group: 4, cedeInfinitivo: true },
+  // "guarda en tu memoria que X" / "guarda en memoria: X"
+  // NOTA: solo captura si hay "que" explícito después de "memoria",
+  // para evitar capturar cláusulas de propósito como "para que me avises".
+  { re: /gu[aá]rda\w*( esto| eso|lo|la)? en (tu |la )?memoria que[:\s]+(.+)/i, group: 3 },
+  // B11 (barrido «revisa todo», clase 1): el espejo pt de la forma
+  // anterior, «guarda na memória que X», y el calco en, «save in your
+  // memory that X» — la misma exigencia de «que»/«that» explícito.
+  { re: /guard[ae]\w* na mem[óo]ria que[:\s]+(.+)/i, group: 1 },
+  { re: /\bsave (?:this |that |it )?in your memory(?: that)?[:\s]+(.+)/i, group: 1 },
+  // "memoriza que X" / "memoriza: X"
+  { re: /memoriza(?:\s+que)?[:\s]+(.+)/i, group: 1 },
+  // 0.1.42 (barrido de 5 871 frases): formas frecuentes que caían a
+  // conversación o al modelo.
+  { re: /\btoma(?:r)? en cuenta que[:\s]+(.+)/i, group: 1 },
+  { re: /^quiero que (?:recuerdes|sepas|tengas en cuenta|guardes|memorices)(?: que)?[:\s]+(.+)/i, group: 1 },
+  { re: /^(?:para que lo sepas|que sepas|te cuento que|para tu informaci[oó]n)[,:]?\s+(.+)/i, group: 1 },
+  { re: /^(?:anota|apunta|guarda)(?:lo)? en (?:tu|la) memoria(?: que)?[:\s]+(.+)/i, group: 1 },
+  { re: /^(?:just so you know|fyi|for your information|for the record)[,:]?\s+(.+)/i, group: 1 },
+  { re: /^(?:make sure (?:you|to) remember|i want you to remember)(?: that)?[:\s]+(.+)/i, group: 1 },
+  { re: /^(?:s[oó] pra voc[eê] saber|quero que voc[eê] lembre)(?: que)?[,:]?\s+(.+)/i, group: 1 },
+  // 0.1.20 (M3): "guarda que X" a secas — la sonda mostró que solo
+  // funcionaba la forma larga "guarda en memoria que". No choca con
+  // "guarda una nota…" (esa frase no empieza con "guarda que" y la
+  // ruta de notas corre por toolRouter).
+  { re: /gu[aá]rda(?:te)? que[:\s]+(.+)/i, group: 1 },
+  // 0.1.41 (prueba física, Tab A9+): «ten en cuenta que llueve mañana»
+  // clasificaba como recordar pero ninguna extracción la reconocía: caía
+  // al modelo pequeño, que tardó 43 s en decir «no pude guardar eso».
+  // (No se añaden «anota que» / «apunta que» / «toma nota»: son notas,
+  // las resuelve toolRouter.)
+  { re: /\bten(?:ga|gan)? (?:muy |siempre )?en cuenta(?: siempre)? que[:\s]+(.+)/i, group: 1 },
+  { re: /\bten(?:ga|gan)? (?:muy |siempre )?en cuenta(?: esto| eso)?:\s*(.+)/i, group: 1 },
+  // 0.1.41 (prueba física): «a partir de ahora háblame de usted» caía al
+  // modelo, que vio «ahora» y respondió con la hora. Una indicación que
+  // vale «desde ahora» es una preferencia: se guarda ENTERA (sin el «a
+  // partir de ahora» el hecho pierde el sentido de regla permanente).
+  { re: /^((?:a partir de ahora|de ahora en adelante|desde ahora|a partir de hoy)[,:]?\s+\S.+)/i, group: 1 },
+  { re: /^((?:from now on|going forward)[,:]?\s+\S.+)/i, group: 1 },
+  { re: /^((?:a partir de agora|de agora em diante|daqui (?:em|pra) frente)[,:]?\s+\S.+)/i, group: 1 },
+  // "apunta esto para siempre: X"
+  { re: /apunta (esto|eso) para (siempre|despu[eé]s)[:\s]+(.+)/i, group: 3 },
+  // Inglés: "remember that X" / "remember: X"
+  // 0.1.37 (auditoría): solo como orden (al principio o con «please»);
+  // «I can't remember the capital of Peru» guardaba «the capital of Peru».
+  { re: /^(?:(?:please|hey|ok|okay|nido|also|and)[,!]?\s+)*remember( that)?[:\s]+(.+)/i, group: 2 },
+  { re: /\bplease\s+remember( that)?[:\s]+(.+)/i, group: 2 },
+  // 0.1.41: "keep in mind that X" / "bear in mind that X" (como orden).
+  { re: /^(?:(?:please|hey|ok|okay|nido|also|and)[,!]?\s+)*(?:keep|bear) in mind(?: that)?[:\s]+(.+)/i, group: 1 },
+  // Inglés: "don't forget that X"
+  { re: /don't forget( that)?[:\s]+(.+)/i, group: 2, cedeInfinitivo: true },
+  // F-PC55: el gemelo sin contraer, "do not forget that X".
+  { re: /do not forget( that)?[:\s]+(.+)/i, group: 2, cedeInfinitivo: true },
+  // 0.1.14: portugués — "lembre que X", "me lembra que X", "lembre-se de que X".
+  { re: /lembr[ae](?:-se)?(?: de)? que[:\s]+(.+)/i, group: 1 },
+  // 0.1.41: "tenha em mente que X" / "leve em conta que X".
+  { re: /(?:tenha|tenham|tem) em mente que[:\s]+(.+)/i, group: 1 },
+  { re: /leve em (?:conta|considera[cç][aã]o) que[:\s]+(.+)/i, group: 1 },
+  // "não esqueça que X" / "não se esqueça de que X"
+  { re: /n[aã]o (?:se )?esque[cç]a(?: de)? que[:\s]+(.+)/i, group: 1 },
+];
+
+/**
+ * Detecta si el texto contiene un patrón de fecha (para sugerir categoría).
+ * Reutiliza la lógica simple: busca patrones de fecha comunes.
+ */
+function detectCategory(content: string): RememberExtraction["category"] {
+  const lower = content.toLowerCase();
+  // Eventos: fechas, cumpleaños, aniversarios, citas.
+  // B16 (barrido «revisa todo», clase 1): la familia era es-céntrica —
+  // «birthday»/«aniversário» y los meses en/pt caían a «general». Solo
+  // metadatos: el recordatorio por fecha sale de extractDateISO, no
+  // de la categoría.
+  if (
+    /cumplea[ñn]os|aniversario|anivers[aá]rio|birthday|\d{1,2} de (enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|janeiro|fevereiro|março|maio|junho|julho|setembro|outubro|novembro|dezembro)|(?:january|february|march|april|may|june|july|august|september|october|november|december) \d{1,2}|el \d{1,2}\/\d{1,2}|cita|reuni[óo]n|evento/i.test(
+      content
+    )
+  ) {
+    return "event";
+  }
+  // Preferencias: "me gusta", "prefiero", "no me gusta" y las reglas que
+  // valen «desde ahora» (0.1.41). B16: «i like» / «eu gosto» entran.
+  if (
+    /me gusta|prefiero|no me gusta|odio|amo|favorit|\bi like\b|eu gosto/i.test(lower) ||
+    /^(?:a partir de (?:ahora|hoy|agora)|de ahora en adelante|desde ahora|from now on|going forward|de agora em diante|daqui (?:em|pra) frente)\b/i.test(lower)
+  ) {
+    return "preference";
+  }
+  // Metas: "quiero", "mi objetivo", "mi meta". B16: «i want» / «eu quero».
+  if (/quiero|mi objetivo|mi meta|prop[óo]sito|\bi want\b|eu quero/i.test(lower)) {
+    return "goal";
+  }
+  return "general";
+}
+
+/**
+ * Patrones de CONSULTA (no guardar): el usuario PIDE información de memoria,
+ * no está proporcionando un hecho nuevo. Ej: "recuérdame la fecha de
+ * cumpleaños de mi mamá" — aquí no hay fecha que guardar, es una pregunta.
+ * Si el pre-router extrajera esto como hecho, guardaría "la fecha de
+ * cumpleaños de mi mamá" como texto sin fecha (el bug reportado 2026-10-07).
+ */
+const QUERY_PATTERNS: RegExp[] = [
+  // "recuérdame la fecha de X" / "recuerdame cuando es X"
+  /recu[eé]rdame (la fecha de|cu[áa]ndo es|cu[áa]l es)/i,
+  // "dime la fecha de X" / "cuál es la fecha de X"
+  /(dime|cu[áa]l es) la fecha de/i,
+  // "¿cuándo es el cumpleaños de X?"
+  /cu[áa]ndo es el cumplea[ñn]os de/i,
+  // F-PC40 (serie de curas): las gemelas en y pt de los tres patrones;
+  // sin ellas la consulta en/pt se guardaba como hecho. La gemela en
+  // del segundo patrón («tell me / what is the date of») NO entra en
+  // esta tanda: medida contra el árbol, clasifica «what is the date
+  // of the concert» como consulta de memoria y rompe la guarda R-06
+  // de intent (las gemelas es del mismo patrón sí clasifican así en
+  // la base: la paridad de esa rama queda como hueco declarado en el
+  // asiento de cierre de la tanda R, para dirimen con su enmienda).
+  /remember (?:me )?(?:the date of|when is|what is)/i,
+  /when is (?:the )?birthday of/i,
+  /lembra (?:que dia (?:é|e)|qual (?:é|e) a data)/i,
+  /(?:me (?:diz|diga)|qual (?:é|e)) a data d[aeo]/i,
+  /quando (?:é|e) o anivers[áa]rio d[aeo]/i,
+];
+
+/**
+ * Detecta si el texto es una CONSULTA de memoria (pedir info) en vez de
+ * un guardado. Retorna true si es consulta.
+ */
+export function isMemoryQuery(userText: string): boolean {
+  const trimmed = userText.trim();
+  if (!trimmed) return false;
+  return QUERY_PATTERNS.some((re) => re.test(trimmed));
+}
+
+/**
+ * Limpia instrucciones trailing del contenido extraído.
+ * Ej: "my mom's birthday is March 15th. Save it so you can remind me in time."
+ * → "my mom's birthday is March 15th"
+ */
+function stripTrailingInstructions(content: string): string {
+  // Patrones de instrucciones que no son parte del hecho.
+  const patterns = [
+    /\.?\s*save it so you can remind me in time\.?$/i,
+    /\.?\s*guárdalo para que me avises con tiempo\.?$/i,
+    /\.?\s*para que me avises con tiempo\.?$/i,
+    /\.?\s*no lo olvides\.?$/i,
+  ];
+  let result = content.trim();
+  for (const re of patterns) {
+    result = result.replace(re, "").trim();
+  }
+  // 0.1.34 (ejemplo «Memoria privada» del carrusel, es/pt): la petición
+  // final («Guárdalo en tu memoria…», «Guarde para me avisar com
+  // antecedência») se guardaba dentro del hecho. Se quitan las frases
+  // finales que son una ORDEN a NIDO, no parte de lo que hay que recordar.
+  const ORDER_RE =
+    /^(?:gu[aá]rd(?:a|alo|ala|e|ar)|save|keep|store|av[ií]sa(?:me)?|recu[eé]rd(?:a|amelo)|no\s+lo\s+olvides|don'?t\s+forget|lembr(?:e|a)|n[aã]o\s+esque[cç]a|me\s+avis[ae])\b/i;
+  for (;;) {
+    const cut = result.search(/[.!;]\s+[^.!;]+[.!;]?$/);
+    if (cut < 0) break;
+    const tail = result.slice(cut + 1).trim();
+    if (!ORDER_RE.test(tail)) break;
+    result = result.slice(0, cut).trim();
+  }
+  // «…es el 15 de marzo y que le gustan…»: el «que» repetido sobra.
+  result = result.replace(/\by que\b/gi, "y").replace(/[.!;]+$/, "").trim();
+  return result;
+}
+
+/**
+ * 0.1.34: título corto del aviso que crea un hecho con fecha. «el
+ * cumpleaños de mi mamá es el 15 de marzo y le gustan las orquídeas» →
+ * «Cumpleaños de mi mamá». Si no hay forma clara, el hecho entero.
+ */
+export function reminderTitleForFact(content: string): string {
+  const m = /^((?:el\s+|o\s+)?(?:cumplea[ñn]os|aniversario|anivers[aá]rio)\s+(?:de|da|do)\s+.+?|my\s+.+?(?:'s)?\s+birthday|.+?'s\s+birthday)\s+(?:es|is|é|será|will be)(?=\s|$)/i.exec(
+    content.trim(),
+  );
+  if (!m) return content;
+  const t = m[1].replace(/^(?:el|o)\s+/i, "").trim();
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+const MESES: Record<string, number> = {
+  enero: 0, febrero: 1, marzo: 2, abril: 3, mayo: 4, junio: 5,
+  julio: 6, agosto: 7, septiembre: 8, setiembre: 8, octubre: 9, noviembre: 10, diciembre: 11,
+  // Portugués (batería trilingüe 0.1.20): sin estos nombres, «15 de
+  // março» nunca parseaba y el cumpleaños PT no generaba recordatorio.
+  janeiro: 0, fevereiro: 1, "março": 2, maio: 4, junho: 5, julho: 6,
+  setembro: 8, outubro: 9, novembro: 10, dezembro: 11,
+};
+
+/**
+ * Extrae una fecha de un texto en español (ej: "15 de marzo").
+ * Retorna la fecha ISO (año actual, o el siguiente si ya pasó) o null.
+ */
+export function extractDateISO(text: string, lang: "es" | "en" | "pt" = "es"): string | null {
+  // Español: "15 de marzo"
+  const mEs = /(\d{1,2}) de (enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|janeiro|fevereiro|março|maio|junho|julho|setembro|outubro|novembro|dezembro)/i.exec(text);
+  if (mEs) {
+    const day = parseInt(mEs[1], 10);
+    const month = MESES[mEs[2].toLowerCase()];
+    if (day >= 1 && day <= 31 && month !== undefined) {
+      return nextOccurrence(month, day);
+    }
+  }
+  // Inglés: "March 15th", "March 15"
+  const mEn = /(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?/i.exec(text);
+  if (mEn) {
+    const monthNames: Record<string, number> = {
+      january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+      july: 6, august: 7, september: 8, october: 9, november: 10, december: 11,
+    };
+    const month = monthNames[mEn[1].toLowerCase()];
+    const day = parseInt(mEn[2], 10);
+    if (day >= 1 && day <= 31 && month !== undefined) {
+      return nextOccurrence(month, day);
+    }
+  }
+  // 0.1.20 (M6): fechas numéricas "05/11", "11/05/2027". La sonda mostró
+  // que solo servían con el mes en letras: un cumpleaños dictado con
+  // números no generaba su recordatorio automático. Separadores / y -
+  // únicamente (el punto es decimal en "cuesta 3.5": fail-closed).
+  const mNum = /(?<!\d)(\d{1,2})[/-](\d{1,2})(?:[/-](\d{4}|\d{2}))?(?!\d)/.exec(text);
+  if (mNum) {
+    // Auditoría completa 2026-10-31 (F1 B-5): sin año, «1/2» también
+    // es la fracción de una receta: «lleva 1/2 taza de azúcar»
+    // creaba un recordatorio el 1 de febrero. Si lo que sigue es
+    // una unidad de medida, es fracción, no fecha. Sin unidad la
+    // ambigüedad queda (un cumpleaños «el 5/11» no lleva unidad):
+    // manda la fecha, que es el comportamiento asentado de M6.
+    if (!mNum[3]) {
+      const after = text.slice(mNum.index + mNum[0].length);
+      if (/^\s+(?:de\s+|of\s+)?(tazas?|cups?|x[ií]caras?|cucharadas?|cucharaditas?|colher(?:es|adas?)?|kilos?|kg|gramos?|gramas?|litros?|liters?|ml|horas?|hours?|minutos?|minutes?)\b/i.test(after)) {
+        return null;
+      }
+    }
+    const a = parseInt(mNum[1], 10);
+    const b = parseInt(mNum[2], 10);
+    // Desambiguación: si un lado pasa de 12, ese lado es el día. Si
+    // ambos ≤ 12, manda el idioma (ES/PT: D/M; EN: M/D).
+    let day: number;
+    let month: number;
+    if (a > 12 && b >= 1 && b <= 12) {
+      day = a;
+      month = b;
+    } else if (b > 12 && a >= 1 && a <= 12) {
+      month = a;
+      day = b;
+    } else if (lang === "en") {
+      month = a;
+      day = b;
+    } else {
+      day = a;
+      month = b;
+    }
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+      if (mNum[3]) {
+        // Con año explícito: esa fecha concreta (09:00 local). Si ya
+        // pasó, no hay recordatorio que crear: null.
+        const year = mNum[3].length === 2 ? 2000 + parseInt(mNum[3], 10) : parseInt(mNum[3], 10);
+        const d = new Date(year, month - 1, day, 9, 0, 0);
+        if (d.getMonth() === month - 1 && d.getDate() === day && d.getTime() >= Date.now()) {
+          return d.toISOString();
+        }
+        return null;
+      }
+      return nextOccurrence(month - 1, day);
+    }
+  }
+  return null;
+}
+
+/** Calcula la próxima ocurrencia futura de un día/mes (para cumpleaños). */
+/** M5 FIX 2026-10-07: valida que la fecha exista. "31 de febrero" retorna null
+ * en vez de hacer rollover silencioso a marzo. */
+function nextOccurrence(month: number, day: number): string | null {
+  // Validar que el día existe en ese mes (usar año bisiesto 2024 para febrero 29).
+  const testDate = new Date(2024, month, day);
+  if (testDate.getMonth() !== month || testDate.getDate() !== day) {
+    return null; // Fecha inexistente como "31 de febrero" o "32 de enero".
+  }
+  // Auditoría ofensiva (0.1.18): validar en el año en que cae. Un cumpleaños
+  // el 29 de febrero, en un año no bisiesto, se convertía en el 1 de marzo.
+  const now = new Date();
+  for (let year = now.getFullYear(); year <= now.getFullYear() + 8; year++) {
+    const candidate = new Date(year, month, day, 9, 0, 0);
+    if (candidate.getMonth() !== month || candidate.getDate() !== day) continue;
+    if (candidate.getTime() >= now.getTime()) return candidate.toISOString();
+  }
+  return null;
+}
+
+/** Resultado de la extracción de persona. */
+export interface PersonExtraction {
+  name: string;
+  relationship?: string;
+  notes?: string;
+}
+
+/**
+ * 0.1.20 (evidencia Tab A9+): el extractor original exigía los parentescos
+ * CON acento («mamá») y el nombre con mayúscula inicial. El usuario
+ * escribió «Mi mama se llama Marta» (sin acento, como se escribe en un
+ * teclado) y no hubo match: el mensaje cayó a la búsqueda de conocimiento
+ * y la persona nunca se guardó. Ahora los parentescos aceptan la forma
+ * con y sin acento, el nombre puede empezar en minúscula y hay patrones
+ * en portugués. La relación se guarda en su forma canónica con acento.
+ */
+const ES_REL =
+  "mamá|mama|papá|papa|madre|padre|hermano|hermana|esposo|esposa|hijo|hija|novio|novia|amigo|amiga|tío|tio|tía|tia|primo|prima|abuelo|abuela|sobrino|sobrina|cuñado|cuñada|cunado|cunada|suegro|suegra|yerno|nuera|nieto|nieta|compadre|comadre|pareja";
+const PT_REL =
+  "mãe|mae|pai|irmão|irmao|irmã|irma|esposa|marido|esposo|filho|filha|namorado|namorada|amigo|amiga|tio|tia|primo|prima|avô|avo|avó|sobrinho|sobrinha|cunhado|cunhada|sogro|sogra|genro|nora|neto|neta|compadre|comadre|parceiro|parceira";
+/**
+ * Nombre: corrida de 1 a 3 palabras (la validación fina va en
+ * validName, en código, porque con la bandera /i las clases de
+ * mayúsculas también aceptan minúsculas y el regex solo no basta).
+ * Las clases incluyen las letras del portugués (ã õ ç â ê ô à).
+ */
+const NAME_SRC = "[A-Za-zÁÉÍÓÚÑÜÀÂÊÔÃÕÇáéíóúñüàâêôãõç]+(?: [A-Za-zÁÉÍÓÚÑÜÀÂÊÔÃÕÇáéíóúñüàâêôãõç]+){0,2}";
+/** Palabras que jamás son un nombre en estas posiciones («se llama como…»). */
+// Pruebas adversarias del 2026-11-03: la negación tampoco es nombre.
+// «recuerda que mi papá no se llama Juan» creaba a la persona «No Se»,
+// «my dad is not named John» a «Not Named» y «my name is not Aldo»
+// guardaba el nombre propio «Not Aldo».
+const NOT_A_NAME = /^(como|así|asi|igual|también|tambien|bien|mal|todo|eso|esto|aquí|aqui|ahora|la|el|los|las|un|una|atención|atencion|se|me|te|le|que|de|en|y|e|no|not|never|nunca|jamás|jamas|não|nao|nem|ya|ni|isn't|isnt)$/i;
+/** Segunda palabra que corta el nombre: verbos típicos tras un nombre. */
+// 0.1.37 (auditoría): conjunciones y posesivos tampoco son apellido
+// («Ana y su cumpleaños…» guardaba «Ana Y»; en/pt «Ana And», «Ana E»).
+const NAME_STOP_SECOND =
+  /^(cumple|vive|trabaja|estudia|tiene|es|está|esta|va|viene|llega|juega|come|duerme|y|e|o|u|ou|and|or|but|pero|mas|que|su|sus|seu|sua|his|her|their|who|is|lives|works|has)$/i;
+const STARTS_UPPER = /^[A-ZÁÉÍÓÚÑÜÀÂÊÔÃÕÇ]/;
+
+const CANON_REL: Record<string, string> = {
+  mama: "mamá",
+  papa: "papá",
+  tio: "tío",
+  tia: "tía",
+  mae: "mãe",
+  irmao: "irmão",
+  irma: "irmã",
+  avo: "avô",
+  cunado: "cuñado",
+  cunada: "cuñada",
+};
+
+function tidyName(raw: string): string {
+  return raw
+    .trim()
+    .split(/\s+/)
+    .map((w) => (w ? w.charAt(0).toUpperCase() + w.slice(1) : w))
+    .join(" ");
+}
+
+function validName(raw: string): string | null {
+  const words = raw.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0 || NOT_A_NAME.test(words[0])) return null;
+  // Cuántas palabras de la corrida son nombre de verdad:
+  // - si la 2ª va capitalizada en el original, la cadena de palabras
+  //   capitalizadas manda («Juan Pérez», «Mary Jane Watson»).
+  // - si va en minúscula, máximo 2 (nombre compuesto: «ana maría»),
+  //   y ninguna si es un verbo típico («juan cumple años» → «Juan»).
+  let keep = 1;
+  if (words.length > 1) {
+    if (STARTS_UPPER.test(words[1])) {
+      while (keep < words.length && keep < 3 && STARTS_UPPER.test(words[keep])) keep++;
+    } else if (!NAME_STOP_SECOND.test(words[1])) {
+      keep = 2;
+    }
+  }
+  const name = tidyName(words.slice(0, keep).join(" "));
+  return name.length >= 2 ? name : null;
+}
+
+/** Una pregunta no afirma nada: no crea personas ni guarda el nombre. */
+function looksLikeQuestion(t: string): boolean {
+  return /^\s*¿/.test(t) || /\?\s*$/.test(t);
+}
+
+function canonRel(raw: string): string {
+  const rel = raw.toLowerCase();
+  return CANON_REL[rel] ?? rel;
+}
+
+/**
+ * PEOPLE-FIX 2026-10-07: extrae personas del texto de forma
+ * determinística. Patrones: "mi mamá se llama María", "recuerda que mi
+ * hermano Juan...", "mi esposa se llama Ana".
+ *
+ * 0.1.20 (M4/M5): los patrones de «se llama» van ANCLADOS al inicio del
+ * mensaje (saludo o gatillo «recuerda que» opcionales). Sin anclar,
+ * «la esposa de mi hermano se llama Laura» guardaba a Laura con la
+ * relación «hermano». El plural («mis hijos se llaman Leo y Max»)
+ * devuelve dos personas.
+ */
+/**
+ * 0.1.34 (prueba física, Tab A9+): «Mi hermank se llama juan» — una tecla
+ * vecina en el parentesco y la persona no se guardaba. Corrige SOLO la
+ * palabra del parentesco en «mi X se llama» / «meu|minha X se chama»,
+ * cuando está a UNA letra de un parentesco conocido y esa letra es una
+ * tecla vecina en QWERTY (así «hermank» → «hermano» y no «hermana»). Si
+ * hay empate o dudas, no toca nada.
+ */
+const QWERTY_ROWS = ["qwertyuiop", "asdfghjklñ", "zxcvbnm"];
+function keyPos(c: string): [number, number] | null {
+  for (let r = 0; r < QWERTY_ROWS.length; r++) {
+    const i = QWERTY_ROWS[r].indexOf(c);
+    if (i >= 0) return [r, i];
+  }
+  return null;
+}
+function neighborKeys(a: string, b: string): boolean {
+  const pa = keyPos(a);
+  const pb = keyPos(b);
+  if (!pa || !pb) return false;
+  return Math.abs(pa[0] - pb[0]) <= 1 && Math.abs(pa[1] - pb[1]) <= 1;
+}
+function fixRelationWord(word: string, relations: readonly string[]): string | null {
+  const w = word.toLowerCase();
+  if (w.length < 5 || relations.includes(w)) return null;
+  const hits = relations.filter((r) => {
+    if (r.length !== w.length) return false;
+    let diff = -1;
+    for (let i = 0; i < r.length; i++) {
+      if (r[i] !== w[i]) {
+        if (diff >= 0) return false;
+        diff = i;
+      }
+    }
+    return diff >= 0 && neighborKeys(w[diff], r[diff]);
+  });
+  return hits.length === 1 ? hits[0] : null;
+}
+export function fixRelationTypos(text: string): string {
+  const es = ES_REL.split("|");
+  const pt = PT_REL.split("|");
+  return text
+    .replace(/(\bmi\s+)(\p{L}+)(\s+se\s+llama\b)/iu, (all, a, w, b) => {
+      const f = fixRelationWord(w, es);
+      return f ? a + f + b : all;
+    })
+    .replace(/(\b(?:meu|minha)\s+)(\p{L}+)(\s+(?:se\s+chama|chama-se)\b)/iu, (all, a, w, b) => {
+      const f = fixRelationWord(w, pt);
+      return f ? a + f + b : all;
+    });
+}
+
+export function extractPeople(userText: string): PersonExtraction[] {
+  const trimmed = fixRelationTypos(userText.trim());
+  if (!trimmed || looksLikeQuestion(trimmed)) return [];
+  const start = "^(?:(?:hola|buenas|oye)[,.\\s]+)?(?:recuerda(?:te)?(?:\\s+que)?[,\\s]+)?";
+
+  // F-PC59 (serie de curas): la extracción recoge a TODAS las personas
+  // del dictado, no solo la primera. Cada patrón rinde sus
+  // coincidencias y la salida va en el orden del texto, deduplicada
+  // por nombre plegado.
+  const found: Array<{ at: number; person: PersonExtraction }> = [];
+  const seen = new Set<string>();
+  const push = (
+    at: number,
+    rawName: string | null,
+    relationship: string,
+    notes?: string
+  ) => {
+    if (!rawName) return;
+    const name = validName(rawName);
+    if (!name) return;
+    const key = name
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push({
+      at,
+      person: notes ? { name, relationship, notes } : { name, relationship },
+    });
+  };
+
+  // Plural: "mis hijos se llaman Leo, Max y Ana" — la lista entera,
+  // partida por comas y por la conjunción, cada nombre validado.
+  const mp = new RegExp(
+    `${start}mis (hijos|hijas|hermanos|hermanas) se llaman (.+)`,
+    "i"
+  ).exec(trimmed);
+  if (mp) {
+    const relBase = mp[1].toLowerCase().replace(/s$/, "");
+    for (const raw of mp[2].split(/\s*,\s*|\s+y\s+/)) {
+      push(mp.index, raw.trim().replace(/[.!]+$/, ""), relBase, trimmed);
+    }
+  }
+
+  // Los singulares barren el texto en forma global. La cabecera de
+  // segmento (inicio, puntuación, conjunción o el saludo/gatillo de
+  // siempre) mantiene la precisión de 0.1.20: «la esposa de mi
+  // hermano se llama Laura» no casa, porque «mi hermano» no abre
+  // segmento.
+  const lead =
+    "(?:^|[,.;]\\s*|\\s+(?:y|e|and)\\s+|(?:hola|buenas|oye|olá|ola|oi|recuerda(?:te)?(?:\\s+que)?|lembr[ae](?:-se)?(?:\\s+de)?\\s+que)[,.\\s]+)";
+  const sweep: Array<{
+    re: RegExp;
+    nameGroup: number;
+    rel: (m: RegExpExecArray) => string;
+    notes?: boolean;
+  }> = [
+    // "mi mejor amigo se llama Diego"
+    {
+      re: new RegExp(`${lead}mi mejor (amigo|amiga) se llama (${NAME_SRC})`, "gi"),
+      nameGroup: 2,
+      rel: (m) => `mejor ${m[1].toLowerCase()}`,
+    },
+    // "mi [relación] se llama [Nombre]"
+    {
+      re: new RegExp(`${lead}mi (${ES_REL}) se llama (${NAME_SRC})`, "gi"),
+      nameGroup: 2,
+      rel: (m) => canonRel(m[1]),
+    },
+    // "recuerda que mi [relación] [Nombre]..." (sin «se llama»: si lo
+    // hay, el patrón anterior ya lo capturó; «se» está vetado como
+    // nombre).
+    {
+      re: new RegExp(`recuerda( que)? mi (${ES_REL}) (${NAME_SRC})`, "gi"),
+      nameGroup: 3,
+      rel: (m) => canonRel(m[2]),
+      notes: true,
+    },
+    // "my mom's name is Mary", "my brother is called John"
+    // B12 (barrido «revisa todo», clase 1): la lista gana los parentescos
+    // extendidos (uncle/aunt/grandfather/grandmother/cousin/nephew/
+    // niece) que es y pt ya creaban y REL_GROUPS ya sabe resolver.
+    // F-PC43 (serie de curas): tras niece entran grandson, granddaughter
+    // y partner, y el bloque extendido del censo (grandpa, grandma,
+    // godfather, godmother y los cinco -in-law).
+    {
+      re: new RegExp(
+        `${lead}my (mom|dad|mother|father|brother|sister|husband|wife|son|daughter|boyfriend|girlfriend|friend|uncle|aunt|grandfather|grandmother|cousin|nephew|niece|grandson|granddaughter|partner|grandpa|grandma|godfather|godmother|father-in-law|mother-in-law|brother-in-law|sister-in-law|son-in-law|daughter-in-law)(?:'s name)? is (?:called )?(${NAME_SRC})`,
+        "gi"
+      ),
+      nameGroup: 2,
+      rel: (m) => m[1].toLowerCase(),
+    },
+    // F-PC43: "my best friend is called Sam"
+    {
+      re: new RegExp(`${lead}my best friend is (?:called )?(${NAME_SRC})`, "gi"),
+      nameGroup: 1,
+      rel: () => "best friend",
+    },
+    // "se llama [Nombre], es mi [relación]"
+    {
+      re: new RegExp(`se llama (${NAME_SRC}),? es mi (${ES_REL})`, "gi"),
+      nameGroup: 1,
+      rel: (m) => canonRel(m[2]),
+    },
+    // PT: "minha mãe se chama Maria", "meu irmão chama-se João"
+    // F-PC58 (serie de curas): el artículo delante del posesivo entra,
+    // como el lado de consulta ya admite.
+    {
+      re: new RegExp(
+        `${lead}(?:[ao]\\s+)?(?:minha|meu) (${PT_REL}) (?:se chama|chama-se) (${NAME_SRC})`,
+        "gi"
+      ),
+      nameGroup: 2,
+      rel: (m) => canonRel(m[1]),
+    },
+    // F-PC43: "meu melhor amigo se chama Sam"
+    {
+      re: new RegExp(
+        `${lead}(?:meu|minha) melhor (amigo|amiga) se chama (${NAME_SRC})`,
+        "gi"
+      ),
+      nameGroup: 2,
+      rel: (m) => `melhor ${m[1].toLowerCase()}`,
+    },
+  ];
+  for (const s of sweep) {
+    let m: RegExpExecArray | null;
+    s.re.lastIndex = 0;
+    while ((m = s.re.exec(trimmed)) !== null) {
+      const raw = m[s.nameGroup];
+      const name = raw ? validName(raw) : null;
+      if (raw && name) {
+        push(m.index, raw, s.rel(m), s.notes ? trimmed : undefined);
+        // La captura de nombre puede comerse el puente hacia la
+        // presentación siguiente («Marta y mi»): el barrido reanuda
+        // tras el nombre validado, no tras la captura entera.
+        const nameAt = m[0].indexOf(raw);
+        if (nameAt >= 0) {
+          const kept = raw
+            .split(/\s+/)
+            .slice(0, name.split(" ").length)
+            .join(" ").length;
+          s.re.lastIndex = m.index + nameAt + kept;
+        }
+      }
+      if (s.re.lastIndex <= m.index) s.re.lastIndex = m.index + 1;
+    }
+  }
+
+  // F-PC43: los plurales en y pt, espejo del es, con su mapa de
+  // singular explícito.
+  const PLURAL_EN: Record<string, string> = {
+    kids: "kid",
+    children: "child",
+    sons: "son",
+    daughters: "daughter",
+    brothers: "brother",
+    sisters: "sister",
+  };
+  const mpEn = new RegExp(
+    `${lead}my (kids|children|sons|daughters|brothers|sisters) are called (${NAME_SRC}) and (${NAME_SRC})`,
+    "gi"
+  );
+  for (const m of trimmed.matchAll(mpEn)) {
+    const rel = PLURAL_EN[m[1].toLowerCase()];
+    if (rel) {
+      push(m.index, m[2], rel, trimmed);
+      push(m.index, m[3], rel, trimmed);
+    }
+  }
+  const PLURAL_PT: Record<string, string> = {
+    filhos: "filho",
+    filhas: "filha",
+    irmãos: "irmão",
+    irmãs: "irmã",
+  };
+  const mpPt = new RegExp(
+    `${lead}(?:meus|minhas) (filhos|filhas|irmãos|irmãs) se chamam (${NAME_SRC}) e (${NAME_SRC})`,
+    "gi"
+  );
+  for (const m of trimmed.matchAll(mpPt)) {
+    const rel = PLURAL_PT[m[1].toLowerCase()];
+    if (rel) {
+      push(m.index, m[2], rel, trimmed);
+      push(m.index, m[3], rel, trimmed);
+    }
+  }
+
+  // F-PC59 (c): la continuación sin verbo — «y mi papá José» tras una
+  // primera extracción; nunca abre por sí sola. El nombre va en su
+  // forma capitalizada: lo que sigue en minúscula es el verbo de la
+  // frase, no un apellido.
+  if (found.length) {
+    const NAME_UPPER_SRC =
+      "[A-ZÁÉÍÓÚÑÜÀÂÊÔÃÕÇ][A-Za-zÁÉÍÓÚÑÜÀÂÊÔÃÕÇáéíóúñüàâêôãõç]+(?: [A-ZÁÉÍÓÚÑÜÀÂÊÔÃÕÇ][A-Za-zÁÉÍÓÚÑÜÀÂÊÔÃÕÇáéíóúñüàâêôãõç]+){0,2}";
+    const cont: Array<{ re: RegExp; rel: (m: RegExpExecArray) => string }> = [
+      {
+        re: new RegExp(`\\s+(?:y|e)\\s+mi (${ES_REL}) (${NAME_UPPER_SRC})`, "gi"),
+        rel: (m) => canonRel(m[1]),
+      },
+      {
+        re: new RegExp(
+          `\\s+e\\s+(?:[ao]\\s+)?(?:meu|minha) (${PT_REL}) (${NAME_UPPER_SRC})`,
+          "gi"
+        ),
+        rel: (m) => canonRel(m[1]),
+      },
+      {
+        re: new RegExp(
+          `\\s+and\\s+my (mom|dad|mother|father|brother|sister|son|daughter) (${NAME_UPPER_SRC})`,
+          "gi"
+        ),
+        rel: (m) => m[1].toLowerCase(),
+      },
+    ];
+    for (const c of cont) {
+      for (const m of trimmed.matchAll(c.re)) {
+        // La clase de mayúsculas no discrimina bajo la bandera i: el
+        // recorte a la corrida capitalizada va en código.
+        const words = (m[2] ?? "").split(/\s+/).filter(Boolean);
+        const run: string[] = [];
+        for (const w of words) {
+          if (!STARTS_UPPER.test(w)) break;
+          run.push(w);
+        }
+        if (run.length) push(m.index, run.join(" "), c.rel(m));
+      }
+    }
+  }
+
+  return found.sort((a, b) => a.at - b.at).map((f) => f.person);
+}
+
+export function extractPerson(userText: string): PersonExtraction | null {
+  return extractPeople(userText)[0] ?? null;
+}
+
+/**
+ * 0.1.20 (evidencia Tab A9+): la presentación del PROPIO usuario no
+ * tenía ningún patrón — «Yo me llamo Ruben» caía al modelo, que lo
+ * repetía como loro y no guardaba nada. Devuelve el nombre propio o
+ * null. Solo mensajes que SON la presentación (con saludo opcional),
+ * no frases que la mencionan de paso.
+ */
+export function extractSelfName(userText: string): string | null {
+  if (looksLikeQuestion(userText.trim())) return null;
+  const t = userText
+    .trim()
+    .replace(/[.!]+$/, "")
+    // "you": el autocorrector de un teclado en inglés convierte «yo» en
+    // «you» — le pasó al usuario en la tablet («You me llamo Ruben»).
+    .replace(/^(hola|buenas|hi|hello|olá|ola|you)[,.\s]+/i, "");
+  if (!t || t.length > 80) return null;
+  const patterns = [
+    new RegExp(`^(?:yo\\s+)?me\\s+llamo\\s+(${NAME_SRC})$`, "i"),
+    new RegExp(`^mi\\s+nombre\\s+es\\s+(${NAME_SRC})$`, "i"),
+    new RegExp(`^my\\s+name\\s+is\\s+(${NAME_SRC})$`, "i"),
+    new RegExp(`^(?:o\\s+)?meu\\s+nome\\s+(?:é|e)\\s+(${NAME_SRC})$`, "i"),
+    new RegExp(`^eu\\s+me\\s+chamo\\s+(${NAME_SRC})$`, "i"),
+  ];
+  for (const re of patterns) {
+    const m = re.exec(t);
+    if (m) {
+      const name = validName(m[1]);
+      if (name) return name;
+    }
+  }
+  return null;
+}
+
+/**
+ * 0.1.20 (M2): hechos IMPLÍCITOS — afirmaciones sobre el usuario sin la
+ * palabra «recuerda». La sonda mostró 7/7 cayendo al modelo («mi
+ * cumpleaños es el 3 de mayo», «mi coche es un Toyota», «vivo en
+ * Tucson»). Patrones anclados y de alta precisión; corre DESPUÉS del
+ * extractor con gatillo y de personas/nombre propio, y en agentLoop
+ * llega cuando notas/recordatorios/calculadora ya pasaron, así que no
+ * roba frases de otras rutas.
+ *
+ * Fail-closed con datos sensibles: un valor con 7+ dígitos seguidos o
+ * un sustantivo tipo cuenta/tarjeta/clave NO se auto-guarda; eso solo
+ * entra con gatillo explícito («recuerda que…»), decisión del usuario.
+ */
+const SENSITIVE_NOUN = /cuenta|tarjeta|clave|contraseña|contrasena|password|pin|seguro|card|account|senha/i;
+const LONG_DIGITS = /\d{7,}/;
+
+// 0.1.41 (prueba física): «Por cierto,soy vegetariano» — una muletilla
+// delante (y sin espacio tras la coma) no cambia que sea un dato propio.
+const IMPLICIT_LEAD_RE =
+  /^(?:(?:por\s+cierto|a\s+prop[oó]sito|oye|ah|bueno|tambi[eé]n|btw|by\s+the\s+way|also|oh|aliás|alias|por\s+falar\s+nisso|ah[,!]?\s+e|tamb[eé]m)[,.!:]?\s*)+/i;
+
+// 0.1.41: dieta y alergias dichas de uno mismo. Lista cerrada (precisión >
+// cobertura): «soy vegetariano», «soy alérgico a las nueces», «tengo
+// alergia al polen», «no como cerdo», y sus formas en inglés y portugués.
+const DIET_ALLERGY_RES: RegExp[] = [
+  /^soy\s+(?:vegetarian[oa]|vegan[oa]|pescetarian[oa]|cel[ií]ac[oa]|diab[eé]tic[oa]|hipertens[oa]|asm[aá]tic[oa]|intolerante\s+a\s+(?:la\s+)?(?:lactosa|gluten|fructosa))$/i,
+  // 0.1.42 (barrido): estado civil y familia, datos estables de uno mismo.
+  /^(?:estoy|soy)\s+(?:casad[oa]|solter[oa]|divorciad[oa]|viud[oa]|comprometid[oa])$/i,
+  /^tengo\s+(?:un[oa]?|dos|tres|cuatro|cinco|\d)\s+(?:hij[oa]s?|niet[oa]s?|herman[oa]s?|perr[oa]s?|gat[oa]s?|mascotas?)$/i,
+  /^i(?:'m|\s+am)\s+(?:married|single|divorced|widowed|engaged|diabetic)$/i,
+  /^i\s+have\s+(?:a|an|one|two|three|four|five|\d)\s+(?:kids?|children|child|sons?|daughters?|brothers?|sisters?|dogs?|cats?|pets?|grandchildren)$/i,
+  /^(?:eu\s+)?(?:sou|estou)\s+(?:casad[oa]|solteir[oa]|divorciad[oa]|vi[uú]v[oa]|comprometid[oa]|diab[eé]tic[oa])$/i,
+  /^(?:eu\s+)?tenho\s+(?:um|uma|dois|duas|tr[eê]s|quatro|cinco|\d)\s+(?:filh[oa]s?|net[oa]s?|irm[aã][oa]?s?|cachorros?|gatos?)$/i,
+  /^soy\s+al[eé]rgic[oa]\s+a(?:l|\s+la|\s+los|\s+las)?\s+[\p{L}][\p{L}\s-]{1,30}$/iu,
+  /^tengo\s+alergia\s+a(?:l|\s+la|\s+los|\s+las)?\s+[\p{L}][\p{L}\s-]{1,30}$/iu,
+  /^no\s+(?:como|bebo|tomo)\s+(?:carne|cerdo|puerco|gluten|l[aá]cteos|alcohol|pescado|mariscos|az[uú]car|picante)$/i,
+  /^i(?:'m|\s+am)\s+(?:a\s+)?(?:vegetarian|vegan|pescatarian|celiac|hypertensive|asthmatic|lactose\s+intolerant|gluten\s+intolerant)$/i,
+  /^i(?:'m|\s+am)\s+allergic\s+to\s+[a-z][a-z\s-]{1,30}$/i,
+  /^i\s+(?:don't|do\s+not)\s+(?:eat|drink)\s+(?:meat|pork|gluten|dairy|alcohol|fish|seafood|sugar|spicy\s+food)$/i,
+  /^(?:eu\s+)?sou\s+(?:vegetarian[oa]|vegan[oa]|cel[ií]ac[oa]|pescetarian[oa]|hipertens[oa]|asm[aá]tic[oa]|intolerante\s+[aà]\s+lactose)$/i,
+  /^(?:eu\s+)?sou\s+al[eé]rgic[oa]\s+(?:a|ao|à|aos|às)\s+[\p{L}][\p{L}\s-]{1,30}$/iu,
+  /^(?:eu\s+)?tenho\s+alergia\s+(?:a|ao|à|aos|às)\s+[\p{L}][\p{L}\s-]{1,30}$/iu,
+  /^(?:eu\s+)?n[aã]o\s+(?:como|bebo)\s+(?:carne|porco|gl[uú]ten|latic[ií]nios|[aá]lcool|peixe|frutos\s+do\s+mar|a[cç][uú]car|picante)$/i,
+];
+
+export function extractImplicitFact(userText: string): RememberExtraction | null {
+  const t = userText
+    .trim()
+    .replace(/[.!]+$/, "")
+    .replace(IMPLICIT_LEAD_RE, "")
+    .trim();
+  if (!t || t.length > 200 || looksLikeQuestion(t) || isMemoryQuery(t)) return null;
+  const done = (content: string): RememberExtraction | null => {
+    const c = content.trim();
+    if (c.length < 3 || LONG_DIGITS.test(c)) return null;
+    return { content: c, category: detectCategory(c) };
+  };
+
+  // Cumpleaños / aniversario (propio o de una relación): categoría event
+  // vía detectCategory; agentLoop crea el recordatorio por la fecha.
+  if (
+    /^(?:mi|el|la)\s+(?:cumpleaños|cumpleanos|aniversario)\b/i.test(t) ||
+    /^(?:el|la)\s+(?:cumpleaños|cumpleanos|aniversario)\s+de\b/i.test(t) ||
+    /^(?:my|meu|minha|o|a)\s+(?:birthday|aniversário|aniversario)\b/i.test(t) ||
+    /^(?:the|o)\s+(?:birthday|aniversário)\s+(?:of|de|da|do)\b/i.test(t) ||
+    // 0.1.31 (auditoría del loop): «my mom's birthday is March 15» caía
+    // al conocimiento; el español y el portugués ya se guardaban.
+    /^my\s+[\p{L}' -]{1,30}'s\s+(?:birthday|anniversary)\b/iu.test(t)
+  ) {
+    return done(t);
+  }
+  if (DIET_ALLERGY_RES.some((re) => re.test(t))) {
+    return { content: t.charAt(0).toUpperCase() + t.slice(1), category: "preference" };
+  }
+  // "vivo en X" / "I live in X" / "moro em X" (1-4 palabras de lugar).
+  const home = /^(?:vivo en|i live in|moro em|eu moro em)\s+([\p{L}][\p{L}\s.'-]{1,40})$/iu.exec(t);
+  if (home && home[1].trim().split(/\s+/).length <= 4) return done(t);
+  // Favoritos: "mi X favorito/a es Y", "my favorite X is Y", PT.
+  if (
+    /^mi\s+.+\s+favorit[oa]\s+es\s+.+/i.test(t) ||
+    /^my\s+favorite\s+.+\s+is\s+.+/i.test(t) ||
+    /^meu\s+.+\s+favorito\s+(?:é|e)\s+.+/i.test(t) ||
+    /^minha\s+.+\s+favorita\s+(?:é|e)\s+.+/i.test(t)
+  ) {
+    return done(t);
+  }
+  // "trabajo en/de X" (ocupación o turno, valor corto).
+  const job = /^trabajo\s+(?:en|de)\s+(.{2,40})$/i.exec(t);
+  if (job && job[1].trim().split(/\s+/).length <= 4) return done(t);
+  // "mi <sustantivo curado> es/se llama <valor>": posesiones e identidad
+  // cotidiana. Lista cerrada a propósito: fuera de ella, sin gatillo
+  // no se guarda (precisión > cobertura en memoria automática).
+  const noun =
+    /^(mi)\s+(coche|carro|auto|teléfono|telefono|celular|banco|correo|dirección|direccion|equipo|perro|gato|mascota|ciudad|pueblo|trabajo)\s+(?:es|se llama)\s+(.+)$/i.exec(t) ||
+    /^(my)\s+(car|phone|bank|email|dog|cat|team|city|job)\s+is\s+(.+)$/i.exec(t) ||
+    /^(meu|minha)\s+(carro|telefone|celular|banco|correio|time|cachorro|gato|cidade|trabalho)\s+(?:é|e|se chama)\s+(.+)$/i.exec(t);
+  if (noun) {
+    if (SENSITIVE_NOUN.test(noun[2])) return null;
+    // El valor debe ser un dato (nombre/marca/lugar), no una descripción:
+    // «mi perro es un pastor alemán» sí; «mi perro es muy bonito y
+    // juega mucho en el parque» es charla, no un hecho durable.
+    if (noun[3].trim().split(/\s+/).length > 4) return null;
+    return done(t);
+  }
+  return null;
+}
+
+/**
+ * N-11: ¿el contenido capturado ES una pregunta? La guardia anterior
+ * probaba INTERROGATIVE_START_RE sobre el contenido tal cual, pero la
+ * regex está anclada al inicio y el contenido conserva el «¿» inicial:
+ * «Recuérdame: ¿cuál es la capital de Perú?» guardaba la pregunta como
+ * hecho (medido). Los extractores hermanos se protegen con
+ * looksLikeQuestion; este era el único que no. Regla: se pelan los
+ * «¿¡» iniciales y se prueba el inicio; y si el contenido TERMINA en
+ * «?» con una palabra interrogativa entre sus 3 primeras palabras,
+ * también es pregunta. Un hecho que CONTIENE una interrogativa sin
+ * serlo («mi hijo siempre pregunta por qué salen las estrellas», sin
+ * «?» final) se sigue guardando: la palabra desnuda «que» es
+ * complementante en los tres idiomas y no cuenta como interrogativa.
+ */
+export function isInterrogativeContent(content: string): boolean {
+  const c = (content ?? "").trim().replace(/^[¿¡]+/, "").trim();
+  if (!c) return false;
+  if (INTERROGATIVE_START_RE.test(c)) return true;
+  if (/\?\s*$/.test(c)) {
+    const words = c.split(/\s+/).slice(0, 3);
+    return words.some((w) => w.toLowerCase() !== "que" && INTERROGATIVE_START_RE.test(w));
+  }
+  return false;
+}
+
+/**
+ * Intenta extraer un hecho de memoria del texto del usuario de forma
+ * determinística. Retorna null si no hay un patrón explícito.
+ *
+ * Solo maneja casos claros y explícitos. Si el texto es ambiguo o no
+ * coincide con ningún patrón, retorna null y el flujo normal del agente
+ * (con el LLM) toma el control.
+ *
+ * FIX 2026-10-07: si es una consulta (isMemoryQuery), retorna null para
+ * no guardar la pregunta como hecho.
+ */
+/** ¿Abre el contenido con un infinitivo es/pt (con clítico opcional)?
+ *  Espejo de la guardia de F-PC55 en el extractor de recordatorios. */
+function factContentOpensWithInfinitive(content: string): boolean {
+  const first = (content.replace(/^de\s+/i, "").trim().split(/\s+/)[0] ?? "")
+    .toLowerCase()
+    .replace(/[^a-záéíóúñüçãõ]/g, "");
+  return (
+    first.length >= 3 &&
+    /(?:ar|er|ir)(?:me|te|se|nos|lo|la|los|las|le|les)?$/.test(first)
+  );
+}
+
+export function extractRememberFact(userText: string): RememberExtraction | null {
+  // 0.1.41: el teclado mete a veces dos espacios seguidos («olvide  que»);
+  // los patrones esperan uno.
+  const trimmed = userText.trim().replace(/[ \t]{2,}/g, " ");
+  if (!trimmed) return null;
+  // No guardar consultas como hechos.
+  if (isMemoryQuery(trimmed)) return null;
+
+  for (const { re, group, cedeInfinitivo } of EXTRACTION_PATTERNS) {
+    const match = re.exec(trimmed);
+    // 0.1.37 (auditoría): «traduce al inglés: recuérdame comprar pan» o
+    // «una canción que se llame recuérdame siempre» guardaban un hecho: el
+    // verbo tiene que abrir la orden (delante, solo fecha o cortesía).
+    if (match && match[group] && isOrderLead(trimmed.slice(0, match.index))) {
+      // FIX 2026-10-07: limpiar instrucciones trailing ("Save it so you can
+      // remind me in time") que no son parte del hecho.
+      const content = stripTrailingInstructions(match[group].trim());
+      // F-PC55: con la apertura marcada, un contenido en infinitivo es
+      // la tarea, no el hecho: la captura se rechaza y la extracción
+      // sigue con el resto de patrones.
+      if (cedeInfinitivo && factContentOpensWithInfinitive(content)) continue;
+      // Validación mínima: el contenido debe ser sustancial.
+      // 0.1.19 (sonda de routing): "recuerda mañana" guardaba el hecho
+      // basura "mañana". Si al quitar las palabras de fecha/hora no queda
+      // contenido, no hay hecho que guardar.
+      // 0.1.19 (segunda pasada de la sonda): "recuérdame cómo se llama la
+      // capital de Francia" — al dejar de ser recordatorio (guardia
+      // interrogativa) caía aquí y la PREGUNTA se guardaba como hecho.
+      // Una pregunta no es un hecho: mismo corte que en recordatorios.
+      if (content.length >= 3 && !isInterrogativeContent(content) && stripDateWords(content).trim().length >= 3) {
+        return {
+          content,
+          category: detectCategory(content),
+        };
+      }
+    }
+  }
+  // Pieza 5 (2026-11-01): «guarda <hecho>: <valor>» sin «que» — el
+  // imperativo con dos puntos («Guarda el teléfono de la clínica:
+  // 520-555-0147») no lo cazaba ningún patrón y caía al modelo. Marco
+  // propio, tras los patrones: las formas con «que» ya volvieron arriba.
+  return extractGuardaColonFact(trimmed);
+}
+
+/** Sujeto de nota: «guarda una nota: …» es NOTE_SAVE (toolRouter), no hecho.
+ *  B11 (vecina medida): la guarda no conocía el artículo pt «uma» y
+ *  «guarda uma nota: X» guardaba X como hecho de memoria. */
+const NOTE_SUBJECT_RE = /^(?:(?:una?|uma)\s+)?(?:nota|apunte|recado)\b/i;
+
+function extractGuardaColonFact(trimmed: string): RememberExtraction | null {
+  const m = /^gu[aá]rda(?:te)?\s+(.+)$/i.exec(trimmed);
+  if (!m) return null;
+  const rest = m[1];
+  const colon = rest.indexOf(":");
+  if (colon < 0) return null; // sin dos puntos no hay marco: «guarda la ropa…»
+  const subject = rest.slice(0, colon).trim();
+  const value = rest.slice(colon + 1).trim();
+  if (!subject || !value) return null;
+  if (NOTE_SUBJECT_RE.test(subject)) return null;
+  // Las formas ya cubiertas por patrones no se reinterpretan aquí.
+  if (/^(?:que\b|en\s+(?:tu|la)\s+memoria\b)/i.test(subject)) return null;
+  // El sujeto del marco es corto («el teléfono de la clínica»): un
+  // sujeto largo con dos puntos es prosa, no este imperativo.
+  if (subject.split(/\s+/).length > 6) return null;
+  const content = `${subject}: ${value}`;
+  if (content.length < 3 || isInterrogativeContent(content) || stripDateWords(content).trim().length < 3) {
+    return null;
+  }
+  return { content, category: detectCategory(content) };
+}

@@ -1,0 +1,85 @@
+name: Bug report
+description: Something in NIDO PC does not work as expected / Algo no funciona / Algo não funciona
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Privacy first.** Do NOT paste passwords, encryption keys, note or message contents, contact names, addresses or screenshots showing personal data. Describe the problem in your own words or blur the screenshot. You can write in English, Español or Português: only the fields marked required are needed.
+        **Privacidad primero.** NO pegues contraseñas, claves de cifrado, contenido de notas o mensajes, nombres de contactos, direcciones ni capturas con datos personales. Puedes escribir en español, English o Português: solo hacen falta los campos obligatorios.
+        **Privacidade primeiro.** NÃO cole senhas, chaves de criptografia, conteúdo de notas ou mensagens, nomes de contatos, endereços nem capturas com dados pessoais. Você pode escrever em Português, English ou Español: só os campos obrigatórios são necessários.
+        **Security vulnerability?** Do not open a public issue. Use the private channel: repo tab Security, then "Report a vulnerability". See SECURITY.md.
+        **Our commitment.** We read every report. Anything that can be fixed gets fixed in a later version; we do not promise dates.
+        **Nuestro compromiso.** Leemos todos los reportes. Todo lo que se puede arreglar se arregla en una versión posterior; no prometemos fechas.
+        **Nosso compromisso.** Lemos todos os relatos. Tudo o que pode ser corrigido é corrigido em uma versão posterior; não prometemos datas.
+  - type: textarea
+    id: what
+    attributes:
+      label: "What happened? / ¿Qué pasó? / O que aconteceu?"
+      description: Clear description of the problem, in your own words.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Steps to reproduce (optional) / Pasos para que pase (opcional) / Passos para reproduzir (opcional)"
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: "NIDO PC version and installer hash / Versión y huella del instalador / Versão e hash do instalador"
+      description: "Settings > About inside the app, or the sha256 shown next to the installer on the Releases page."
+      placeholder: "v1.0.0 / sha256:d9210..."
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: "Operating system (optional) / Sistema operativo (opcional) / Sistema operacional (opcional)"
+      placeholder: "Windows 11 24H2 / Ubuntu 24.04"
+    validations:
+      required: false
+  - type: textarea
+    id: expected
+    attributes:
+      label: "What did you expect instead? (optional)"
+  - type: input
+    id: ram
+    attributes:
+      label: "Computer RAM (optional, helps with model problems)"
+      placeholder: "16 GB"
+  - type: input
+    id: model
+    attributes:
+      label: "AI model in use (optional)"
+      description: As shown in Settings.
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: "How often does it happen? (optional)"
+      options:
+        - Always
+        - Often
+        - Sometimes
+        - Only once
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Error text or diagnostics (optional)"
+      description: Exact error message shown by the app. Remove anything personal first.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I removed personal data, passwords and note contents from this report.
+          required: true

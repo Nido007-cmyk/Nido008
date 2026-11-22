@@ -1,0 +1,12 @@
+# gitleaks config for NIDO PC.
+# The tree carries no secrets: no .env files, no keystores, no private
+# keys. The one key-shaped literal in the code is the SALVORA packs
+# PUBLIC verification key, which ships inside the app by design so the
+# app can verify pack signatures; it is allowlisted below by value.
+title = "NIDO PC gitleaks"
+
+[allowlist]
+description = "Public verification key (not a secret): the SALVORA packs public key the app ships to verify pack signatures."
+regexes = [
+    '''HfH4rO39agZVzybigFmWW1PPjqwb9bAFZBHkMqz/sHQ=''',
+]

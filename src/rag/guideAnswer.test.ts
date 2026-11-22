@@ -1,0 +1,353 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ *
+ * 0.1.59 — first aid answers word for word, and the negation guard. The
+ * texts are the real NIDO Essentials ones seen on the tablet.
+ *
+ * Recreación de PC (E3, tanda 5 · J-5): la batería corre contra las
+ * piezas recreadas en esta tanda (guideAnswer, guidePickCandidates)
+ * y contra pure.ts de J-1. CUATRO casos quedaron DIFERIDOS con
+ * nombre y tanda, no podados: el describe entero «guarda de
+ * negaciones en las respuestas del modelo (0.1.59)» ejercita la
+ * guarda de negaciones del juez (negationCount,
+ * closestSourceSentence y verifyGroundedAnswer de grounding.ts).
+ * COBRADOS en la tanda 8 (J-7): la fixture
+ * __fixtures__/diferidosJ5.ts perdió sus tres declaraciones (el
+ * fichero desaparece con su asiento), esta batería importa de
+ * ./grounding real y los 4 casos corren ejecutados en J-7 y no
+ * sumados en J-7 — heredados de J-5, corridos, no sumados
+ * (apertura de J-5, §3.2; apertura de J-7, §3.3).
+ */
+import { describe, it, expect } from "vitest";
+import { composeGuideAnswer, guideAnswerProvenance, GUIDE_MAX_CHARS, isEssentialsChunk, isLiteralGuideChunk, pickGuideChunk, type LiteralRouteContext } from "./guideAnswer.js";
+import { closestSourceSentence, negationCount, verifyGroundedAnswer } from "./grounding.js";
+import { buildLexicalQuery, countMatchedTerms } from "./pure.js";
+
+const CHEST = `Qué hacer
+1. Llama de inmediato al número de emergencias.
+2. Que la persona deje de hacer esfuerzo. Siéntala semirrecostada, en la posición más cómoda.
+3. Si es un adulto despierto, no es alérgico a la aspirina, no está sangrando y su médico no se lo ha prohibido: que mastique una aspirina para adultos (entre 162 y 325 mg, o 2 a 4 aspirinas infantiles de 81 mg) y la trague.
+4. Si tiene medicación recetada para la angina (nitroglicerina), ayúdala a tomarla.`;
+
+const chunk = (id: string, title: string, body: string, rawScore?: number, matchType: "lexical" | "semantic" | "hybrid" = "semantic") => ({
+  chunkId: id, docId: id, title, body, score: 1, rawScore, matchType,
+});
+
+describe("respuesta desde la guía, sin modelo (0.1.59)", () => {
+  it("solo los packs de NIDO Esencial", () => {
+    expect(isEssentialsChunk("pack:nido-esencial:12")).toBe(true);
+    expect(isEssentialsChunk("pack:nido-esencial-e5:12")).toBe(true);
+    expect(isEssentialsChunk("pack:wiki-vital5:12")).toBe(false);
+    expect(isEssentialsChunk("corpus-standard:1")).toBe(false);
+  });
+
+  it("la vía literal también cubre NIDO Niños (primeros auxilios), y ningún otro pack de guías", () => {
+    expect(isEssentialsChunk("pack:nido-ninos:3")).toBe(true);
+    expect(isEssentialsChunk("pack:nido-ninos-e5:3")).toBe(true);
+    expect(isEssentialsChunk("pack:nido-hogar:3")).toBe(false);
+    expect(isEssentialsChunk("pack:nido-crisis:3")).toBe(false);
+    expect(isEssentialsChunk("pack:nido-campo-e5:3")).toBe(false);
+    expect(isEssentialsChunk("pack:nido-desastres:3")).toBe(false);
+    const kid = chunk("pack:nido-ninos-e5:3", "Atragantamiento en bebés — Qué hacer", "Qué hacer\n- Sostén al bebé boca abajo sobre tu antebrazo.", 0.9);
+    expect(pickGuideChunk([kid], "es")?.chunkId).toBe(kid.chunkId);
+  });
+
+  it("la cabecera nombra el pack dueño de la guía, y sin packId sigue diciendo Esencial", () => {
+    const doc = { title: "Quemaduras en niños", source: "NIDO — Quemaduras", parts: [{ id: 1, body: "Enfría la quemadura con agua fresca.", used: true }] };
+    expect(composeGuideAnswer(doc, "es", { packId: "nido-ninos-e5" }).split("\n")[0]).toBe(
+      "Guía «Quemaduras en niños» de NIDO Niños, tal como está escrita (sin modelo):",
+    );
+    expect(composeGuideAnswer(doc, "es").split("\n")[0]).toBe("Guía «Quemaduras en niños» de NIDO Esencial, tal como está escrita (sin modelo):");
+    // La cabecera de Niños también es texto fijo en la procedencia, no frase de la guía.
+    const prov = guideAnswerProvenance(composeGuideAnswer(doc, "es", { packId: "nido-ninos" }));
+    expect(prov[0].origin.kind).toBe("fixed");
+  });
+
+  it("el caso de la tablet: un trozo solo léxico (dolor de pecho) no gana a la guía de RCP", () => {
+    const got = pickGuideChunk([
+      chunk("pack:nido-esencial-e5:230", "Dolor de pecho e infarto — Qué hacer", CHEST, undefined, "lexical"),
+      chunk("pack:nido-esencial-e5:10", "RCP (reanimación) en adultos y niños mayores — Respiraciones (solo si sabes hacerlas)", "Respiraciones\n- Si sabes hacerlas…", 0.89),
+      chunk("pack:nido-esencial-e5:8", "RCP (reanimación) en adultos y niños mayores — Antes de empezar", "Antes de empezar\n- Comprueba que el lugar es seguro.", 0.89),
+    ], "es");
+    expect(got?.title).toMatch(/^RCP \(reanimación\) en adultos/);
+  });
+
+  it("si la mejor coincidencia no es de NIDO Esencial, o es floja, sigue el camino normal", () => {
+    expect(pickGuideChunk([chunk("pack:wiki-vital5:1", "Heart", "The heart…", 0.9), chunk("pack:nido-esencial:5", "RCP", "…", 0.85)], "es")).toBeNull();
+    expect(pickGuideChunk([chunk("pack:nido-esencial:5", "RCP", "Comprueba que el lugar es seguro.", 0.7)], "es")).toBeNull();
+    expect(pickGuideChunk([chunk("pack:nido-esencial:5", "RCP", "…", undefined, "lexical")], "es")).toBeNull();
+  });
+
+  it("el apartado «Importante» (fuentes y curso) nunca abre una guía (prueba física 2026-11-06)", () => {
+    const closing = chunk(
+      "pack:nido-esencial-e5:400",
+      "Accidente de tráfico — Importante",
+      "Importante\nBasado en el protocolo PAS de la Cruz Roja Española, las directrices de la AHA y la Cruz Roja Americana, y la OMS.",
+      0.86,
+    );
+    expect(pickGuideChunk([closing], "es")).toBeNull();
+    const cpr = chunk("pack:nido-esencial-e5:8", "RCP (reanimación) en adultos y niños mayores — Antes de empezar", "Antes de empezar\n- Comprueba que el lugar es seguro.", 0.84);
+    expect(pickGuideChunk([closing, cpr], "es")?.chunkId).toBe(cpr.chunkId);
+    for (const t of ["CPR — Important", "RCP — Importante", "Burns – important"]) {
+      expect(pickGuideChunk([chunk("pack:nido-esencial-e5:1", t, "x", 0.95)], "en")).toBeNull();
+    }
+    // Un apartado que solo se llama parecido no se descarta.
+    expect(pickGuideChunk([chunk("pack:nido-esencial-e5:2", "Importante saber antes de viajar — Qué llevar", "x", 0.9)], "es")).not.toBeNull();
+  });
+
+  it("la entrada de una guía de otro pack de NIDO no le quita la respuesta a Esencial (terremoto, prueba física)", () => {
+    const intro = chunk(
+      "pack:nido-desastres-e5:66",
+      "Atrapado bajo escombros o en un edificio dañado",
+      "La guía de terremoto del pack Esencial resume el caso en una línea; esta guía lo desarrolla entero…",
+      0.88,
+    );
+    const quake = chunk("pack:nido-esencial-e5:296", "Terremoto — Durante: AGÁCHATE, CÚBRETE Y AGÁRRATE", "Durante…", 0.86);
+    expect(pickGuideChunk([intro, quake], "es")?.chunkId).toBe(quake.chunkId);
+    // Un apartado de esa guía sí compite (y gana si es el mejor): sigue el camino normal.
+    const section = chunk("pack:nido-desastres-e5:68", "Atrapado bajo escombros o en un edificio dañado — Haz que te encuentren: señala sin gritar", "…", 0.9);
+    expect(pickGuideChunk([section, quake], "es")).toBeNull();
+    // Y la Wikipedia no cuenta como guía de NIDO: si gana, camino normal.
+    expect(pickGuideChunk([chunk("pack:wiki-vital5-e5:9", "Earthquake", "…", 0.9), quake], "es")).toBeNull();
+  });
+
+  it("prefiere la guía en el idioma de quien pregunta cuando están igual de cerca", () => {
+    const en = chunk("pack:nido-esencial-e5:300", "CPR for adults and older children — Before you start", "Before you start\n- Make sure the place is safe. Tap their shoulders and shout.", 0.9);
+    const es = chunk("pack:nido-esencial-e5:8", "RCP (reanimación) en adultos y niños mayores — Antes de empezar", "Antes de empezar\n- Comprueba que el lugar es seguro. Toca sus hombros y háblale fuerte.", 0.89);
+    expect(pickGuideChunk([en, es], "es")?.chunkId).toBe(es.chunkId);
+    expect(pickGuideChunk([en, es], "en")?.chunkId).toBe(en.chunkId);
+    expect(pickGuideChunk([en, es], "pt")?.chunkId).toBe(es.chunkId);
+  });
+
+  it("el lector portugués recibe la guía en portugués cuando el pack la trae, y en español cuando no la trae", () => {
+    const en = chunk("pack:nido-esencial-e5:300", "CPR for adults and older children — Before you start", "Before you start\n- Make sure the place is safe. Tap their shoulders and shout.", 0.9);
+    const es = chunk("pack:nido-esencial-e5:8", "RCP (reanimación) en adultos y niños mayores — Antes de empezar", "Antes de empezar\n- Comprueba que el lugar es seguro. Toca sus hombros y háblale fuerte.", 0.89);
+    const pt = chunk("pack:nido-esencial-e5:400", "RCP (reanimação) em adultos e crianças maiores — Antes de começar", "Antes de começar\n- Veja se o local é seguro e se a pessoa não responde. Toque nos ombros dela e fale alto com ela.", 0.88);
+    expect(pickGuideChunk([en, es, pt], "pt")?.chunkId).toBe(pt.chunkId);
+    // Sin gemela portuguesa entre las cercanas, el retroceso honesto es la española.
+    expect(pickGuideChunk([en, es], "pt")?.chunkId).toBe(es.chunkId);
+  });
+
+  it("el texto sale tal cual: «no está sangrando» se mantiene, con la fuente y el aviso de llamar", () => {
+    const text = composeGuideAnswer({ title: "Dolor de pecho e infarto", source: "NIDO — Dolor de pecho e infarto (basado en: AHA…)", parts: [{ id: 1, body: CHEST, used: true }] }, "es");
+    expect(text).toContain("no es alérgico a la aspirina, no está sangrando y su médico no se lo ha prohibido");
+    expect(text).toContain(CHEST);
+    expect(text.split("\n")[0]).toBe("Guía «Dolor de pecho e infarto» de NIDO Esencial, tal como está escrita (sin modelo):");
+    expect(text).toContain("Fuentes de la guía: NIDO — Dolor de pecho e infarto");
+    expect(text).toContain("llama primero al número de emergencias");
+  });
+
+  it("si la guía es larga se corta entre apartados, nunca a mitad, y remite a «Abrir la guía completa»", () => {
+    const part = (n: number) => ({ id: n, body: `Apartado ${n}\n${"x".repeat(1000)}.`, used: n === 1 });
+    const text = composeGuideAnswer({ title: "Larga", source: "", parts: [part(1), part(2), part(3), part(4)] }, "en");
+    expect(text).toContain("Apartado 1");
+    expect(text).toContain("Apartado 2");
+    expect(text).not.toContain("Apartado 3");
+    expect(text.length).toBeLessThan(GUIDE_MAX_CHARS + 400);
+    expect(text).toContain("Open the full guide");
+  });
+
+  // 2026-10-30 (prueba física): «Sintomas del monoxide of carbono?» trajo
+  // la guía correcta servida desde su primer apartado (los tóxicos
+  // tragados), no desde el de los síntomas pedidos. El apartado que casó
+  // ya venía marcado (`used`) desde packSource: ahora manda el arranque.
+  it("si el apartado que casó no es el primero, la guía empieza en él, literal, con cabecera honesta", () => {
+    const doc = {
+      title: "Intoxicaciones, venenos y monóxido de carbono",
+      source: "NIDO — Intoxicaciones",
+      parts: [
+        { id: 1, body: "Si tragó un tóxico\nQué hacer si alguien tragó un tóxico.", used: false },
+        { id: 2, body: "Síntomas del monóxido de carbono\nDolor de cabeza, mareo, náuseas y confusión.", used: true },
+        { id: 3, body: "Qué hacer ante el monóxido\nSal al aire libre y llama al número de emergencias.", used: false },
+      ],
+    };
+    const text = composeGuideAnswer(doc, "es");
+    expect(text.split("\n")[0]).toBe(
+      "Guía «Intoxicaciones, venenos y monóxido de carbono» de NIDO Esencial, desde el apartado que responde a tu pregunta, tal como está escrita (sin modelo):",
+    );
+    // D-1 (2026-10-31, decisión del dueño): la primera sección ya no
+    // se pierde al anclar; viaja delante del apartado que casó. La
+    // queja física de 2026-10-30 era que la respuesta ABRÍA en el
+    // apartado equivocado como si fuera el pedido: la cabecera sigue
+    // diciendo que el texto que responde es el del apartado anclado,
+    // y el orden es primera sección, apartado que casó y el resto.
+    expect(text).toContain("Si tragó un tóxico");
+    expect(text.indexOf("Si tragó un tóxico")).toBeLessThan(text.indexOf("Síntomas del monóxido de carbono"));
+    expect(text).toContain("Síntomas del monóxido de carbono\nDolor de cabeza, mareo, náuseas y confusión.");
+    expect(text).toContain("Qué hacer ante el monóxido");
+    expect(text).toContain("Fuentes de la guía: NIDO — Intoxicaciones");
+    expect(text).toContain("llama primero al número de emergencias");
+  });
+
+  // D-1 (2026-10-31): al anclar, la primera sección viaja delante en
+  // las tres lenguas, y ni ella ni el apartado que casó caen por el
+  // tope aunque juntos lo superen.
+  it("D-1: la primera sección viaja delante del apartado anclado (es, en, pt)", () => {
+    const casos = [
+      {
+        lang: "es" as const,
+        primera: "Avisos de la guía\nSi la persona no respira, llama primero.",
+        pedida: "El apartado pedido\nLo que responde a la pregunta.",
+        cabecera: "desde el apartado que responde a tu pregunta",
+      },
+      {
+        lang: "en" as const,
+        primera: "Guide warnings\nIf the person is not breathing, call first.",
+        pedida: "The asked section\nWhat answers the question.",
+        cabecera: "from the section that answers your question",
+      },
+      {
+        lang: "pt" as const,
+        primera: "Avisos do guia\nSe a pessoa não respira, ligue primeiro.",
+        pedida: "O trecho pedido\nO que responde à pergunta.",
+        cabecera: "a partir do trecho que responde à sua pergunta",
+      },
+    ];
+    for (const c of casos) {
+      const doc = {
+        title: "Guía D-1",
+        source: "",
+        parts: [
+          { id: 1, body: c.primera, used: false },
+          { id: 2, body: "Otro apartado\nNo pedido.", used: false },
+          { id: 3, body: c.pedida, used: true },
+        ],
+      };
+      const text = composeGuideAnswer(doc, c.lang);
+      expect(text.split("\n")[0]).toContain(c.cabecera);
+      expect(text).toContain(c.primera);
+      expect(text).toContain(c.pedida);
+      expect(text.indexOf(c.primera)).toBeLessThan(text.indexOf(c.pedida));
+      expect(text).not.toContain("Otro apartado");
+    }
+  });
+
+  it("D-1: con ancla, el tope nunca corta ni la primera sección ni la pedida", () => {
+    const doc = {
+      title: "Guía larga D-1",
+      source: "",
+      parts: [
+        { id: 1, body: `Primera\n${"a".repeat(1500)}`, used: false },
+        { id: 2, body: `Pedida\n${"b".repeat(1500)}`, used: true },
+        { id: 3, body: `Tercera\n${"c".repeat(1500)}`, used: false },
+      ],
+    };
+    const text = composeGuideAnswer(doc, "es");
+    expect(text).toContain("Primera");
+    expect(text).toContain("Pedida");
+    expect(text).not.toContain("Tercera");
+    expect(text).toContain("La guía sigue");
+  });
+
+  it("con el apartado usado en primer lugar, la respuesta es la de siempre", () => {
+    const doc = {
+      title: "Guía X",
+      source: "",
+      parts: [
+        { id: 1, body: "Primero.", used: true },
+        { id: 2, body: "Segundo.", used: false },
+      ],
+    };
+    const text = composeGuideAnswer(doc, "es");
+    expect(text.split("\n")[0]).toBe("Guía «Guía X» de NIDO Esencial, tal como está escrita (sin modelo):");
+    expect(text).toContain("Primero.");
+    expect(text).toContain("Segundo.");
+  });
+
+  it("la cabecera anclada cuenta como texto fijo en la procedencia, no como frase de la guía", () => {
+    const doc = {
+      title: "Guide X",
+      source: "",
+      parts: [
+        { id: 1, body: "First.", used: false },
+        { id: 2, body: "Second.", used: true },
+      ],
+    };
+    const prov = guideAnswerProvenance(composeGuideAnswer(doc, "en"));
+    expect(prov[0].origin.kind).toBe("fixed");
+    expect(prov.some((p) => p.origin.kind === "guide" && p.text === "Second.")).toBe(true);
+  });
+
+  it("0.1.86: la cabecera con el nombre propio de un pack importado también es texto fijo", () => {
+    const route: LiteralRouteContext = {
+      importedVerifiedPackIds: new Set(["local-salvora-emergencias-casa"]),
+      importedPackNames: new Map([["local-salvora-emergencias-casa", "SALVORA Home Emergencies"]]),
+    };
+    const doc = {
+      title: "Fuga de gas en casa",
+      source: "",
+      parts: [{ id: 12, body: "Sal de la casa sin tocar interruptores.", used: true }],
+    };
+    const text = composeGuideAnswer(doc, "es", { packId: "local-salvora-emergencias-casa", route });
+    expect(text.split("\n")[0]).toBe(
+      "Guía «Fuga de gas en casa» de SALVORA Home Emergencies, tal como está escrita (sin modelo):",
+    );
+    const prov = guideAnswerProvenance(text);
+    expect(prov[0].origin.kind).toBe("fixed");
+    expect(prov.some((p) => p.origin.kind === "guide" && p.text.includes("Sal de la casa"))).toBe(true);
+  });
+
+  it("0.1.86: isLiteralGuideChunk exige el registro: sin él, un pack local no es literal", () => {
+    const id = "pack:local-salvora-emergencias-casa:12";
+    expect(isLiteralGuideChunk(id)).toBe(false);
+    expect(isLiteralGuideChunk(id, {})).toBe(false);
+    expect(isLiteralGuideChunk(id, { importedVerifiedPackIds: new Set(["local-otro"]) })).toBe(false);
+    expect(isLiteralGuideChunk(id, { importedVerifiedPackIds: new Set(["local-salvora-emergencias-casa"]) })).toBe(true);
+    expect(isLiteralGuideChunk("pack:nido-esencial:1")).toBe(true);
+  });
+});
+
+// HEREDADOS de J-5, corridos en J-7 y no sumados en J-7 — asiento
+// de la apertura de J-5 (§3.2) y de la apertura de J-7 (§3.3): el
+// describe entero ejercita la guarda de negaciones del juez,
+// recreado y acreditado en J-7 con la familia del juez. Los 4
+// casos corren contra ./grounding real; la fixture
+// __fixtures__/diferidosJ5.ts perdió las tres declaraciones y
+// desaparece en esta pasada. Declarados diferidos en la puerta de
+// la tanda 5; ejecutados en J-7 y no sumados en J-7.
+describe("guarda de negaciones en las respuestas del modelo (0.1.59)", () => {
+  const MODEL = "1. Llama de inmediato al número de emergencias [1]. 3. Si es un adulto despierto, no es alérgico a la aspirina, está sangrando y su médico no se lo ha prohibido: que mastique una aspirina para adultos (entre 162 y 325 mg, o 2 a 4 aspirinas infantiles de 81 mg) y la trague.";
+
+  it("cuenta negaciones en los tres idiomas", () => {
+    expect(negationCount("no es alérgico, no está sangrando y su médico no se lo ha prohibido")).toBe(3);
+    expect(negationCount("Do not use ice. Don't pop blisters. Never leave them alone.")).toBe(3);
+    expect(negationCount("Não use gelo e nunca deixe a pessoa sem ajuda.")).toBe(3);
+    expect(negationCount("Nota: anota la hora.")).toBe(0);
+  });
+
+  it("encuentra la frase de la fuente que corresponde", () => {
+    const src = closestSourceSentence("Si es un adulto despierto, no es alérgico a la aspirina, está sangrando", CHEST.split("\n"));
+    expect(src).toContain("no está sangrando");
+  });
+
+  it("el caso de la tablet: la frase con la negación perdida se cambia por la de la guía, palabra por palabra", () => {
+    const r = verifyGroundedAnswer(MODEL, [{ title: "Dolor de pecho e infarto — Qué hacer", body: CHEST }], "es", "");
+    expect(r.text).toContain("no está sangrando");
+    expect(r.text).not.toMatch(/aspirina, está sangrando/);
+  });
+
+  it("una frase que conserva sus negaciones no se toca", () => {
+    const ok = "Que la persona deje de hacer esfuerzo y no la dejes sola.";
+    const src = [{ title: "Dolor de pecho", body: "Afloja la ropa, tranquilízala y no la dejes sola. Que la persona deje de hacer esfuerzo." }];
+    expect(verifyGroundedAnswer(ok, src, "es", "").text).toContain("no la dejes sola");
+  });
+});
+
+describe("búsqueda por palabras de las guías rápidas (0.1.59)", () => {
+  it("«¿Cómo hago la RCP a un adulto?»: sin «hago», y «adulto» encuentra «adultos»", () => {
+    const q = buildLexicalQuery("¿Cómo hago la RCP a un adulto?")!;
+    expect(q.terms.map((t) => t.forms[0])).toEqual(["rcp", "adulto"]);
+    expect(q.match).toContain('"adul"*');
+    expect(countMatchedTerms("RCP (reanimación) en adultos y niños mayores", q.terms)).toBe(2);
+  });
+
+  it("«atraganta» encuentra «Atragantamiento»; «o que faço» no cuenta como tema", () => {
+    const es = buildLexicalQuery("¿Qué hago si alguien se atraganta?")!;
+    expect(es.terms.map((t) => t.forms[0])).toEqual(["atraganta"]);
+    expect(countMatchedTerms("Atragantamiento en adultos, niños y bebés", es.terms)).toBe(1);
+    const pt = buildLexicalQuery("O que faço com uma queimadura?")!;
+    expect(pt.terms.map((t) => t.forms[0])).toEqual(["queimadura"]);
+  });
+});

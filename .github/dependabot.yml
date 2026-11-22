@@ -1,0 +1,34 @@
+# Dependabot: actualizaciones de dependencias de NIDO PC.
+# Solo parches y versiones menores, agrupadas, con tope de PRs abiertos.
+# Las mayores se revisan a mano, una a una, con la batería de pruebas
+# corriendo sobre el cambio.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      parches-y-menores:
+        update-types:
+          - "patch"
+          - "minor"
+  - package-ecosystem: "npm"
+    directory: "/app"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      parches-y-menores:
+        update-types:
+          - "patch"
+          - "minor"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      acciones:
+        patterns:
+          - "*"

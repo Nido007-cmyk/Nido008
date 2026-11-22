@@ -1,0 +1,50 @@
+{
+    "compilerOptions": {
+        "target": "es2022",
+        "lib": ["es2022", "DOM", "DOM.Iterable"],
+        // Tanda 14: esnext (no el es2022 de la plantilla) para
+        // admitir los imports JSON con atributos, que son la forma
+        // del árbol heredado (src/i18n) y la que la raíz (NodeNext)
+        // exige. La emisión la hace vite; aquí solo se verifica.
+        "module": "esnext",
+        "skipLibCheck": true,
+
+        "esModuleInterop": true,
+        "removeComments": false,
+        "allowSyntheticDefaultImports": true,
+        "forceConsistentCasingInFileNames": true,
+        "noFallthroughCasesInSwitch": true,
+        // Tanda 14: alineado con la raíz del proyecto, que no lleva
+        // esta bandera (venía de la plantilla del scaffold). El
+        // árbol heredado del móvil se verifica con la configuración
+        // del proyecto, no se re-litiga bajo banderas de plantilla.
+        "noUncheckedIndexedAccess": false,
+        "moduleDetection": "force",
+
+        "moduleResolution": "bundler",
+        "allowImportingTsExtensions": true,
+        "resolveJsonModule": true,
+        "isolatedModules": true,
+        "noEmit": true,
+        "jsx": "react-jsx",
+
+        "strict": true,
+        "strictNullChecks": true,
+        "noImplicitAny": true,
+        "noImplicitReturns": true,
+        "noImplicitThis": true,
+        "noImplicitOverride": true
+    },
+    "include": [
+        "./src",
+        "./electron",
+        // Las declaraciones de los módulos nativos del móvil
+        // (react-native, expo-*, __DEV__): el programa de la app
+        // compila el árbol heredado y las necesita igual que la raíz.
+        "../src/types/native-modules.d.ts"
+    ],
+    "exclude": [
+        "./**/*.test.ts"
+    ],
+    "references": [{ "path": "./tsconfig.node.json" }]
+}

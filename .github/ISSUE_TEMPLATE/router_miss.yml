@@ -1,0 +1,47 @@
+name: NIDO answered the wrong way
+description: A built-in function should have answered or acted, and the AI model answered instead (or the wrong function ran) / Una función propia debió responder y respondió el modelo / Uma função própria devia responder e quem respondeu foi o modelo
+title: "[ROUTER] "
+labels: ["router"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Privacy first.** Many built-in phrases are personal (reminders, notes, contacts). If your exact phrase contains personal data, write a similar phrase with the same shape instead and say so. You can write in English, Español or Português.
+        **Privacidad primero.** Muchas frases de las funciones propias son personales (avisos, notas, contactos). Si tu frase exacta trae datos personales, escribe una frase parecida con la misma forma y dilo. Puedes escribir en español, English o Português.
+  - type: textarea
+    id: phrase
+    attributes:
+      label: "Exact phrase you wrote or said / Frase exacta / Frase exata"
+      description: The exact words, or a same-shape example if the real one was personal.
+    validations:
+      required: true
+  - type: dropdown
+    id: lang
+    attributes:
+      label: "Language of the phrase / Idioma / Idioma"
+      options: [Español, English, Português, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "What should NIDO have done? / ¿Qué debió hacer? / O que devia ter feito?"
+      description: "For example: create the reminder, open the guide, read my notes, answer from my documents."
+    validations:
+      required: true
+  - type: textarea
+    id: answered
+    attributes:
+      label: "What did NIDO do instead? (optional)"
+  - type: input
+    id: version
+    attributes:
+      label: "NIDO PC version / Versión / Versão"
+      description: Settings > About inside the app.
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: "AI model in use (optional)"
+      description: As shown in Settings.

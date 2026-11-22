@@ -1,0 +1,253 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ */
+
+import { describe, expect, it } from "vitest";
+import {
+  evidenceNumberValues,
+  evidenceQuantities,
+  evidenceRanges,
+  numberTokens,
+  parseNumberToken,
+  quantitiesOf,
+  quantityConflict,
+  roundsFromEvidence,
+  sentenceNumbersSupported,
+} from "./evidenceNumbers.js";
+
+describe("numberTokens", () => {
+  it("extrae las cifras y deja fuera las citas [n]", () => {
+    expect(numberTokens("Fundada en 1804 [1], con 26,5 mg y 16.431.599 personas.")).toEqual([
+      "1804",
+      "26,5",
+      "16.431.599",
+    ]);
+  });
+
+  it("sin cifras, nada", () => {
+    expect(numberTokens("Sin números aquí.")).toEqual([]);
+  });
+});
+
+describe("parseNumberToken", () => {
+  it("enteros y decimales de las tres lenguas", () => {
+    expect(parseNumberToken("1804")).toEqual([1804]);
+    expect(parseNumberToken("26,5")).toEqual([26.5]);
+    expect(parseNumberToken("26.5")).toEqual([26.5]);
+    expect(parseNumberToken("3,1416")).toEqual([3.1416]);
+  });
+
+  it("miles con separador repetido o con decimal al final", () => {
+    expect(parseNumberToken("16.431.599")).toEqual([16431599]);
+    expect(parseNumberToken("16,431,599")).toEqual([16431599]);
+    expect(parseNumberToken("1,234,567.89")).toEqual([1234567.89]);
+    expect(parseNumberToken("1.234.567,89")).toEqual([1234567.89]);
+  });
+
+  it("el token ambiguo aporta sus dos lecturas", () => {
+    expect(parseNumberToken("1.234")).toEqual([1.234, 1234]);
+    expect(parseNumberToken("1,234")).toEqual([1.234, 1234]);
+  });
+});
+
+describe("roundsFromEvidence", () => {
+  const ev = new Set([26.52, 1804, 16431599, 12345]);
+
+  it("el valor exacto y sus redondeos a la precisión afirmada", () => {
+    expect(roundsFromEvidence(1804, 0, ev)).toBe(true);
+    expect(roundsFromEvidence(27, 0, ev)).toBe(true); // 26,52 → 27
+    expect(roundsFromEvidence(26.5, 1, ev)).toBe(true); // 26,52 → 26,5
+    expect(roundsFromEvidence(26.4, 1, ev)).toBe(false);
+    expect(roundsFromEvidence(1904, 0, ev)).toBe(false);
+  });
+
+  it("la escala (millones) solo vale con decimales", () => {
+    expect(roundsFromEvidence(16.4, 1, ev)).toBe(true); // 16,4 millones de 16.431.599
+    expect(roundsFromEvidence(12, 0, ev)).toBe(false); // «12» no es redondeo de 12.345
+    expect(roundsFromEvidence(12.3, 1, ev)).toBe(true); // 12,3 miles de 12.345
+  });
+});
+
+describe("sentenceNumbersSupported", () => {
+  const ev = evidenceNumberValues(["La ciudad se fundó en 1804. Tenía 16,431,599 habitantes y la dosis era 26.52 mg."]);
+
+  it("las cifras de la evidencia y sus redondeos pasan", () => {
+    expect(sentenceNumbersSupported("Se fundó en 1804.", ev)).toBe(true);
+    expect(sentenceNumbersSupported("Vivían 16,4 millones de personas.", ev)).toBe(true);
+    expect(sentenceNumbersSupported("La dosis es 26,5 mg.", ev)).toBe(true);
+    expect(sentenceNumbersSupported("La dosis es 27 mg.", ev)).toBe(true);
+  });
+
+  it("una cifra inventada no pasa aunque el resto sí", () => {
+    expect(sentenceNumbersSupported("Se fundó en 1904.", ev)).toBe(false);
+    expect(sentenceNumbersSupported("La dosis es 30 mg.", ev)).toBe(false);
+  });
+
+  it("los enteros de un dígito no se juzgan y las citas no son cifras", () => {
+    expect(sentenceNumbersSupported("Llega en el capítulo 3.", new Set())).toBe(true);
+    expect(sentenceNumbersSupported("Se fundó en 1804 [2].", ev)).toBe(true);
+    expect(sentenceNumbersSupported("Sin cifras en esta frase.", new Set())).toBe(true);
+  });
+});
+
+describe("C-08: los rangos de la evidencia sostienen su interior", () => {
+  const guia19 = "Sumerge la zona en agua tibia (entre 37 y 40 °C) durante 20 a 30 minutos. La lejía va al 5–6 %.";
+
+  it("evidenceRanges extrae «entre N y M», «N a M» y «N–M»", () => {
+    const ranges = evidenceRanges([guia19]);
+    expect(ranges).toHaveLength(3);
+    expect(ranges).toEqual(
+      expect.arrayContaining([
+        { min: 37, max: 40 },
+        { min: 20, max: 30 },
+        { min: 5, max: 6 },
+      ])
+    );
+    expect(evidenceRanges(["Sin rangos en esta frase, solo 42 sueltos."])).toEqual([]);
+  });
+
+  it("un valor dentro de cualquier rango de la evidencia está sostenido; fuera, no", () => {
+    const ev = evidenceNumberValues([guia19]);
+    const ranges = evidenceRanges([guia19]);
+    // Sin rangos, la red sigue ciega: 39 no es ni 37 ni 40 (el falso
+    // positivo histórico). Con los rangos pasados, el interior vale.
+    expect(sentenceNumbersSupported("Sumerge la zona en agua a 39 °C.", ev)).toBe(false);
+    expect(sentenceNumbersSupported("Sumerge la zona en agua a 39 °C durante 25 minutos.", ev, ranges)).toBe(true);
+    expect(sentenceNumbersSupported("Sumerge la zona en agua a 40 °C.", ev, ranges)).toBe(true);
+    expect(sentenceNumbersSupported("Sumerge la zona en agua a 45 °C durante 25 minutos.", ev, ranges)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------
+// T-43 (H-B1 del barrido pre-versión 0.1.99): la forma inglesa
+// «between N and M» no era rango en ninguna extracción y la
+// respuesta fiel con un valor interior se cortaba entera (la
+// sonda de pares del barrido salió 71/73, con B-en-fiel e
+// I-x-fiel divergentes; en el barrido de la 0.1.96 ambos casos
+// salían con la frase intacta). El marco es {entre, between}
+// con el mismo conjunto de unidores tras cualquiera de las dos;
+// el «and» desnudo sin marco sigue sin ser rango, que es la
+// cautela declarada de C-08.
+
+describe("T-43: el marco «between N and M» es rango, con la vara de «entre»", () => {
+  it("evidenceRanges extrae «between» como su gemela «entre» (básico, invertido, decimales)", () => {
+    expect(evidenceRanges(["The vaccine is kept between 2 and 8 degrees."])).toEqual([{ min: 2, max: 8 }]);
+    expect(evidenceRanges(["The vaccine is kept between 8 and 2 degrees."])).toEqual([{ min: 2, max: 8 }]);
+    expect(evidenceRanges(["Keep it between 2.5 and 8.5 degrees."])).toEqual([{ min: 2.5, max: 8.5 }]);
+    expect(evidenceRanges(["La vacuna se conserva entre 2 y 8 grados."])).toEqual([{ min: 2, max: 8 }]);
+    expect(evidenceRanges(["A vacina é conservada entre 2 e 8 graus."])).toEqual([{ min: 2, max: 8 }]);
+  });
+
+  it("el «and» desnudo y las formas vecinas siguen sin ser rango en ningún marco", () => {
+    expect(evidenceRanges(["There are 2 and 8 people in the room."])).toEqual([]);
+    expect(evidenceRanges(["The vaccine is kept between two and eight degrees."])).toEqual([]);
+    expect(evidenceRanges(["La vacuna se conserva entre dos y ocho grados."])).toEqual([]);
+    expect(evidenceRanges(["Keep it between -2 and 8 degrees."])).toEqual([]);
+    expect(evidenceRanges(["Keep it between 2 degrees and 8 degrees."])).toEqual([]);
+    expect(evidenceRanges(["Keep it between 5 and 5 degrees."])).toEqual([]);
+  });
+
+  it("el interior de un «between» está sostenido y el exterior no", () => {
+    const guia = "Keep the vaccine between 37 and 40 degrees in the fridge.";
+    const ev = evidenceNumberValues([guia]);
+    const ranges = evidenceRanges([guia]);
+    expect(sentenceNumbersSupported("Keep the vaccine at 39 degrees.", ev, ranges)).toBe(true);
+    expect(sentenceNumbersSupported("Keep the vaccine at 37 degrees.", ev, ranges)).toBe(true);
+    expect(sentenceNumbersSupported("Keep the vaccine at 45 degrees.", ev, ranges)).toBe(false);
+  });
+
+  it("quantitiesOf funde los dos extremos de «between … degrees» como ranged, igual que «entre»", () => {
+    const en = quantitiesOf("The vaccine is kept between 2 and 8 degrees.");
+    const es = quantitiesOf("La vacuna se conserva entre 2 y 8 grados.");
+    expect(en).toEqual(es);
+    expect(en.filter((q) => q.ranged).map((q) => q.raw).sort()).toEqual([2, 8]);
+  });
+
+  it("quantityConflict calla dentro de un «between» y dispara fuera (la llamada del juez, con rangos)", () => {
+    const guia = "The vaccine is kept between 2 and 8 degrees in the clinic fridge.";
+    const evQ = evidenceQuantities([guia]);
+    const evN = evidenceNumberValues([guia]);
+    const ranges = evidenceRanges([guia]);
+    expect(quantityConflict("The vaccine is kept at 5 degrees.", evQ, evN, ranges)).toBe(false);
+    expect(quantityConflict("The vaccine is kept at 2 degrees.", evQ, evN, ranges)).toBe(false);
+    expect(quantityConflict("The vaccine is kept at 25 degrees.", evQ, evN, ranges)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------
+// T-J3 (barrido «revisa todo», J3): los números en letra tras los
+// portillos de la caja (frecuencia diaria y unidad de dosis) son
+// cifras para el juez — antes sellaba «cinco veces al día» contra
+// «dos veces al día» mientras la caja marcaba el conflicto. Letra y
+// dígito se juzgan en el mismo conjunto de valores, en las dos
+// direcciones. Fuera de los portillos la letra no se juzga.
+
+describe("T-J3: los números en letra con portillo se juzgan como cifras", () => {
+  it("la frecuencia en letra falsa no pasa; la fiel sí, en letra y en dígito", () => {
+    const ev = evidenceNumberValues(["Tome el jarabe dos veces al día, después de comer."]);
+    expect(sentenceNumbersSupported("Tome el jarabe cinco veces al día, después de comer.", ev)).toBe(false);
+    expect(sentenceNumbersSupported("Tome el jarabe dos veces al día, después de comer.", ev)).toBe(true);
+    expect(sentenceNumbersSupported("Tome el jarabe 12 veces al día, después de comer.", ev)).toBe(false);
+  });
+
+  it("la dosis en letra falsa no pasa (es/en/pt de la tabla)", () => {
+    expect(sentenceNumbersSupported("Tome cinco comprimidos al día.", evidenceNumberValues(["Tome dos comprimidos al día."]))).toBe(false);
+    expect(sentenceNumbersSupported("Take five tablets a day.", evidenceNumberValues(["Take two tablets a day."]))).toBe(false);
+    expect(sentenceNumbersSupported("Tome cinco comprimidos por dia.", evidenceNumberValues(["Tome dois comprimidos por dia."]))).toBe(false);
+  });
+
+  it("letra y dígito se sostienen el uno al otro (la misma cifra, otra ropa)", () => {
+    const evLetra = evidenceNumberValues(["Tome doce comprimidos al día."]);
+    expect(sentenceNumbersSupported("Tome 12 comprimidos al día.", evLetra)).toBe(true);
+    expect(sentenceNumbersSupported("Tome doce comprimidos al día.", evLetra)).toBe(true);
+    const evDigito = evidenceNumberValues(["Tome 12 comprimidos al día."]);
+    expect(sentenceNumbersSupported("Tome doce comprimidos al día.", evDigito)).toBe(true);
+  });
+
+  it("fuera de los portillos la letra sigue sin juzgarse", () => {
+    expect(sentenceNumbersSupported("Había dos personas en la sala.", new Set())).toBe(true);
+    expect(sentenceNumbersSupported("El grupo tiene cinco miembros.", new Set())).toBe(true);
+  });
+
+  it("«media» tras el portillo de dosis vale 0,5", () => {
+    const ev = evidenceNumberValues(["Añade media cucharadita de sal."]);
+    expect(sentenceNumbersSupported("Añade media cucharadita de sal.", ev)).toBe(true);
+    expect(sentenceNumbersSupported("Añade media cucharadita de sal.", new Set())).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------
+// T-J4 (barrido «revisa todo», J4): las fracciones de cocina son
+// cifras. La gramática es la tabla cerrada de denominadores con
+// numerador menor; fuera de ella («10/11») el token se parte en
+// sus dígitos sueltos, como siempre — una fecha d/m no se funde
+// en un valor.
+
+describe("T-J4: las fracciones de cocina se juzgan como cifras", () => {
+  it("la fracción falsa no pasa; la fiel sí", () => {
+    const ev = evidenceNumberValues(["Añade 1/2 taza de azúcar a la mezcla."]);
+    expect(sentenceNumbersSupported("Añade 1/4 taza de azúcar a la mezcla.", ev)).toBe(false);
+    expect(sentenceNumbersSupported("Añade 1/2 taza de azúcar a la mezcla.", ev)).toBe(true);
+    expect(sentenceNumbersSupported("Añade 3/4 taza de azúcar a la mezcla.", ev)).toBe(false);
+  });
+
+  it("fracción y decimal se sostienen el uno al otro", () => {
+    const ev = evidenceNumberValues(["Añade 1/2 taza de azúcar a la mezcla."]);
+    expect(sentenceNumbersSupported("Añade 0,5 tazas de azúcar a la mezcla.", ev)).toBe(true);
+    const evDec = evidenceNumberValues(["Añade 0,25 tazas de azúcar a la mezcla."]);
+    expect(sentenceNumbersSupported("Añade 1/4 taza de azúcar a la mezcla.", evDec)).toBe(true);
+  });
+
+  it("«10/11» no es una fracción: se parte en dígitos y no crea ningún valor fundido", () => {
+    expect(numberTokens("La cita es el 10/11.")).toEqual(["10", "11"]);
+    expect(evidenceNumberValues(["La cita es el 10/11."]).has(10 / 11)).toBe(false);
+    const ev = evidenceNumberValues(["El 10 de noviembre y el 11 de octubre."]);
+    expect(sentenceNumbersSupported("La cita es el 10/11.", ev)).toBe(true);
+  });
+
+  it("la fecha con año «10/11/2026» tampoco se funde", () => {
+    expect(numberTokens("La cita es el 10/11/2026.")).toEqual(["10", "11", "2026"]);
+  });
+});

@@ -1,0 +1,700 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ */
+
+import { describe, expect, it } from "vitest";
+import {
+  gatePreemptsDeepResearch,
+  hasHealthEvidence,
+  healthSafeText,
+  shouldSubstituteSafeText,
+  isEmergencySituation,
+  isEmergencyText,
+  isHealthQuestion,
+  type GateLang,
+} from "./emergencyGate.js";
+import type { RetrievedChunk } from "../rag/retrieve.js";
+import type { SentenceProvenance } from "../rag/provenance.js";
+import { deterministicAnswer } from "../eval/blindCore.js";
+import { pickGuideChunk } from "../rag/guideAnswer.js";
+import { CPR_GUIDE } from "../cpr/cprCoach.js";
+
+describe("isEmergencyText (emergencia primero)", () => {
+  it("reconoce las tres rutas fijas: CO, número de emergencia y crisis", () => {
+    expect(isEmergencyText("la alarma de monoxido esta sonando", "es")).toBe(true);
+    expect(isEmergencyText("¿cuál es el número de emergencias de Chile?", "es")).toBe(true);
+    expect(isEmergencyText("¿cuál es la línea de crisis de España?", "es")).toBe(true);
+    expect(isEmergencyText("what is the emergency number in France?", "en")).toBe(true);
+  });
+
+  it("la emergencia viva contada tampoco hace cola (F-B1)", () => {
+    expect(isEmergencyText("mi hijo se está ahogando con un hueso de pollo", "es")).toBe(true);
+    expect(isEmergencyText("a man collapsed outside and is not breathing", "en")).toBe(true);
+    expect(isEmergencyText("o meu pai desmaiou e não está respirando", "pt")).toBe(true);
+  });
+
+  it("lo que no es emergencia no se adelanta", () => {
+    expect(isEmergencyText("¿qué es la fotosíntesis?", "es")).toBe(false);
+    expect(isEmergencyText("cuéntame un cuento sobre un faro", "es")).toBe(false);
+    expect(isEmergencyText("", "es")).toBe(false);
+    expect(isEmergencyText("   ", "es")).toBe(false);
+  });
+
+  it("T3 (barrido, clase 3): la pregunta de conocimiento sobre atragantamiento no es un parte — en NINGUNA lengua; el suceso contado sí, en las tres", () => {
+    // El barrido midió «false en es, true en en/pt» sobre la forma
+    // sellada y sus gemelas, sin imprimir sus cadenas GT04–GT06.
+    // Re-medido con gemelas paralelas de conocimiento, la función
+    // es simétrica: la pregunta instructiva no dispara en ninguna
+    // lengua (su cobertura vive en gatePreemptsDeepResearch por la
+    // cara de salud — la fixture congelada de H-04 — y el propio
+    // fichero asienta en Núcleo 3 que isEmergencyText no cambia:
+    // su papel en la pantalla es detectar el PARTE mientras se
+    // genera, no el tema de conocimiento; el sustantivo abstracto
+    // está excluido de la cara de situación por doctrina escrita).
+    // Y el suceso contado con la misma raíz dispara en las tres.
+    expect(isEmergencyText("¿Qué se debe hacer ante un atragantamiento?", "es")).toBe(false);
+    expect(isEmergencyText("What should be done for choking?", "en")).toBe(false);
+    expect(isEmergencyText("O que se deve fazer em caso de engasgo?", "pt")).toBe(false);
+    expect(isEmergencyText("Mi hijo se está atragantando.", "es")).toBe(true);
+    expect(isEmergencyText("My son is choking.", "en")).toBe(true);
+    expect(isEmergencyText("O meu filho está engasgando.", "pt")).toBe(true);
+  });
+});
+
+describe("isHealthQuestion (puerta léxica)", () => {
+  it("situaciones de salud en las tres lenguas", () => {
+    expect(isHealthQuestion("mi hijo tiene fiebre, ¿qué hago?")).toBe(true);
+    expect(isHealthQuestion("me duele el pecho y me mareo, ¿qué puede ser?")).toBe(true);
+    expect(isHealthQuestion("¿qué hago si alguien se está atragantando?")).toBe(true);
+    expect(isHealthQuestion("I have a fever and my head hurts, what should I do?")).toBe(true);
+    expect(isHealthQuestion("my daughter is choking, how do I help her?")).toBe(true);
+    expect(isHealthQuestion("o que fazer se meu filho está com febre?")).toBe(true);
+    expect(isHealthQuestion("estou com uma dor no peito, o que faço?")).toBe(true);
+  });
+
+  it("un tema suelto sin pregunta ni situación no cierra la puerta", () => {
+    expect(isHealthQuestion("fiebre amarilla")).toBe(false);
+    expect(isHealthQuestion("asma")).toBe(false);
+    expect(isHealthQuestion("dosis")).toBe(false);
+    expect(isHealthQuestion("paracetamol")).toBe(false);
+  });
+
+  it("el campo de medicamentos y dosis dispara la puerta (F-B2)", () => {
+    expect(isHealthQuestion("necesito saber la dosis de amoxicilina para mi hija de 6 años")).toBe(true);
+    expect(isHealthQuestion("¿cada cuántas horas puedo tomar ibuprofeno?")).toBe(true);
+    expect(isHealthQuestion("How many milligrams of aspirin can an adult take in one day?")).toBe(true);
+    expect(isHealthQuestion("What is the right dosage of acetaminophen for a toddler?")).toBe(true);
+    expect(isHealthQuestion("qual é a dosagem certa de dipirona para uma criança de 20 quilos?")).toBe(true);
+    expect(isHealthQuestion("posso dar paracetamol ao meu filho com 15 quilos?")).toBe(true);
+  });
+
+  it("el campo nuevo no crea falsos positivos: cuento, ensayo y homógrafos", () => {
+    // Sin señal de pregunta ni situación, la dosis de un cuento no cierra.
+    expect(isHealthQuestion("estoy escribiendo un cuento donde una enfermera calcula la dosis de un medicamento")).toBe(false);
+    // El veto de contexto sigue mandando sobre los términos nuevos.
+    expect(isHealthQuestion("write an essay about the history of aspirin and how it changed medicine")).toBe(false);
+    // «Remediar» una fuga no es un medicamento: «remedio» quedó fuera del
+    // léxico portugués a propósito (ver la nota en emergencyGate.ts).
+    expect(isHealthQuestion("como remediar um vazamento em casa?")).toBe(false);
+  });
+
+  it("los falsos positivos conocidos quedan fuera", () => {
+    // Los ejemplos del propio Field Atlas: temas que solo mencionan.
+    expect(isHealthQuestion("¿cuál es la historia de la fiebre amarilla?")).toBe(false);
+    expect(isHealthQuestion("tell me the history of the 2004 tsunami and its fever outbreaks")).toBe(false);
+    expect(isHealthQuestion("¿cómo corto una cebolla sin llorar?")).toBe(false);
+    expect(isHealthQuestion("¿qué fue la fiebre del oro en California?")).toBe(false);
+    expect(isHealthQuestion("escribe un cuento sobre un niño con fiebre")).toBe(false);
+    expect(isHealthQuestion("¿qué es la fotosíntesis?")).toBe(false);
+  });
+
+  it("el marco histórico veta la puerta (F-B3): el pasado no es una situación", () => {
+    // El caso que destapó el hallazgo en la corrida 02 y sus primos
+    // del conjunto 03: término de salud + señal, pero marco pasado.
+    expect(isHealthQuestion("Qual foi a febre espanhola de 1918 e quantas pessoas matou?")).toBe(false);
+    expect(isHealthQuestion("¿Cuántas personas murieron de fiebre tifoidea durante la Primera Guerra Mundial?")).toBe(false);
+    expect(isHealthQuestion("How many people died in the flu pandemic of 1918?")).toBe(false);
+    expect(isHealthQuestion("Como a pandemia de gripe de 1957 afetou as cidades do Brasil?")).toBe(false);
+    expect(isHealthQuestion("Num romance do século XIX, a personagem morre de pneumonia em poucos dias; isso era comum naquela época?")).toBe(false);
+    // El marco al principio de la frase también veta.
+    expect(isHealthQuestion("Historia de la fiebre en el siglo XIX, ¿cómo se trataba?")).toBe(false);
+    // Año sin verbo en pasado ni marco: no veta por sí solo.
+    expect(isHealthQuestion("tengo fiebre desde 2023 y no se me quita, ¿qué puede ser?")).toBe(true);
+    // La salud presente sigue disparando con los mismos textos de siempre.
+    expect(isHealthQuestion("mi hijo tiene fiebre, ¿qué hago?")).toBe(true);
+    expect(isHealthQuestion("¿qué dosis de paracetamol le puedo dar a un niño de 4 años?")).toBe(true);
+    expect(isHealthQuestion("o que fazer se meu filho está com febre?")).toBe(true);
+  });
+});
+
+describe("isEmergencySituation (la emergencia contada, F-B1)", () => {
+  it("signos tal cual se cuentan, en las tres lenguas y sin preguntar", () => {
+    // Respiración que falta, en primera y en tercera persona.
+    expect(isEmergencySituation("Mi hijo se está ahogando con un hueso de pollo y no puede respirar")).toBe(true);
+    expect(isEmergencySituation("Hay un hombre tirado en la acera que no respira")).toBe(true);
+    expect(isEmergencySituation("A man collapsed at the stop and he is not breathing")).toBe(true);
+    expect(isEmergencySituation("O meu pai desmaiou e não está respirando")).toBe(true);
+    // El signo visto, no el diagnóstico.
+    expect(isEmergencySituation("She is clutching her chest and sweating a lot")).toBe(true);
+    expect(isEmergencySituation("Mi abuelo no responde cuando le hablo")).toBe(true);
+    expect(isEmergencySituation("O bebé engasgou com um pedaço de pão")).toBe(true);
+    // Humo y fuego en un lugar.
+    expect(isEmergencySituation("Sale humo por la ventana de la cocina, ¿qué hago?")).toBe(true);
+    expect(isEmergencySituation("There is smoke coming out of the basement")).toBe(true);
+    expect(isEmergencySituation("Está saindo fumaça do apartamento ao lado")).toBe(true);
+  });
+
+  it("una pregunta de salud ordinaria no es una situación de emergencia", () => {
+    expect(isEmergencySituation("mi hijo tiene fiebre, ¿qué hago?")).toBe(false);
+    expect(isEmergencySituation("¿qué dosis de paracetamol le doy a un niño?")).toBe(false);
+    expect(isEmergencySituation("What are the symptoms of dehydration in babies?")).toBe(false);
+    expect(isEmergencySituation("¿cuál es el número de emergencias de Chile?")).toBe(false);
+    expect(isEmergencySituation("")).toBe(false);
+    expect(isEmergencySituation("   ")).toBe(false);
+  });
+
+  it("ficción, ensayo y metáfora no disparan la cara de emergencia", () => {
+    expect(isEmergencySituation("Estoy escribiendo una historia sobre un pirata que no respira bajo el agua")).toBe(false);
+    expect(isEmergencySituation("I'm writing an essay about the history of choking hazards in toys")).toBe(false);
+    expect(isEmergencySituation("Cuéntame un cuento sobre un dragón que echa humo por la boca")).toBe(false);
+    expect(isEmergencySituation("Desde que perdió el trabajo se ahoga en un vaso de agua")).toBe(false);
+    expect(isEmergencySituation("The striker is on fire this season, three goals again")).toBe(false);
+    expect(isEmergencySituation("Estou a escrever um conto sobre um dragão que cospe fogo")).toBe(false);
+  });
+
+  it("el marco histórico también veta la cara de emergencia (F-B3)", () => {
+    expect(isEmergencySituation("En la novela, un hombre no respira y nadie lo ayuda")).toBe(false);
+    expect(isEmergencySituation("In the film, a man is not breathing and nobody helps him")).toBe(false);
+    // La emergencia viva de siempre sigue disparando.
+    expect(isEmergencySituation("Sale humo por la ventana de la cocina, ¿qué hago?")).toBe(true);
+    expect(isEmergencySituation("Mi hijo se está ahogando con un hueso de pollo y no puede respirar")).toBe(true);
+  });
+});
+
+describe("R-07: la frase exacta de la ronda y la tolerancia al ruido de dictado", () => {
+  it("la frase exacta recibida en el aparato dispara las tres caras", () => {
+    // El dictado convirtió «alguien» en «argument»: la palabra ajena
+    // no estorba al signo, que estaba entero.
+    const exacta = "Que hago si argument se esta atragantando?";
+    expect(isEmergencySituation(exacta)).toBe(true);
+    expect(isEmergencyText(exacta, "es")).toBe(true);
+    expect(isHealthQuestion(exacta)).toBe(true);
+  });
+
+  it("una letra caída dentro de la palabra-signo ya no la vuelve invisible (cara por raíz)", () => {
+    // Sin la «a» inicial y sin una vocal en medio: las frases exactas
+    // fallaban en las tres caras; la raíz casa por principio de palabra.
+    expect(isEmergencySituation("se esta tragantando")).toBe(true);
+    expect(isEmergencySituation("se esta atragantndo")).toBe(true);
+    expect(isEmergencyText("se esta tragantando", "es")).toBe(true);
+    expect(isEmergencyText("se esta atragantndo", "es")).toBe(true);
+    // Los equivalentes de dictado en inglés y portugués.
+    expect(isEmergencySituation("my toddler is chokng on a grape")).toBe(true);
+    expect(isEmergencySituation("o bebê está engasgndo com um pedaço de pão")).toBe(true);
+  });
+
+  it("los sinónimos que faltaban: asfixia y respiración que cuesta", () => {
+    expect(isEmergencySituation("se está asfixiando, ¿qué hago?")).toBe(true);
+    expect(isEmergencySituation("le cuesta mucho respirar")).toBe(true);
+    expect(isEmergencySituation("a mi padre le cuesta respirar desde hace un rato")).toBe(true);
+    expect(isEmergencySituation("she is struggling to breathe")).toBe(true);
+    expect(isEmergencySituation("ele tem dificuldade para respirar")).toBe(true);
+  });
+
+  it("la cara por raíz no abre falsos positivos: debate, ficción e historia quedan fuera", () => {
+    expect(isEmergencySituation("¿cómo gano un argumento en un debate?")).toBe(false);
+    expect(isEmergencyText("¿cómo gano un argumento en un debate?", "es")).toBe(false);
+    expect(isEmergencySituation("escribe un cuento sobre un niño que se atraganta")).toBe(false);
+    expect(isEmergencySituation("¿qué fue la gripe española de 1918?")).toBe(false);
+    expect(isEmergencyText("¿qué fue la gripe española de 1918?", "es")).toBe(false);
+    expect(isEmergencySituation("En la novela, un hombre se atraganta en la cena")).toBe(false);
+  });
+});
+
+describe("H-05 (adversaria): la raíz sola no declara la situación — la metáfora no es una emergencia", () => {
+  it("la sonda exacta de la adversaria: «choke» deportivo no dispara ninguna cara", () => {
+    // «Choke under pressure» es fallar bajo presión: sujeto genérico
+    // de clase, verbo en presente simple, sin víctima ni cuerpo.
+    const q = "Why do golfers choke under pressure in finals?";
+    expect(isEmergencySituation(q)).toBe(false);
+    expect(isHealthQuestion(q)).toBe(false);
+    expect(isEmergencyText(q, "en")).toBe(false);
+    expect(gatePreemptsDeepResearch(q, "en")).toBe(false);
+  });
+
+  it("gemelas de la metáfora: escenario, examen, deporte portugués y «atragantarse» un tema", () => {
+    expect(isEmergencySituation("She choked on stage and forgot her lines")).toBe(false);
+    expect(isEmergencySituation("I choked during the exam and left half of it blank")).toBe(false);
+    expect(isEmergencySituation("por que os jogadores engasgam sob pressão?")).toBe(false);
+    expect(isEmergencySituation("se me atragantan las matemáticas")).toBe(false);
+    // La cara de SITUACIÓN queda curada en las tres lenguas (la
+    // corroboración mira las raíces de todas). La puerta de SALUD
+    // solo se acotó para «chok» — el resto nombrado y su porqué
+    // van en el informe del carril y en la fixture siguiente.
+  });
+
+  it("las variantes dictadas medidas siguen disparando: el contexto de cuerpo las sostiene", () => {
+    // Auxiliar ante la palabra-signo.
+    expect(isEmergencySituation("he is chokng")).toBe(true);
+    expect(isEmergencySituation("se esta tragantando")).toBe(true);
+    expect(isEmergencySituation("se esta atragantndo")).toBe(true);
+    // Víctima nombrada cerca de la palabra-signo.
+    expect(isEmergencySituation("my toddler is chokng on a grape")).toBe(true);
+    expect(isEmergencySituation("o bebê está engasgndo com um pedaço de pão")).toBe(true);
+    expect(isEmergencySituation("my baby is suffocatng")).toBe(true);
+    // Enclítico reflexivo pegado al gerundio.
+    expect(isEmergencySituation("Atragantándose")).toBe(true);
+    // El caso del conjunto ciego v2: pretérito con «se» antes de la raíz.
+    expect(isEmergencySituation("mi hijo de 3 años se atragantó con una uva y no puede toser")).toBe(true);
+    // La puerta de salud con la familia «chok» y cuerpo presente sigue cerrando.
+    expect(isHealthQuestion("my daughter is choking, how do I help her?")).toBe(true);
+    expect(isHealthQuestion("How do I stop choking?")).toBe(true);
+  });
+
+  it("la pregunta instructiva genérica sobre atragantamiento sigue cerrando la puerta de salud", () => {
+    // La familia «atragant» no comparte la homografía de «chok» y
+    // su casado en isHealthQuestion NO se tocó en H-05 — también
+    // porque el dueño excluyó H-04 el 2026-11-01 («lo de la
+    // investigación solo déjala así»): la desviación de esta
+    // subpregunta por la segunda red se acepta tal cual, y esta
+    // aserción fija que la cura de H-05 no la deshace por detrás.
+    expect(gatePreemptsDeepResearch("¿Qué se debe hacer ante un atragantamiento?", "es")).toBe(true);
+  });
+});
+
+describe("ADV2-07 + ADV-E1 (segunda adversaria / Grok): la puerta aprende víctimas y eventos", () => {
+  it("ADV2-07: la víctima corriente del parte, en participio, declara en las caras del suceso", () => {
+    // La tabla exacta de la adversaria: antes de esta pieza, las
+    // cuatro caras salían en falso; la frontera entera era la lista.
+    for (const [q, lang] of [
+      ["Hay un señor atragantado en el restaurante.", "es"],
+      ["Un vecino quedó atragantado con una espina de pescado.", "es"],
+      ["Um cliente engasgado com um osso no restaurante.", "pt"],
+      ["Patient choking in the waiting room.", "en"],
+    ] as Array<[string, GateLang]>) {
+      expect(isEmergencySituation(q), q).toBe(true);
+      expect(isEmergencyText(q, lang), q).toBe(true);
+      expect(gatePreemptsDeepResearch(q, lang), q).toBe(true);
+    }
+    // La forma telegráfica sin víctima nombrada: la cara nueva.
+    expect(isEmergencySituation("Choking at table four!")).toBe(true);
+    // Control con la misma forma y víctima de la lista vieja.
+    expect(isEmergencySituation("Hay un hombre atragantado en el restaurante.")).toBe(true);
+  });
+
+  it("ADV-E1: los eventos que no son atragantamiento declaran (desmayo, ahogamiento, inconsciencia)", () => {
+    for (const q of [
+      "El conductor se desmayó en la calle.",
+      "Mi papá se ahogó con un hueso.",
+      "Hay una señora atragantada en el restaurante.",
+      "Alguien se desmayó en la calle.",
+      "Paciente inconsciente en la camilla.",
+      "atragantado",
+    ]) {
+      expect(isEmergencySituation(q), q).toBe(true);
+    }
+  });
+
+  it("el cruce víctima × evento entra entero por el diseño", () => {
+    for (const q of [
+      "Mi madre se desmayó en la cocina.",
+      "The patient fainted in the waiting room.",
+      "O cliente desmaiou no restaurante.",
+      "El bebé se ahogó con un juguete.",
+      "My wife fainted at the store.",
+      "Mi abuelo está inconsciente.",
+      "Los niños se están atragantando.",
+      "El señor se desvaneció en la calle.",
+      "La señora se está ahogando.",
+      "Grandma passed out at church.",
+      "O paciente está engasgado com um osso.",
+    ]) {
+      expect(isEmergencySituation(q), q).toBe(true);
+    }
+  });
+
+  it("la cara telegráfica distingue el parte del tema: el sustantivo abstracto a secas sigue fuera", () => {
+    expect(isEmergencySituation("atragantamiento")).toBe(false);
+    // Precio nombrado de la cara: el fragmento que es título o pie
+    // («Choking.», «Drowning.») cae hacia la emergencia.
+    expect(isEmergencySituation("Choking.")).toBe(true);
+    expect(isEmergencySituation("Drowning.")).toBe(true);
+  });
+
+  it("los temas de los tallos nuevos quedan fuera: la pregunta y las metáforas asentadas no declaran", () => {
+    expect(isEmergencySituation("¿Qué es el desmayo?")).toBe(false);
+    expect(isEmergencySituation("Estoy ahogado en deudas.")).toBe(false);
+    expect(isEmergencySituation("Me estoy ahogando en un vaso de agua.")).toBe(false);
+    expect(isEmergencySituation("Estou me afogando em dívidas.")).toBe(false);
+    // La ventana aguanta donde la cara permisiva no aguantaba.
+    expect(isEmergencySituation("My teacher explained why people choke in exams")).toBe(false);
+  });
+});
+
+describe("ADV2-08 + ADV-E2: precisión de prefijos, dos vetos y los precios declarados", () => {
+  it("el prefijo sin resto deja de declarar: «helpful», «babysitter» y «personal» no son cuerpos", () => {
+    expect(isEmergencySituation("The babysitter choked during the school play.")).toBe(false);
+    expect(isEmergencySituation("This helpful video explains choking hazards for kids.")).toBe(false);
+    expect(isEmergencySituation("My personal trainer choked at the competition.")).toBe(false);
+    // Y la cara de salud de «personal» cae con él: su único
+    // «contexto» era el prefijo (efecto medido y declarado, en la
+    // dirección segura, vía stemHitHasBodyContext en la pierna chok).
+    expect(isHealthQuestion("My personal trainer choked at the competition.")).toBe(false);
+  });
+
+  it("los plurales reales siguen entrando por la regla del resto (s / es)", () => {
+    expect(isEmergencySituation("Hay niños atragantados en el patio.")).toBe(true);
+    expect(isEmergencySituation("Las mujeres se desmayaron en la sala.")).toBe(true);
+    expect(isEmergencySituation("Los niños se están atragantando.")).toBe(true);
+  });
+
+  it("el veto de tema cierra el tema de seguridad de producto, abra o no el mensaje", () => {
+    // En posición cero: sin el pajar acolchado el veto no casaba.
+    expect(isEmergencySituation("Choking hazard for toddlers is real.")).toBe(false);
+    // Con la víctima nombrada al lado del tallo — sin el veto, la
+    // ventana la ataría a un cuerpo y declararía el «suceso».
+    expect(isEmergencySituation("Este juguete tiene peligro de atragantamiento para bebés.")).toBe(false);
+    expect(isEmergencySituation("Este brinquedo tem risco de engasgo para bebês.")).toBe(false);
+  });
+
+  it("el veto del modismo cierra «choke back»: contener las lágrimas no es una obstrucción", () => {
+    expect(isEmergencySituation("She was choking back tears during the speech.")).toBe(false);
+    expect(isEmergencySituation("He choked back a laugh during the meeting.")).toBe(false);
+  });
+
+  it("PRECIOS declarados, fixturados como disparo aceptado — nadie los «arregla» en silencio", () => {
+    // 08-5, la metáfora familiar: la víctima es real en la lista y
+    // el tallo es real; la propia adversaria la contó como precio.
+    expect(isEmergencySituation("My son choked at his piano recital.")).toBe(true);
+    // ADV-E2, la metáfora con auxiliar: idéntica, palabra a
+    // palabra, a su gemela real — todo veto de marco vetaría la
+    // emergencia verdadera con la misma frase (ver §6.3 del diseño
+    // y el punto 9 de la cabecera del módulo).
+    expect(isEmergencySituation("Se atragantó en el debate.")).toBe(true);
+    expect(isEmergencySituation("Se atragantó en el partido.")).toBe(true);
+    // La gemela real que veta cualquier cura de E2: sigue dentro.
+    expect(isEmergencySituation("Se atragantó con una espina")).toBe(true);
+    // X-09, el precio que trae el tallo «drown»: los vetos de deuda
+    // cubren la forma asentada; esta va por la pierna del auxiliar.
+    expect(isEmergencySituation("He is drowning in work emails.")).toBe(true);
+    // X-12/X-22, fragmentos de tema con víctima nombrada: precio
+    // preexistente, sin cambio — la alternativa (excluir las
+    // formas-sustantivo del tallo) mataría la forma real de abajo.
+    expect(isEmergencySituation("Atragantamiento en bebés.")).toBe(true);
+    expect(isEmergencySituation("Mi hijo tiene un atragantamiento.")).toBe(true);
+  });
+});
+
+describe("F-1 (auditoría de la RCP, 2026-11-06): la reanimación en curso y el «cómo se hace»", () => {
+  it("REGRESIÓN fixturada: las siete frases de suceso de la auditoría disparan la cara de situación", () => {
+    // Las doce frases de la batería de la auditoría entran como
+    // regresión, NUNCA como conjunto de medida (regla del sello:
+    // la cura se valida contra el conjunto ciego fresco 04,
+    // estudios/E3-J10-APERTURA.md). Medición de base, sobre la capa
+    // heredada: las doce salían en falso en las tres caras.
+    for (const q of [
+      "está haciendo rcp",
+      "le están haciendo rcp en la calle",
+      "le están haciendo reanimación",
+      "they are doing cpr on him",
+      "someone is doing cpr",
+      "estão fazendo rcp nele",
+      "estão a fazer rcp",
+    ]) {
+      expect(isEmergencySituation(q), q).toBe(true);
+    }
+    // Y por tanto tampoco hacen cola tras una generación en curso
+    // (la garantía 1 del fichero pasa por isEmergencyText).
+    expect(isEmergencyText("le están haciendo rcp en la calle", "es")).toBe(true);
+    expect(isEmergencyText("they are doing cpr on him", "en")).toBe(true);
+    expect(isEmergencyText("estão fazendo rcp nele", "pt")).toBe(true);
+  });
+
+  it("REGRESIÓN fixturada: las cinco frases de «cómo se hace» cierran la puerta de salud, sin signos", () => {
+    for (const q of ["cómo se hace la rcp", "como hacer rcp", "cómo hago rcp", "como se faz rcp", "como faço rcp"]) {
+      expect(isHealthQuestion(q), q).toBe(true);
+      // Una pregunta de instrucción no es un parte: la cara de
+      // situación no la declara suceso.
+      expect(isEmergencySituation(q), q).toBe(false);
+    }
+  });
+
+  it("la raíz nueva sostiene el suceso sin frase exacta, con el cuerpo cerca", () => {
+    expect(isEmergencySituation("empezaron la reanimación con mi padre y no paran")).toBe(true);
+    expect(isEmergencySituation("a minha mãe está em reanimação no hospital")).toBe(true);
+  });
+
+  it("el suelo en los dos mundos: sin pack cae el texto seguro; con pack, responde la guía", () => {
+    // Sin pack: la capa determinista sirve el texto fijo seguro
+    // (la precedencia que ChatScreen aplica, modelada por el
+    // instrumento de la evaluación ciega).
+    for (const [q, lang] of [
+      ["le están haciendo rcp en la calle", "es"],
+      ["como faço rcp", "pt"],
+    ] as Array<[string, GateLang]>) {
+      const row = deterministicAnswer({ id: "f1", type: "emergencia", lang, expected: "fixed-text", query: q });
+      expect(row.route, q).not.toBe("model");
+      expect(row.nidoText, q).toBe(healthSafeText(lang));
+    }
+    // Con pack: el trozo de la guía de RCP del Esencial es
+    // evidencia de salud para esta puerta y la ruta de guías lo
+    // elige: la respuesta es la guía misma, en la lengua de quien
+    // pregunta, en las tres lenguas.
+    for (const lang of ["es", "en", "pt"] as const) {
+      const trozo = {
+        chunkId: "pack:nido-esencial-e5:10",
+        docId: "pack:nido-esencial-e5:10",
+        title: `${CPR_GUIDE[lang].title} — ${CPR_GUIDE[lang].headings.compressions}`,
+        body: CPR_GUIDE[lang].compressions.join(" "),
+        score: 1,
+        rawScore: 0.9,
+        matchType: "semantic" as const,
+      };
+      expect(hasHealthEvidence([trozo as RetrievedChunk]), lang).toBe(true);
+      expect(pickGuideChunk([trozo as RetrievedChunk], lang)?.chunkId, lang).toBe(trozo.chunkId);
+    }
+  });
+
+  it("los bordes no se mueven: la sigla como tema no declara, y «como hacer» sin salud no cierra", () => {
+    // La raíz nueva sin contexto de cuerpo no declara el tema
+    // (la disciplina de H-05 manda también sobre «rcp»/«cpr»).
+    expect(isEmergencySituation("Quiero hacer un curso de rcp el mes que viene")).toBe(false);
+    expect(isEmergencySituation("CPR certification classes near me")).toBe(false);
+    // La señal nueva sin término de salud no cierra la puerta.
+    expect(isHealthQuestion("como hacer una mesa de madera con palets")).toBe(false);
+    expect(isHealthQuestion("como se faz um bolo de chocolate")).toBe(false);
+    // Los vetos siguen mandando ANTES que los signos nuevos: la
+    // ficción que cuenta el mismo suceso no lo declara.
+    expect(isEmergencySituation("En la novela, un médico le está haciendo reanimación a un pasajero")).toBe(false);
+    expect(isEmergencySituation("In the movie, a lifeguard is doing cpr on a swimmer")).toBe(false);
+  });
+});
+
+describe("0.1.87 (giro del gas): la fuga de gas contada es una situación de emergencia", () => {
+  it("la frase exacta del dueño dispara la cara de situación, y con ella la puerta entera", () => {
+    // El turno de la 0.1.86: «Que hago si huele a gas en mi casa?»
+    // no disparaba NINGUNA red de la puerta. Dirimen 2026-11-09.
+    expect(isEmergencySituation("Que hago si huele a gas en mi casa?")).toBe(true);
+    expect(isEmergencyText("Que hago si huele a gas en mi casa?", "es")).toBe(true);
+  });
+
+  it("las formas corrientes de contar la fuga, en las tres lenguas", () => {
+    for (const q of [
+      "Huele mucho a gas en la cocina",
+      "Hay un olor a gas muy fuerte en el patio",
+      "Tengo una fuga de gas en casa",
+      "It smells like gas in the kitchen",
+      "There is a gas leak in the basement",
+      "Está vazando gás na cozinha",
+      "Tem um cheiro de gás muito forte no banheiro",
+    ]) {
+      expect(isEmergencySituation(q), q).toBe(true);
+    }
+  });
+
+  it("el tema y la prevención no son un suceso: los bordes no se mueven", () => {
+    // El TEMA suelto, sin suceso: el gas como objeto de estudio o
+    // de compra, no una fuga ocurriendo.
+    expect(isEmergencySituation("¿Cómo funciona un detector de gas?")).toBe(false);
+    expect(isEmergencySituation("Historia del gas natural en Europa")).toBe(false);
+    // ACLARACIÓN: «¿cuánto cuesta reparar una fuga de gas?» SÍ nombra
+    // la fuga en presente («una fuga de gas» es el signo), y a favor
+    // de la seguridad la puerta lo trata como suceso, igual que la
+    // RCP en curso se aceptó como precio declarado en F-1: ante la
+    // duda sobre una fuga viva, la respuesta segura manda.
+    // La ficción que cuenta el mismo suceso no lo declara.
+    expect(isEmergencySituation("En la novela, huele a gas en la casa y nadie hace nada")).toBe(false);
+    // Las metáforas asentadas del gas tampoco.
+    expect(isEmergencySituation("El delantero va a todo gas esta temporada")).toBe(false);
+    expect(isEmergencySituation("The striker is on a roll, full gas this season")).toBe(false);
+  });
+});
+
+describe("gatePreemptsDeepResearch (R-07: la decisión antes de la bifurcación)", () => {
+  it("emergencia o salud con Investigar activo: el turno va protegido", () => {
+    expect(gatePreemptsDeepResearch("Que hago si argument se esta atragantando?", "es")).toBe(true);
+    expect(gatePreemptsDeepResearch("mi hijo tiene fiebre, ¿qué hago?", "es")).toBe(true);
+    expect(gatePreemptsDeepResearch("my daughter is choking, how do I help her?", "en")).toBe(true);
+    expect(gatePreemptsDeepResearch("o que fazer se meu filho está com febre?", "pt")).toBe(true);
+  });
+
+  it("una pregunta de investigación ordinaria no se desvía", () => {
+    expect(gatePreemptsDeepResearch("¿cuáles son los efectos del cambio climático en el Mediterráneo?", "es")).toBe(false);
+    expect(gatePreemptsDeepResearch("what were the causes of the First World War?", "en")).toBe(false);
+    expect(gatePreemptsDeepResearch("", "es")).toBe(false);
+    expect(gatePreemptsDeepResearch("   ", "es")).toBe(false);
+  });
+
+  it("el pasado no se desvía: el veto histórico sigue mandando sobre la decisión", () => {
+    expect(gatePreemptsDeepResearch("¿cuántas personas murieron de gripe en 1918?", "es")).toBe(false);
+    expect(gatePreemptsDeepResearch("Qual foi a febre espanhola de 1918 e quantas pessoas matou?", "pt")).toBe(false);
+    expect(gatePreemptsDeepResearch("How many people died in the flu pandemic of 1918?", "en")).toBe(false);
+  });
+});
+
+describe("healthSafeText", () => {
+  it("tres lenguas, con la llamada de urgencia y sin ningún número inventado", () => {
+    for (const lang of ["es", "en", "pt"] as const) {
+      const text = healthSafeText(lang);
+      expect(text.length).toBeGreaterThan(100);
+      expect(text).not.toMatch(/\d{3,}/);
+    }
+    expect(healthSafeText("es")).toContain("llama ahora mismo");
+    expect(healthSafeText("en")).toContain("call your emergency number");
+    expect(healthSafeText("pt")).toContain("ligue agora mesmo");
+  });
+
+  it("paridad trilingüe contada y lo esencial trazado a las guías (sustancia)", () => {
+    const texts = (["es", "en", "pt"] as const).map((lang) => healthSafeText(lang));
+    // Misma estructura: 6 bloques y 6 pasos numerados en cada lengua.
+    for (const text of texts) {
+      expect(text.split("\n\n")).toHaveLength(6);
+      expect(text.match(/^\d\. /gm)).toHaveLength(6);
+    }
+    // Longitudes de la misma familia (ninguna lengua queda en el suelo viejo).
+    const words = texts.map((t) => t.split(/\s+/).length);
+    for (const w of words) {
+      expect(w).toBeGreaterThan(250);
+      expect(Math.abs(w - words[0]) / words[0]).toBeLessThan(0.15);
+    }
+    // Lo esencial de las guías, en cada lengua: RCP, presión, atragantamiento, dosis por prospecto.
+    expect(healthSafeText("es")).toContain("centro del pecho");
+    expect(healthSafeText("en")).toContain("center of the chest");
+    expect(healthSafeText("pt")).toContain("centro do peito");
+    expect(healthSafeText("es")).toContain("prospecto del medicamento");
+    expect(healthSafeText("en")).toContain("medicine's leaflet");
+    expect(healthSafeText("pt")).toContain("bula do medicamento");
+  });
+});
+
+describe("hasHealthEvidence", () => {
+  const chunk = (chunkId: string): RetrievedChunk => ({ chunkId }) as RetrievedChunk;
+
+  it("los packs de salud cuentan, con o sin sufijo de embeddings", () => {
+    expect(hasHealthEvidence([chunk("pack:nido-esencial:5")])).toBe(true);
+    expect(hasHealthEvidence([chunk("pack:nido-esencial-e5:5")])).toBe(true);
+    expect(hasHealthEvidence([chunk("pack:nido-ninos:2"), chunk("pack:nido-viaje:1")])).toBe(true);
+    expect(hasHealthEvidence([chunk("pack:nido-crisis:9")])).toBe(true);
+  });
+
+  it("otros packs y los documentos propios no son evidencia de salud de la puerta", () => {
+    expect(hasHealthEvidence([chunk("pack:nido-viaje:1")])).toBe(false);
+    expect(hasHealthEvidence([chunk("doc:local:7")])).toBe(false);
+    expect(hasHealthEvidence([])).toBe(false);
+  });
+
+  it("0.1.87: un fragmento de un pack importado verificado SÍ es evidencia — la marca es el registro, no la lista cerrada", () => {
+    // El campo real del giro del gas: el fragmento 131 de la guía de
+    // la fuga, de un pack importado por la puerta firmada. Su nombre
+    // vive solo en estos datos de regresión; el código de producción
+    // solo ve el conjunto de ids que el registro verifica.
+    const gasChunk = chunk("pack:local-salvora-emergencias-casa:131");
+    const verified = new Set(["local-salvora-emergencias-casa"]);
+    expect(hasHealthEvidence([gasChunk], verified)).toBe(true);
+    // Sin el conjunto (el llamador no pudo leer el registro) o con
+    // otro pack en el registro, el mismo fragmento no abre nada: la
+    // identidad local- no basta.
+    expect(hasHealthEvidence([gasChunk])).toBe(false);
+    expect(hasHealthEvidence([gasChunk], new Set(["local-otro-pack"]))).toBe(false);
+    // Y los integrados de salud siguen contando sin conjunto.
+    expect(hasHealthEvidence([chunk("pack:nido-esencial:5")], verified)).toBe(true);
+  });
+});
+
+describe("0.1.88 — la red de sustitución con la guía en las fuentes (dirimen del gas)", () => {
+  const chunk = (chunkId: string): RetrievedChunk => ({ chunkId }) as RetrievedChunk;
+  const verified = new Set(["local-salvora-emergencias-casa"]);
+  const coChunk = chunk("pack:nido-esencial-e5:253");
+  const gasChunk = chunk("pack:local-salvora-emergencias-casa:131");
+  // Las fuentes del turno de la foto, en su orden: la procedencia
+  // cita por índice. Fuente 1: el monóxido del Esencial. Fuente 2:
+  // la guía de la fuga del pack verificado.
+  const photoSources = [coChunk, gasChunk];
+  // El texto del modelo que el juez no pudo verificar: sus frases
+  // quedan marcadas como del modelo, sin fuente que las apoye.
+  const modelProvenance: SentenceProvenance[] = [
+    { text: "Si huele a gas en tu casa, es posible que tengas problemas de salud.", origin: { kind: "model", reason: "unverified-language" } },
+  ];
+  const guideProvenance: SentenceProvenance[] = [
+    { text: "Sal de la zona a pie de inmediato y llama al 911 desde fuera.", origin: { kind: "source", n: 2, support: 0.9 } },
+  ];
+  const base = {
+    deepTurn: false,
+    isHealth: false,
+    isEmergency: true,
+    verifiedImportedPackIds: verified,
+  };
+
+  it("el hueco de la foto: hay evidencia entre las fuentes y aun así el texto sin verificar cae al texto seguro", () => {
+    // La condición vieja no sustituía aquí: hasHealthEvidence mira
+    // las fuentes, y la guía del pack está entre ellas.
+    expect(hasHealthEvidence(photoSources, verified)).toBe(true);
+    expect(
+      shouldSubstituteSafeText({ ...base, grounding: "unverified", sources: photoSources, provenance: modelProvenance }),
+    ).toBe(true);
+    expect(
+      shouldSubstituteSafeText({ ...base, grounding: "abstained", sources: photoSources, provenance: modelProvenance }),
+    ).toBe(true);
+  });
+
+  it("si una frase sí se apoya en la guía, no se sustituye: el apoyo real protege", () => {
+    expect(
+      shouldSubstituteSafeText({ ...base, grounding: "unverified", sources: photoSources, provenance: guideProvenance }),
+    ).toBe(false);
+  });
+
+  it("sin evidencia entre las fuentes, la sustitución clásica sigue igual", () => {
+    const viaje = [chunk("pack:nido-viaje:1")];
+    expect(shouldSubstituteSafeText({ ...base, grounding: "unverified", sources: viaje, provenance: modelProvenance })).toBe(true);
+    const coProvenance: SentenceProvenance[] = [
+      { text: "El monóxido no se huele: sal y ventila.", origin: { kind: "source", n: 1, support: 0.9 } },
+    ];
+    expect(shouldSubstituteSafeText({ ...base, grounding: "unverified", sources: [coChunk], provenance: coProvenance })).toBe(false);
+  });
+
+  it("grounded y partial no se tocan nunca por esta puerta (doctrina sellada del juez)", () => {
+    expect(shouldSubstituteSafeText({ ...base, grounding: "partial", sources: photoSources, provenance: modelProvenance })).toBe(false);
+    expect(shouldSubstituteSafeText({ ...base, grounding: "grounded", sources: photoSources, provenance: modelProvenance })).toBe(false);
+  });
+
+  it("las demás puertas quedan como estaban", () => {
+    expect(shouldSubstituteSafeText({ ...base, deepTurn: true, grounding: "unverified", sources: photoSources, provenance: modelProvenance })).toBe(false);
+    expect(shouldSubstituteSafeText({ ...base, grounding: "unverified", sources: [], provenance: modelProvenance })).toBe(false);
+    expect(
+      shouldSubstituteSafeText({ ...base, isHealth: false, isEmergency: false, grounding: "unverified", sources: photoSources, provenance: modelProvenance }),
+    ).toBe(false);
+  });
+});
+
+describe("isEmergencySituation · la caída narrada y la inmovilidad (§4 del bloque del loop, H-LOOP-4)", () => {
+  // La frase viva de la pasada en vivo, contada en el cuadro
+  // libre de Emergencia: «Mi vecino se cayó de una escalera y
+  // no se puede mover». La puerta no traía signo de caída
+  // narrada («se cayó de…» no estaba; el único «cayó» era «se
+  // cayo un cable») ni de inmovilidad («no se mueve» no está
+  // contenido en «no se puede mover»), y el turno salía como
+  // chat corriente y respondía sin sentido. Los tres casos de
+  // idioma nacen en rojo; las dos guardas de objeto nacen en
+  // verde esperado y fijan la cara de los signos nuevos.
+  it("la frase viva, en español: la caída de la escalera con inmovilidad es situación", () => {
+    expect(isEmergencySituation("Mi vecino se cayó de una escalera y no se puede mover")).toBe(true);
+  });
+
+  it("la frase viva, en inglés: fell off a ladder and can't move", () => {
+    expect(isEmergencySituation("My neighbor fell off a ladder and can't move")).toBe(true);
+  });
+
+  it("la frase viva, en portugués: caiu de uma escada e não se pode mover", () => {
+    expect(isEmergencySituation("O meu vizinho caiu de uma escada e não se pode mover")).toBe(true);
+  });
+
+  it("guarda de objeto: que se caiga el precio de la casa no es una emergencia", () => {
+    expect(isEmergencySituation("Se cayó el precio de la casa")).toBe(false);
+  });
+
+  it("guarda de objeto: el móvil que se cae y no se puede encender tampoco", () => {
+    expect(isEmergencySituation("Se me cayó el móvil y no se puede encender")).toBe(false);
+  });
+});

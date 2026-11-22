@@ -1,0 +1,65 @@
+{
+  "author": {
+    "name": "NIDO contributors"
+  },
+  "dependencies": {
+    "@balena/unbzip2-stream": "1.4.2",
+    "@napi-rs/canvas": "1.1.1",
+    "@tesseract.js-data/eng": "1.0.0",
+    "@tesseract.js-data/por": "1.0.0",
+    "@tesseract.js-data/spa": "1.0.0",
+    "better-sqlite3-multiple-ciphers": "13.1.1",
+    "classnames": "^2.5.1",
+    "electron-updater": "7.0.0-alpha.13",
+    "highlight.js": "^11.12.0",
+    "markdown-it": "^14.3.3",
+    "node-llama-cpp": "^3.22.3",
+    "pdfjs-dist": "4.10.38",
+    "pretty-ms": "^9.3.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tar": "7.5.23",
+    "tesseract.js": "7.0.0"
+  },
+  "description": "NIDO PC: asistente local con modelos en tu equipo, privado y sin conexión. Todo queda en tu ordenador.",
+  "devDependencies": {
+    "@electron/asar": "^4.3.2",
+    "@electron/fuses": "^2.1.3",
+    "@types/markdown-it": "^14.2.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/semver": "^7.8.0",
+    "@vitejs/plugin-react": "^5.1.4",
+    "cross-env": "^10.1.0",
+    "electron": "^45.3.3",
+    "electron-builder": "27.0.0-alpha.14",
+    "rimraf": "^6.1.3",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vite-plugin-electron": "^0.29.0",
+    "vite-plugin-electron-renderer": "^0.14.6",
+    "zx": "^8.8.5"
+  },
+  "license": "MIT",
+  "main": "./dist-electron/index.js",
+  "name": "nido-pc",
+  "overrides": {
+    "app-builder-lib": {
+      "minimatch": "11.0.8"
+    }
+  },
+  "private": true,
+  "scripts": {
+    "bench": "node scripts/bench.mjs",
+    "prebuild:vite": "node scripts/sync-core.mjs",
+    "build:vite": "node scripts/buildPhoto.mjs && rimraf dist dist-electron && vite build",
+    "dist:appimage": "electron-builder --config ./electron-builder.ts --linux AppImage",
+    "dist:bench": "cross-env NIDO_BUILD_FLAVOR=bench electron-builder --config ./electron-builder.ts --linux --dir",
+    "dist:dir": "electron-builder --config ./electron-builder.ts --linux --dir",
+    "hardening": "node scripts/hardening.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "type": "module",
+  "version": "0.1.0"
+}

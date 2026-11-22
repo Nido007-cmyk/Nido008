@@ -1,0 +1,159 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ */
+
+/**
+ * cannedResponses.ts — deterministic responses for high-confidence intents.
+ *
+ * A 0.5B model burns a full generation (latency + battery) on inputs with
+ * zero ambiguity: pure greetings, "who are you", "what can you do". Serving
+ * these from templates gives exact bilingual quality, zero latency, and zero
+ * hallucination risk on first impressions.
+ *
+ * MARKING (do not remove): every canned hit is flagged `deterministic: true`
+ * on the result. Telemetry (P2.4) and evals must be able to distinguish
+ * template responses from model generations. Canned text must NEVER be
+ * presented as model output.
+ *
+ * Trigger discipline: patterns are anchored to the WHOLE message (or the
+ * message must consist entirely of greeting phrases, same rule as
+ * src/routing/classify.ts). "hola, recuérdame comprar pan" is NOT a pure
+ * greeting and falls through to the normal loop. When in doubt, don't match.
+ *
+ * Pure, no dependencies, fully unit-tested.
+ */
+
+export type CannedKind = "greeting" | "identity" | "help" | "privacy";
+export type CannedLang = "es" | "en" | "pt";
+
+export interface CannedHit {
+  kind: CannedKind;
+  lang: CannedLang;
+  text: string;
+  /** Always true — marks this response as template-served, not model-generated. */
+  deterministic: true;
+}
+
+// One greeting phrase, trailing punctuation only (mirrors classify.ts).
+const GREETING_PHRASE_RE =
+  /^[¡¿]?(hi|hello|hey|hey there|yo|sup|wake up|good (morning|afternoon|evening|night)|how(?:'s| is| are) it going|how are you|what'?s up|thanks?( you)?|thank you|bye|goodbye|see ya|see you|ok(ay)?|cool|nice|hola|buen(os|as) d[ií]as|buen d[ií]a|buenas (tardes|noches)|buenas|qu[eé] tal|c[oó]mo (est[aá]s|est[aá]|vas?|te va)|qu[eé] (pasa|hay|cuentas)|saludos|adi[oó]s|hasta luego|nos vemos|hasta pronto|gracias|muchas gracias|mil gracias|de nada|ol[aá]|bom dia|boa tarde|boa noite|tudo bem|como vai|obrigado|obrigada|tchau|at[eé] logo)[!.?~]*$/i;
+
+function isPureGreeting(trimmed: string): boolean {
+  const segments = trimmed
+    .split(/[,;]|\band\b|\by\b/i)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  return segments.length > 0 && segments.every((seg) => GREETING_PHRASE_RE.test(seg));
+}
+
+// Anchored: the whole message must BE the question, not contain it.
+// Leading ¡/¿ allowed for Spanish usage.
+// TESTFIX-2026-10-08: added Spanish third-person ("quien es nido",
+// "qué es nido") — physical evidence: "¿Quién es nido?" → model
+// hallucinated "Nido es un termómetro de datos".
+const IDENTITY_RE =
+  /^[¡¿]?(quién eres|quien eres|qu[eé] eres|c[oó]mo te llamas|como te llamas|cu[aá]l es tu nombre|qui[eé]n es nido|qu[eé] es nido|who are you|what are you|your name|what'?s your name|who is nido|what is nido|quem [eé] voc[eê]|qual [eé] seu nome|quem [eé] nido|o que [eé] nido)[?.!]*$/i;
+
+const HELP_RE =
+  /^[¡¿]?(ayuda|help|qu[eé] puedes hacer|que puedes hacer|cu[aá]les son tus funciones|c[oó]mo funcionas|what can you do|what do you do|how do you work|ajuda|o que voc[eê] pode fazer|como voc[eê] funciona)[?.!]*$/i;
+
+// TESTFIX-2026-10-08: "¿Dónde guardas mis datos?" has a fixed factual
+// answer (on-device SQLCipher, no cloud, only the user). Physical
+// evidence: the model echoed the question + "Te puedo ayudar con eso."
+// Deterministic answer eliminates the dodge and the hallucination risk
+// on a privacy-critical question.
+// FIX 2026-10-08: añadir variantes en tercera persona ("dónde guardan",
+// "dónde guarda") — evidencia física: "dónde guardan mis datos?" no
+// matcheaba y el modelo improvisó con mala gramática.
+const PRIVACY_RE =
+  /^[¡¿]?(d[oó]nde guardas mis datos|d[oó]nde guardan mis datos|d[oó]nde guarda mis datos|donde guardas mi informaci[oó]n|donde guardan mi informaci[oó]n|d[oó]nde est[aá]n mis datos|d[oó]nde se guardan mis datos|qui[eé]n puede ver mis datos|mis datos est[aá]n seguros|where do you store my data|where do they store my data|where does it store my data|where is my data stored|where are my data stored|who can see my data|is my data (safe|private)|onde voc[eê] guarda meus dados|onde ficam meus dados|quem pode ver meus dados|meus dados est[aã]o seguros)[?.!]*$/i;
+
+const TEMPLATES: Record<CannedKind, Record<CannedLang, string>> = {
+  greeting: {
+    es: "¡Hola! Soy NIDO. ¿En qué te ayudo?",
+    en: "Hey! I'm NIDO. What can I do for you?",
+    pt: "Olá! Sou NIDO. Como posso ajudar?",
+  },
+  identity: {
+    es: "Soy NIDO, tu asistente personal. Vivo en tu computadora, funciono sin internet y todo lo que hablamos se queda aquí, en privado.",
+    en: "I'm NIDO, your personal assistant. I live on your computer, work fully offline, and everything we talk about stays here, private.",
+    pt: "Sou NIDO, seu assistente pessoal. Moro no seu computador, funciono sem internet e tudo que conversamos fica aqui, em privado.",
+  },
+  help: {
+    es: "Puedo ayudarte con recordatorios, notas, cálculos, responder preguntas y recordar cosas por ti. Dime qué necesitas.",
+    en: "I can help with reminders, notes, calculations, answering questions, and remembering things for you. Just tell me what you need.",
+    pt: "Posso ajudar com lembretes, notas, cálculos, responder perguntas e lembrar coisas por você. Me diga o que precisa.",
+  },
+  privacy: {
+    es: "Tus datos se guardan solo en este dispositivo, en una base de datos cifrada. No van a ninguna nube y nadie más puede verlos.",
+    en: "Your data stays only on this device, in an encrypted database. It never goes to any cloud, and nobody else can see it.",
+    pt: "Seus dados ficam apenas neste dispositivo, em um banco de dados criptografado. Não vão para nenhuma nuvem e ninguém mais pode vê-los.",
+  },
+};
+
+/**
+ * Lee el idioma vigente de la UI, fresco en cada llamada (nunca cacheado).
+ * Lazy require: la cadena i18n/settings trae módulos nativos que los
+ * unit tests no pueden cargar. Exportada para tests.
+ */
+export function getUiLocale(): CannedLang | null {
+  try {
+    const i18n = require("../../i18n.js").default as {
+      resolvedLanguage?: string;
+      language?: string;
+    };
+    const tag = (i18n.resolvedLanguage ?? i18n.language ?? "").toLowerCase();
+    if (tag.startsWith("es")) return "es";
+    if (tag.startsWith("en")) return "en";
+    // FIX 2026-10-09 (I3): PT es opción de primera clase en el picker.
+    if (tag.startsWith("pt")) return "pt";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Detects the response language for a canned hit.
+ * FIX 2026-10-08: prefer the UI locale (read fresh on every call via
+ * getUiLocale — never cached), so changing the language in Settings
+ * takes effect immediately even with the chat open. Physical evidence:
+ * the chat "stuck" to the input language because detectLang only looked
+ * at the text; menus (i18n.t) updated but canned answers didn't.
+ * Falls back to input-text heuristics when the i18n chain can't load
+ * (unit tests) or the UI language isn't es/en.
+ */
+function detectLang(text: string): CannedLang {
+  const uiLang = getUiLocale();
+  if (uiLang) return uiLang;
+  // FIX 2026-10-09 (I3): marcadores PT explícitos.
+  if (/^(ol[aá]|bom dia|boa (tarde|noite)|obrigad[oa]|tchau|tudo bem|ajuda|quem [eé])/i.test(text.trim())) {
+    return "pt";
+  }
+  // Explicit English markers → English. Everything else → Spanish (default).
+  if (/^(hi|hello|hey|yo|sup|who are you|who is nido|what are you|what is nido|your name|help|what can you do|how do you work|good (morning|afternoon|evening|night)|thanks|thank you|bye|goodbye|see ya|see you|okay|ok|cool|nice|wake up|where do you store|where do they store|where does it store|where is my data|where are my data|who can see my data|is my data)\b/i.test(text.trim())) {
+    return "en";
+  }
+  return "es";
+}
+
+/**
+ * Returns a canned response for high-confidence intents, or null to fall
+ * through to the normal agent loop. Pure function.
+ */
+export function matchCanned(userText: string): CannedHit | null {
+  const trimmed = userText.trim();
+  if (!trimmed) return null;
+
+  let kind: CannedKind | null = null;
+  if (isPureGreeting(trimmed)) kind = "greeting";
+  else if (IDENTITY_RE.test(trimmed)) kind = "identity";
+  else if (PRIVACY_RE.test(trimmed)) kind = "privacy";
+  else if (HELP_RE.test(trimmed)) kind = "help";
+  if (!kind) return null;
+
+  const lang = detectLang(trimmed);
+  return { kind, lang, text: TEMPLATES[kind][lang], deterministic: true };
+}

@@ -1,0 +1,246 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ *
+ * Traída del árbol móvil 0.1.108 en el acto 2A de E4, donde
+ * pasa a ser la medida de la etiqueta de compatibilidad
+ * (cierre de P-R2). La tabla del censo NO se copió de la del
+ * móvil: es la derivada contra el catálogo de PC en la
+ * HOJA-2A §4.1 (la réplica de la matemática validada antes
+ * contra el censo del móvil), con 18 filas — las 17 LLM que
+ * el catálogo de PC traía más el 0.5B que el acto 2A añade.
+ * La diferencia de forma que mueve casillas: en PC ninguna
+ * entrada declara `defaultNCtx` (el adaptador lo deja
+ * ausente), así que todo veredicto se deriva con techo 4096;
+ * en el móvil el Qwen3-0.6B declara 3072 y su techo en
+ * aparatos de ≤4 GiB nace en 2048.
+ *
+ * Cuatro casos corren como rojos declarados (`it.fails`),
+ * todos por esa sola causa, preexistente a este acto y
+ * ajena a las dos entradas nuevas: el cambio asentado del
+ * censo, el caso F3-14, el spec fijado a `nCtx` 2048 y el
+ * crédito sobre la canónica amarilla. Su sede es J-2 (la
+ * forma del adaptador); esta etapa no lo toca (decisión de
+ * la casa en la orden de E4, corrección C-2). La costura
+ * nativa se simula en la hoja de lectura de `src/core/ram.ts`,
+ * que es la costura de PC, con la misma conducta que el
+ * `ram-monitor` del móvil.
+ */
+
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../core/ram.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../core/ram.js")>();
+  return {
+    ...original,
+    getDeviceTotalRamBytes: () => 0,
+    getMemoryInfo: () => ({ rssBytes: 0, totalPssBytes: 0 }),
+  };
+});
+
+import {
+  APP_BASELINE_BYTES,
+  canonicalSnapshot,
+  computeCompatibility,
+  residentReleasableBytes,
+  type Compatibility,
+} from "./compatibility.js";
+import { contextCeilingForDevice, contextSpecForModel } from "./defaultModel.js";
+import { MODEL_CATALOG } from "./manifest.js";
+import { checkRamBudget, estimateContextBytes, KV_Q8_BYTES_PER_ELEMENT } from "../inference/ramBudget.js";
+import { planContext } from "../inference/memoryLadder.js";
+
+const GB = 1024 * 1024 * 1024;
+const MiB = 1024 * 1024;
+const LLMS = MODEL_CATALOG.filter((m) => m.kind === "llm");
+const byId = (id: string) => {
+  const m = LLMS.find((x) => x.id === id);
+  if (!m) throw new Error(`no ${id} in the catalog`);
+  return m;
+};
+
+/** La Tab A9+ del dueño: su RAM total real, la de las fotos del defecto. */
+const TAB_RAM = 3416 * MiB;
+const BIG_RAM = 8 * GB;
+
+/** El censo derivado contra el catálogo de PC (HOJA-2A §4.1): [en la Tab, en 8 GiB]. */
+const CENSUS: Record<string, [Compatibility, Compatibility]> = {
+  "gemma-3-12b-it-q4km": ["red", "red"],
+  "gemma-3-27b-it-qat-q4_0": ["red", "red"],
+  "gemma-4-e4b-it-q4_0": ["red", "green"],
+  "lfm2.5-8b-a1b-q4km": ["red", "green"],
+  "llama-3.1-8b-instruct-q4km": ["red", "green"],
+  "mistral-small-3.1-24b-q4km": ["red", "red"],
+  "phi-4-q4km": ["red", "red"],
+  "qwen2.5-0.5b-instruct-q4km": ["green", "green"],
+  "qwen2.5-1.5b-instruct-q4km": ["red", "green"],
+  "qwen2.5-7b-instruct-q4km": ["red", "green"],
+  "qwen3-0.6b-q4km": ["yellow", "green"],
+  "qwen3-1.7b-q4km": ["red", "green"],
+  "qwen3-14b-q4km": ["red", "red"],
+  "qwen3-30b-a3b-instruct-2507-q4km": ["red", "red"],
+  "qwen3-30b-a3b-q4km": ["red", "red"],
+  "qwen3-32b-q4km": ["red", "red"],
+  "qwen3-4b-instruct-2507-q4km": ["red", "green"],
+  "qwen3-8b-q4km": ["red", "green"],
+};
+
+describe("etiqueta de compatibilidad", () => {
+  it("la tabla del censo, entera, como regresión: Tab A9+ (3416 MiB) y 8 GiB", () => {
+    expect(Object.keys(CENSUS).sort()).toEqual(LLMS.map((m) => m.id).sort());
+    for (const m of LLMS) {
+      const [tab, big] = CENSUS[m.id];
+      expect(computeCompatibility(m, TAB_RAM), `${m.id} en la Tab`).toBe(tab);
+      expect(computeCompatibility(m, BIG_RAM), `${m.id} en 8 GiB`).toBe(big);
+    }
+  });
+
+  // Rojo declarado: en forma PC la foto canónica del
+  // Qwen3-0.6B en la Tab es amarilla (techo 4096, sin el
+  // `defaultNCtx` del que nace el verde del móvil). Sede: J-2.
+  it.fails("el cambio asentado del censo: el Qwen3-0.6B sale verde en la tableta del dueño", () => {
+    // Con la fórmula vieja era amarilla (estimado 906,9 MiB a contexto
+    // 3072 sin techo ni lote). Con el spec real (techo 2048, lote 128)
+    // cuesta 693,8 MiB y la escalera lo admite en su techo sobre la foto
+    // canónica: verde, como la vía de carga.
+    expect(computeCompatibility(byId("qwen3-0.6b-q4km"), 3.3 * GB)).toBe("green");
+    expect(computeCompatibility(byId("qwen3-0.6b-q4km"), TAB_RAM)).toBe("green");
+  });
+
+  it("invariante reforzado: verde ⇒ planContext cabe EN EL TECHO sobre la foto canónica (fp16, safety 1)", () => {
+    for (const ram of [2, 3, 3.3, 3416 * MiB / GB, 4, 6, 8, 12, 16]) {
+      const ramBytes = ram * GB;
+      for (const m of LLMS) {
+        if (computeCompatibility(m, ramBytes) !== "green") continue;
+        const ceiling = contextCeilingForDevice(m.defaultNCtx, ramBytes);
+        const { nCtx: _c, ...specBase } = contextSpecForModel(m, ramBytes);
+        const plan = planContext(specBase, canonicalSnapshot(ramBytes), { ceiling, safety: 1 });
+        expect(plan?.verdict.fits, `${m.id} con ${ram} GB: el plan debe caber`).toBe(true);
+        expect(plan?.nCtx, `${m.id} con ${ram} GB: y en su techo`).toBe(ceiling);
+        // Y la forma histórica del invariante, con el spec real:
+        const verdict = checkRamBudget(contextSpecForModel(m, ramBytes), {
+          totalRamBytes: ramBytes,
+          rssBytes: APP_BASELINE_BYTES,
+        });
+        expect(verdict?.fits, `${m.id} con ${ram} GB: el pre-flight lo acepta`).toBe(true);
+      }
+    }
+  });
+
+  it("invariante: roja ⇒ no cabe en ningún peldaño, ni en emergencia con KV q8 y su presupuesto", () => {
+    for (const ram of [2, 3, 3.3, 3416 * MiB / GB, 4, 6, 8]) {
+      const ramBytes = ram * GB;
+      for (const m of LLMS) {
+        if (computeCompatibility(m, ramBytes) !== "red") continue;
+        const ceiling = contextCeilingForDevice(m.defaultNCtx, ramBytes);
+        const { nCtx: _c, ...specBase } = contextSpecForModel(m, ramBytes);
+        const snap = canonicalSnapshot(ramBytes);
+        expect(planContext(specBase, snap, { ceiling, safety: 1 })?.verdict.fits, `${m.id} con ${ram} GB fp16`).toBe(false);
+        expect(
+          planContext({ ...specBase, kvBytesPerElement: KV_Q8_BYTES_PER_ELEMENT }, snap, { ceiling, safety: 1 })?.verdict
+            .fits,
+          `${m.id} con ${ram} GB q8`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it("los modelos grandes no salen en verde en aparatos pequeños, y sí en uno de 16 GB", () => {
+    expect(computeCompatibility(byId("qwen2.5-7b-instruct-q4km"), 4 * GB)).toBe("red");
+    expect(computeCompatibility(byId("qwen2.5-0.5b-instruct-q4km"), 16 * GB)).toBe("green");
+  });
+
+  it("sin lectura de RAM: «unknown»", () => {
+    expect(computeCompatibility(byId("qwen2.5-0.5b-instruct-q4km"), 0)).toBe("unknown");
+  });
+
+  // Rojo declarado (F3-14): su primera afirmación pide el
+  // verde canónico del Qwen3-0.6B en la Tab, que en forma PC
+  // es amarillo por la misma causa. El resto del caso (la
+  // degradación con la foto ocupada, la foto ajena ignorada)
+  // se sostiene. Sede: J-2.
+  it.fails("con foto en vivo la insignia es la PEOR de las dos fotos (F3-14): verde en vacío, roja con el teléfono ocupado", () => {
+    const m = byId("qwen3-0.6b-q4km");
+    expect(computeCompatibility(m, TAB_RAM)).toBe("green");
+    // La misma tableta con el proceso hinchado y casi nada libre: ni
+    // el peldaño de emergencia con su cuenta amable admite el modelo
+    // (la vía misma rendiría el 90 % de 100 MiB). La insignia lo dice
+    // en vez de prometer el verde de la foto canónica.
+    const busy = { totalRamBytes: TAB_RAM, rssBytes: 1.2 * GB, availBytes: 100 * MiB, lowMemThresholdBytes: 216 * MiB };
+    expect(computeCompatibility(m, TAB_RAM, busy)).toBe("red");
+    // Con hueco real, la foto viva no degrada nada.
+    const roomy = { totalRamBytes: TAB_RAM, rssBytes: APP_BASELINE_BYTES, availBytes: 2 * GB, lowMemThresholdBytes: 216 * MiB };
+    expect(computeCompatibility(m, TAB_RAM, roomy)).toBe("green");
+    // Una foto de OTRO aparato (o sin término en vivo) no es foto de
+    // este momento: se ignora y manda la canónica.
+    const foreign = { totalRamBytes: BIG_RAM, rssBytes: 3 * GB, availBytes: 10 * MiB, lowMemThresholdBytes: 216 * MiB };
+    expect(computeCompatibility(m, TAB_RAM, foreign)).toBe("green");
+    const noLive = { totalRamBytes: TAB_RAM, rssBytes: 3 * GB };
+    expect(computeCompatibility(m, TAB_RAM, noLive)).toBe("green");
+  });
+
+  // Rojo declarado: `contextSpecForModel` en forma PC da
+  // `nCtx` 4096, no 2048, por la misma causa (sin
+  // `defaultNCtx` no existe el techo 2048). La cifra de bytes
+  // sí es reproducible en PC a un contexto explícito de 2048.
+  // Sede: J-2.
+  it.fails("el estimado que la etiqueta cobra es el de la carga: Qwen3 en la Tab, 693,8 MiB a su techo", () => {
+    const spec = contextSpecForModel(byId("qwen3-0.6b-q4km"), TAB_RAM);
+    expect(spec.nCtx).toBe(2048);
+    expect(spec.nUbatch).toBe(128);
+    expect(estimateContextBytes(spec).totalBytes).toBe(727_484_096);
+  });
+});
+
+// 0.1.108 (pasada de la 0.1.107): la fórmula no se toca; la superficie
+// sí. La carga real, con un modelo residente, suma a su foto el
+// crédito `releasableBytes` — la huella estimada completa del modelo
+// que va a salir (LlamaEngine.loadNow) — y la foto de la tarjeta no
+// lo traía: la insignia juzgaba al modelo ACTIVO cargándose encima de
+// sí mismo y le pintaba «Currently in use» y «Needs a lot of memory»
+// a la vez. El crédito de la tarjeta se calcula con la misma cuenta.
+describe("0.1.108: el crédito liberable del residente en la tarjeta", () => {
+  it("el crédito es la cuenta de la carga: el Qwen3 residente en su techo de la Tab libera sus 693,8 MiB", () => {
+    const m = byId("qwen3-0.6b-q4km");
+    // Residente cargado en su techo (2048 en la Tab) con KV fp16: el
+    // crédito es byte a byte el coste que el censo fija para su carga.
+    expect(residentReleasableBytes(m, 2048, false, TAB_RAM)).toBe(727_484_096);
+    // Cargado degradado (menos contexto) libera menos; con KV q8, menos aún.
+    expect(residentReleasableBytes(m, 1024, false, TAB_RAM)).toBeLessThan(727_484_096);
+    expect(residentReleasableBytes(m, 2048, true, TAB_RAM)).toBeLessThan(727_484_096);
+  });
+
+  // Rojo declarado: la foto canónica manda como suelo y la
+  // viva solo degrada; con la canónica en amarillo en forma
+  // PC, el crédito no puede subir la insignia a verde. La
+  // primera mitad del caso (sin crédito, amarillo) sí se
+  // sostiene. Sede: J-2.
+  it.fails("la foto de las fotos: sin crédito el activo sale amarillo; con su crédito, verde", () => {
+    const m = byId("qwen3-0.6b-q4km");
+    // La banda de la pasada: disponible por total ≈ 500 MiB (RSS de
+    // 868 MiB con la app en uso y el modelo residente dentro), término
+    // en vivo holgado para que mande la cuenta por total.
+    const live = {
+      totalRamBytes: TAB_RAM,
+      rssBytes: 868 * MiB,
+      availBytes: 2 * GB,
+      lowMemThresholdBytes: 216 * MiB,
+    };
+    expect(computeCompatibility(m, TAB_RAM, live)).toBe("yellow");
+    const credited = { ...live, releasableBytes: residentReleasableBytes(m, 2048, false, TAB_RAM) };
+    expect(computeCompatibility(m, TAB_RAM, credited)).toBe("green");
+  });
+
+  it("el crédito no maquilla: la roja del 1.5B en la Tab se queda (la canónica es el suelo)", () => {
+    const m = byId("qwen2.5-1.5b-instruct-q4km");
+    const live = {
+      totalRamBytes: TAB_RAM,
+      rssBytes: 868 * MiB,
+      availBytes: 2 * GB,
+      lowMemThresholdBytes: 216 * MiB,
+    };
+    const credited = { ...live, releasableBytes: residentReleasableBytes(m, 4096, false, TAB_RAM) };
+    expect(computeCompatibility(m, TAB_RAM, credited)).toBe("red");
+  });
+});

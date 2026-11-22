@@ -1,0 +1,63 @@
+name: Reminder / notification issue
+description: Reminders not firing, firing at the wrong time, or notifications not showing on the computer / Avisos que no suenan o suenan mal / Lembretes que não disparam
+title: "[REMINDER] "
+labels: ["reminders", "notifications"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Privacy first.** Do NOT include the reminder text if it is personal, and never paste passwords or keys. You can write in English, Español or Português.
+        **Privacidad primero.** NO incluyas el texto del aviso si es personal, y nunca pegues contraseñas ni claves. Puedes escribir en español, English o Português.
+  - type: input
+    id: system
+    attributes:
+      label: "Operating system / Sistema operativo / Sistema operacional"
+      placeholder: "Windows 11 24H2 / Ubuntu 24.04"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: "NIDO PC version / Versión / Versão"
+      description: Settings > About inside the app.
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: "What happened? / ¿Qué pasó? / O que aconteceu?"
+      options:
+        - It never fired
+        - It fired late
+        - It fired early
+        - It fired but no notification showed
+        - A repeating reminder fired only once, or stopped
+        - Lost after restarting the computer
+        - The app closed or crashed
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How did you create it?
+      options: [Chat message, Voice, Other]
+  - type: input
+    id: when
+    attributes:
+      label: When was it supposed to fire?
+      description: "Date, time, and repeat if it had one (daily, weekly)."
+  - type: checkboxes
+    id: state
+    attributes:
+      label: Computer state when it should have fired
+      options:
+        - label: The computer was on and awake
+        - label: The computer was asleep or in hibernation
+        - label: NIDO PC was open
+        - label: Notifications are allowed for NIDO PC in the system settings
+  - type: textarea
+    id: details
+    attributes:
+      label: Details (optional)
+      description: Do not include the reminder text if it is personal.

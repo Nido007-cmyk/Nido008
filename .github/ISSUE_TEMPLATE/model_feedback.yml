@@ -1,0 +1,52 @@
+name: AI model feedback
+description: Wrong answers, made-up facts or suggestions for the on-device model / Respuestas mal del modelo / Respostas erradas do modelo
+title: "[MODEL] "
+labels: ["model"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Privacy first.** Do NOT paste passwords, keys, note or message contents or personal data. Use a generic example if the real question was personal. You can write in English, Español or Português.
+        **Privacidad primero.** NO pegues contraseñas, claves ni contenido personal. Usa un ejemplo genérico si la pregunta real era personal. Puedes escribir en español, English o Português.
+  - type: textarea
+    id: asked
+    attributes:
+      label: "What you asked / Qué preguntaste / O que você perguntou"
+      description: Use a generic example if the real question was personal.
+    validations:
+      required: true
+  - type: textarea
+    id: answered
+    attributes:
+      label: "What NIDO answered / Qué respondió / O que respondeu"
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: "What was wrong? / ¿Qué estuvo mal? / O que estava errado?"
+      options:
+        - Made-up fact (hallucination)
+        - Should have said "I don't know"
+        - Wrong date or number
+        - Wrong language
+        - Ignored my instruction
+        - Used a tool or action it should not have
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: "Model shown in Settings / Modelo en Ajustes / Modelo nas Configurações"
+    validations:
+      required: true
+  - type: dropdown
+    id: lang
+    attributes:
+      label: Language of the question
+      options: [Español, English, Português, Other]
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: "How should it have behaved? (optional)"

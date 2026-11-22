@@ -1,0 +1,326 @@
+/**
+ * MIT License
+ * Copyright (c) 2026 NIDO contributors
+ * See LICENSE file for details.
+ */
+
+/**
+ * intent.ts — NIDO: clasificación determinista de intención del agente.
+ *
+ * Tres intenciones, en español (con respaldo en inglés):
+ * - "recordar": el usuario quiere que algo quede en la memoria persistente.
+ * - "actuar": el usuario pide una acción local (nota, recordatorio, abrir app, hora…).
+ * - "conversar": todo lo demás (charla, preguntas, conocimiento).
+ *
+ * Puro, sin dependencias, testeable. Hereda el espíritu de
+ * `src/routing/classify.ts` (regex deterministas, cero ML para decidir).
+ */
+
+import {
+  extractCalcAction,
+  extractReminderAction,
+  extractTimerAction,
+  reminderMissingText,
+  extractWeeklyPlanAction,
+} from "./actionRouter.js";
+import { extractContactAction } from "./contactRouter.js";
+import { extractToolAction } from "./toolRouter.js";
+import {
+  extractImplicitFact,
+  extractPeople,
+  extractRememberFact,
+  extractSelfName,
+  isMemoryQuery,
+} from "./rememberRouter.js";
+import { isMemoryStyleQuery } from "./memoryQuery.js";
+import { normalizeForRouting } from "./routingText.js";
+
+export type AgentIntent = "conversar" | "recordar" | "actuar";
+
+/**
+ * Núcleo 3 (resto clasificador de ADV2-09, forma «¿Recuerdas qué…?»):
+ * una pregunta sobre el CONTENIDO de un documento que por cortesía
+ * empieza como memoria («¿Recuerdas qué dice el contrato sobre las
+ * vacaciones?»). No pide recordar nada: pide lo que el documento
+ * dice, y el dato vive en el documento importado, no en los hechos
+ * guardados. Sin esta lectura, REMEMBER_PATTERNS la clasifica
+ * recordar, ningún extractor de memoria trae nada (no hay hecho que
+ * traer), el modelo no llama herramientas y el turno muere en el
+ * respaldo de guardado («No pude guardar eso automáticamente…»):
+ * el respaldo equivocado servido con confianza, y la ruta de
+ * conocimiento — la que sí puede responder desde el documento —
+ * nunca corre. La forma es deliberadamente estrecha, cuatro marcas
+ * a la vez: apertura de recuerdo + interrogativa + verbo de
+ * contenido (dice/diz/says…) + sustantivo de documento de lista
+ * cerrada + forma de pregunta. Precio declarado en la preparación:
+ * un hecho GUARDADO sobre el contenido de un documento («la carta
+ * dice que…») preguntado en esta forma exacta pierde la respuesta
+ * desde memoria y va a conocimiento.
+ */
+const DOC_RECALL_OPEN_RE = /\b(recuerdas|te acuerdas|acuerdas|do you remember|você lembra|voce lembra|lembra)\b/i;
+// La interrogativa no puede cerrar con \b: en JS «é» no es carácter
+// de palabra y «qué» jamás tendría borde detrás. Guarda de letra en
+// su lugar, que además bloquea «quero» y «qualquer».
+const DOC_RECALL_INTER_RE = /\b(qu[eé]|o que|qual|quais|what)(?![a-záéíóúüñç])/i;
+const DOC_RECALL_VERB_RE = /\b(dice|diz|says|dec[ií]a|pone|reza|indica)\b/i;
+const DOC_RECALL_NOUN_RE =
+  /\b(contrato|documento|receta|papel|carta|manual|informe|certificado|factura|folleto|contract|document|recipe|letter|paper|report|receita|relat[oó]rio)\b/i;
+
+export function isDocumentRecallQuestion(rawText: string, normalized: string): boolean {
+  if (!/[¿?]/.test(rawText ?? "")) return false;
+  return (
+    DOC_RECALL_OPEN_RE.test(normalized) &&
+    DOC_RECALL_INTER_RE.test(normalized) &&
+    DOC_RECALL_VERB_RE.test(normalized) &&
+    DOC_RECALL_NOUN_RE.test(normalized)
+  );
+}
+
+const REMEMBER_PATTERNS: RegExp[] = [
+  /recuerda( que|te)?/i,
+  /acu[eé]rdate/i,
+  /no (olvides|te olvides)/i,
+  /^(?:que\s+)?no se te (?:olvide|pase)\b/i,
+  // Tolerante a enclíticos y acentos: "guárdalo/guardala en tu memoria"
+  /gu[aá]rda\w* (esto |eso )?en (tu |la )?memoria/i,
+  // B11 (barrido «revisa todo», clase 1): la forma natural pt de
+  // guardado, «guarda na memória que…», no estaba en ningún idioma
+  // de esta lista (la pt solo traía lembra/manda/quiero…), y el calco
+  // en «save in your memory that…» tampoco.
+  /\bguard[ae]\w* (isso |isto )?na mem[óo]ria\b/i,
+  /\bsave (this |that |it )?in your memory\b/i,
+  /memoriza/i,
+  // 0.1.42 (barrido): las mismas formas que rememberRouter.
+  /\btoma(?:r)? en cuenta que\b/i,
+  /^quiero que (?:recuerdes|sepas|tengas en cuenta|guardes|memorices)\b/i,
+  /^(?:para que lo sepas|que sepas|te cuento que|para tu informaci[oó]n)\b/i,
+  /^(?:anota|apunta|guarda)(?:lo)? en (?:tu|la) memoria\b/i,
+  /^(?:just so you know|fyi|for your information|for the record)\b/i,
+  /^(?:make sure (?:you|to) remember|i want you to remember)\b/i,
+  /^(?:s[oó] pra voc[eê] saber|quero que voc[eê] lembre)\b/i,
+  /apunta (esto|eso) para (siempre|despu[eé]s)/i,
+  /a partir de ahora/i,
+  // 0.1.41: las demás formas de «desde ahora» (preferencia permanente).
+  /^(?:(?:por favor|oye|nido)[,\s]+)?(?:de ahora en adelante|desde ahora|a partir de hoy)\b/i,
+  /^(?:(?:please|hey|nido)[,\s]+)?(?:from now on|going forward)\b/i,
+  /^(?:(?:por favor|ei|nido)[,\s]+)?(?:a partir de agora|de agora em diante|daqui (?:em|pra) frente)\b/i,
+  /\bten(?:ga|gan)? (?:muy |siempre )?en cuenta (que|siempre|esto|eso)/i,
+  // 0.1.41: «keep in mind that…», «tenha em mente que…», «leve em conta que…».
+  /^(?:(?:please|hey|ok|okay|nido|also|and)[,!]?\s+)*(?:keep|bear) in mind\b/i,
+  /(?:tenha|tenham|tem) em mente que/i,
+  /leve em (?:conta|considera[cç][aã]o) que/i,
+  // 0.1.37 (auditoría): «remember» solo como ORDEN al principio o con
+  // «please». «I can't remember the capital of Peru» o «do you remember
+  // what Titanic is about?» no son peticiones de guardar nada.
+  /^(?:(?:please|hey|ok|okay|nido)[,!]?\s+)*remember\b(?!\s+(?:when|what|how|who|where|why|which|if)\b)/i,
+  /\bplease\s+remember\b/i,
+  /\bdon't forget\b/i,
+];
+
+const ACT_PATTERNS: RegExp[] = [
+  /crea (un |una )?recordatorio/i,
+  /recu[eé]rdame/i,
+  /\bpon (una )?alarma/i,
+  /av[ií]same/i,
+  /guarda (una )?nota/i,
+  /anota/i,
+  /toma (una )?nota/i,
+  /lista (mis )?notas/i,
+  /mu[eé]strame (mis )?notas/i,
+  /lee la nota/i,
+  /abre (la app|el)?/i,
+  /\babrir\b/i,
+  // R-06 (ronda física 0.1.68): los patrones de reloj y fecha casan SOLO la
+  // pregunta desnuda («¿qué hora es?» ± coletillas corteses), anclada de
+  // principio a fin. «¿A qué hora es la cita?» pregunta CUÁNDO es un evento,
+  // no la hora del aparato: sin anclar, una sola letra («hora» contra
+  // «horas») mandaba el turno al loop, donde el documento del usuario es
+  // invisible y el modelo inventó la cita con la fecha de hoy. El objeto
+  // tras «es» descalifica — el espejo de /cu[áa]ndo tengo/, donde el objeto
+  // de agenda es justo lo que casa. El texto llega normalizado
+  // (normalizeForRouting ya quitó las muletillas de arranque).
+  /^[¿¡]?\s*(?:dime\s+|decime\s+)?qu[ée] hora es(?:\s+(?:ahora(?:\s+mismo)?|hoy))?(?:[,\s]+(?:por favor|porfa|please))?\s*[?!]?$/i,
+  /^[¿¡]?\s*(?:dime\s+|decime\s+)?qu[ée] fecha es(?:\s+hoy)?(?:[,\s]+(?:por favor|porfa|please))?\s*[?!]?$/i,
+  /qu[ée] d[ií]a es hoy(?:[,\s]+(?:por favor|porfa|please))?\s*[?!]?$/i,
+  // "Recuerda / no olvides / acuérdate de" + infinitivo = recordatorio (acción),
+  // no memoria: "recuerda comprar pan" ≠ "recuerda que mi cumple es en mayo".
+  /\brecuerda +[a-záéíóúñü]+(ar|er|ir)\b/i,
+  /\bno (?:te )?olvides (?:de )?[a-záéíóúñü]+(ar|er|ir)\b/i,
+  // F-PC55 (serie de curas): la gemela «no se te/me olvide|pase» con su
+  // infinitivo y su clítico opcional, y las dos inglesas con «to».
+  /\bno se (?:te|me) (?:olvide|pase) (?:de )?[a-záéíóúñü]+(ar|er|ir)(?:me|te|se|nos)?\b/i,
+  /\bdon'?t forget to [a-z]+\b/i,
+  /\bdo not forget to [a-z]+\b/i,
+  /\bacu[eé]rdate de +[a-záéíóúñü]+(ar|er|ir)\b/i,
+  /\bcreate a reminder\b/i,
+  /\bremind me\b/i,
+  /\btake a note\b/i,
+  /\bopen the app\b/i,
+  // R-06: gemelo inglés del anclaje — «what time is the movie» es pregunta
+  // por un evento, no la hora del aparato.
+  /^[¿¡]?\s*what time is it(?:\s+(?:right\s+)?now)?(?:[,\s]+please)?\s*[?!]?$/i,
+  // Fase B: calculadora, conversiones, calendario, contactos, llamadas, archivos.
+  /\bcalcula\b/i,
+  /cu[áa]nto es/i,
+  /\bconvierte\b/i,
+  /\bagenda\b/i,
+  /crea (un |una )?evento/i,
+  /a[ñn]ade (un |una )?(evento|cita)/i,
+  // TOOLS-AUDIT 2026-10-11: antes /qué tengo/ a secas mandaba "¿qué tengo
+  // que hacer para aprender inglés?" a las herramientas. Ahora exige un
+  // marcador de agenda (día, semana, "agendado", "en mi agenda"…).
+  /qu[ée] tengo (?:hoy|ma[ñn]ana|pasado ma[ñn]ana|esta semana|este (?:fin|mes)|el (?:lunes|martes|mi[ée]rcoles|jueves|viernes|s[áa]bado|domingo|\d)|para (?:hoy|ma[ñn]ana|el)|agendado|pendiente|en (?:la|mi) agenda)/i,
+  /cu[áa]ndo tengo/i,
+  /mis (eventos|citas)/i,
+  /llama a\b/i,
+  /ll[áa]mame/i,
+  /m[áa]rcale/i,
+  /env[íi]a(le)? (un )?(mensaje|sms)/i,
+  /m[áa]ndale (un )?(mensaje|sms)/i,
+  /escr[íi]bele/i,
+  /busca (el )?contacto/i,
+  /en mis contactos/i,
+  // Núcleo 3 (hallazgo vecino de la preparación S-02): el número de
+  // un servicio público no es el teléfono de un contacto. Sin la
+  // guarda, «¿cuál es el número de emergencias en México?» casaba
+  // este patrón, clasificaba actuar y moría sin extractor: la forma
+  // más obvia de pedir el dato era justo la que no llegaba a la
+  // respuesta de conocimiento. La lista es cerrada (los servicios
+  // cuyos números llevan las guías locales): emergencias, policía,
+  // bomberos. «El número de Ana» sigue siendo contacto.
+  /el (tel[ée]fono|n[úu]mero) de (?!emergencias?\b|la polic[íi]a\b|los bomberos\b)/i,
+  /lee (el |este |mi )?archivo/i,
+  /analiza (el |este )?archivo/i,
+  /\bcalculate\b/i,
+  /\bconvert\b/i,
+  /^\s*(please |can you |could you )?call\b/i,
+  // Fase D: análisis de datos.
+  /analiza (mis |los |estos )?datos/i,
+  /analiza (el |este )?(csv|excel|archivo)/i,
+  /\bestad[íi]sticas de/i,
+  /cu[áa]nto (suma|suman)/i,
+  // Fase E: mensajería NIDO a NIDO (la costura en memoria de PC, sin transporte en esta etapa).
+  /por nido/i,
+  /\bnido\b.*(mensaje|empareja|c[óo]digo|contacto|bandeja)/i,
+  /(mensaje|empareja|c[óo]digo|contacto|bandeja).*nido/i,
+  /empar[ée]jame con/i,
+  /escanea (el |este )?qr/i,
+  /mi c[óo]digo (de emparejamiento|nido)/i,
+  // F1 (auditoría 2026-10-10): frases habituales que no llegaban a las
+  // herramientas. Mensajería NIDO.
+  /\b(manda|mandar|env[ií]a|enviar|m[aá]ndale|env[ií]ale)\b.{0,40}\bmensaje\b/i,
+  /\bdile a\b/i,
+  /\b(lee|leer|revisa|mu[eé]strame|tengo)\b.{0,20}\b(mensajes|bandeja)\b/i,
+  /\btareas (pendientes|remotas)\b/i,
+  /\b(aprueba|rechaza) la tarea\b/i,
+  /\bemparejar\b/i,
+  /\bc[óo]digo qr\b/i,
+  // Notas, recordatorios y alarmas.
+  /\b(qu[eé]|cu[aá]les) notas\b/i,
+  /\bapunta que\b/i,
+  /\b(pon|ponme|crea|cr[eé]ame|agrega|programa)\b.{0,12}\b(recordatorio|alarma)\b/i,
+  /\bdespi[eé]rtame\b/i,
+  // Conversión de unidades y cálculo sin verbo ("10 km en millas", "2+2").
+  /\b\d+(?:[.,]\d+)?\s*(km|kil[oó]metros?|millas?|kg|kilos?|libras?|lb|grados|celsius|fahrenheit|litros?|galones?|metros?|pies|cm|pulgadas?|miles?|pounds?|feet|inch(?:es)?)\b.{0,14}\b(a|en|to|in)\b/i,
+  /\bcu[aá]nt[oa]s? .{1,20} (son|es|hay en)\b.{0,6}\d/i,
+  /^\s*\(?\d[\d\s().]*[+\-*/^][\d\s+\-*/().%^]*\d\)?\s*[=?]*\s*$/,
+  /\b\d+(?:[.,]\d+)?\s*% (de|of)\b/i,
+  /\busa la (habilidad|skill)\b/i,
+  // TOOLS-AUDIT 2026-10-11: archivos y skills en inglés y portugués.
+  /\b(read|open|analy[sz]e|load) (a |the |this |my )?(file|document|csv)\b/i,
+  /\buse the skill\b/i,
+  /\b(l[eê]|ler|abre|abrir|analisa|analisar) (o |um |este |meu )?(arquivo|documento|csv)\b/i,
+  /\busa a (habilidade|skill)\b/i,
+  // Calendario en inglés y portugués.
+  /\bwhat do i have (today|tomorrow|this week|on \w+)\b/i,
+  /\b(minha agenda|meus (eventos|compromissos))\b/i,
+  /\b(cria|crie|adiciona|adicione|marca|marque) (um |uma )?(evento|compromisso)\b/i,
+  /analiza (esta|la) tabla/i,
+  // Inglés.
+  /\bsend (a |an )?(message|text|sms)\b/i,
+  /\b(read|check) my (inbox|messages)\b/i,
+  /\b(save|add|write) a note\b/i,
+  /\bset (a |an )?(reminder|alarm)\b/i,
+  /\badd (a |an )?(event|appointment)\b/i,
+  /\bmy calendar\b/i,
+  /\bin my contacts\b/i,
+  /\bopen https?:/i,
+  // R-06: ídem fecha en inglés — «what is the date of the concert» no casa.
+  /^[¿¡]?\s*what(?:'s| is) (?:the date|today's date)(?:\s+today)?\s*[?!]?$/i,
+  /\bwhat(?:'s| is) \d/i,
+  /\bpair(ing)? (with|code)\b/i,
+  // Portugués.
+  /\blembr[ae]-me\b/i,
+  // 0.1.14: "me lembra de ligar…" (recordatorio). "me lembra que X" es memoria.
+  /\bme lembr[ae]\b(?!\s+que\b)/i,
+  // R-06: gemelo portugués del anclaje (fin de frase, ± «agora»/cortesía).
+  /que horas s[aã]o(?:\s+agora)?(?:[,\s]+(?:por favor|faz favor))?\s*[?!]?$/i,
+  /\b(envia|enviar|manda)\b.{0,30}\bmensagem\b/i,
+  /\bguarda (uma )?nota\b/i,
+  /\bquanto [eé]\s/i,
+  /\bconverte\b/i,
+];
+
+/**
+ * C5-2026-10-06: "recuérdame que [cláusula]" es petición de MEMORIA
+ * ("recuerda que mi cumple es en mayo"), no de acción. Se evalúa ANTES
+ * que el ACT genérico /recu[eé]rdame/ para no caer en la rama equivocada.
+ */
+const REMEMBER_BEFORE_ACT_PATTERNS: RegExp[] = [
+  /recu[eé]rdame que\b/i,
+  // 0.1.14: portugués — "lembre que X", "me lembra que X", "não esqueça que X".
+  /\blembr[ae](?:-se)?(?: de)? que\b/i,
+  /\bn[aã]o (?:se )?esque[cç]a(?: de)? que\b/i,
+];
+
+/**
+ * Orden: recordar-específico > actuar > recordar > conversar. Los patrones
+ * de actuar con infinitivo ("recuerda comprar pan") se evalúan antes que
+ * los de memoria genéricos ("recuerda que…"), resolviendo la ambigüedad
+ * del español; pero "recuérdame que + cláusula" va primero (memoria).
+ */
+export function classifyIntent(text: string): AgentIntent {
+  // 0.1.37 (auditoría): una tira larga de «?!.» costaba tiempo cuadrático
+  // en las limpiezas «[?!.]+$» de los routers; para clasificar bastan 3.
+  // 0.1.42: mismo texto que lee el router (sin muletillas ni espacios de más).
+  const t = normalizeForRouting(text ?? "").replace(/[?!.]{4,}/g, (run) => run.slice(0, 3));
+  if (!t) return "conversar";
+  if (REMEMBER_BEFORE_ACT_PATTERNS.some((re) => re.test(t))) return "recordar";
+  // 0.1.14: una cuenta válida ("what is (100 + 50) * 2") siempre va a la
+  // calculadora; la expresión ya está validada por extractCalcAction.
+  if (extractCalcAction(t)) return "actuar";
+  // TOOLS-AUDIT 2026-10-11: contactos / llamadas / SMS en es, en y pt
+  // ("Find my cellphone contacts" no casaba ningún patrón y caía al chat).
+  if (extractContactAction(t)) return "actuar";
+  // 0.1.8: notas, hora, conversiones, calendario, NIDO, enlaces, archivos.
+  if (extractToolAction(t)) return "actuar";
+  // 0.1.22 (evidencia física Tab A9+, v0.1.21): la puerta solo consultaba
+  // calculadora, contactos y herramientas. Los demás detectores del
+  // pre-router del loop nunca se consultaban aquí, así que sus frases
+  // naturales («Mi mama se llama Marta», «Pon un temporizador de 2
+  // minutos», «¿Cómo se llama mi mamá?») clasificaban «conversar», el
+  // loop jamás corría y el mensaje caía al conocimiento (cita «Lista
+  // (Madrid Metro)»). Ahora se consultan LOS MISMOS extractores que el
+  // loop ejecuta — una sola fuente de verdad, como ya se hacía con la
+  // calculadora — y DESPUÉS de los patrones de siempre, que cargan las
+  // desambiguaciones históricas y no deben pisarse («no olvides
+  // llamar» = acción, no memoria; «qué tengo el lunes» = agenda).
+  if (extractTimerAction(t)) return "actuar";
+  if (ACT_PATTERNS.some((re) => re.test(t))) return "actuar";
+  // Núcleo 3: veto quirúrgico en este único asiento — la pregunta
+  // sobre un documento no entra por la puerta de memoria; el flujo
+  // sigue y, sin extractor que la reclame, cae a conversar y a la
+  // ruta de conocimiento con el documento (ver isDocumentRecallQuestion).
+  const docRecallQ = isDocumentRecallQuestion(text, t);
+  if (!docRecallQ && REMEMBER_PATTERNS.some((re) => re.test(t))) return "recordar";
+  // 0.1.22: resto de detectores del pre-router del loop (ver arriba).
+  if (extractReminderAction(t)) return "actuar";
+  // 0.1.32: fecha sin contenido → el loop pregunta qué recordar.
+  if (reminderMissingText(t)) return "actuar";
+  if (extractWeeklyPlanAction(t)) return "actuar";
+  if (extractPeople(t).length > 0) return "recordar";
+  if (extractSelfName(t)) return "recordar";
+  if (extractRememberFact(t) || extractImplicitFact(t)) return "recordar";
+  if (isMemoryQuery(t) || isMemoryStyleQuery(t)) return "recordar";
+  return "conversar";
+}

@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest an improvement / Sugerir una mejora / Sugerir uma melhoria
+title: "[FEATURE] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Privacy first.** Do NOT paste passwords, keys or personal data. You can write in English, Español or Português.
+        **Privacidad primero.** NO pegues contraseñas, claves ni datos personales. Puedes escribir en español, English o Português.
+        **Security vulnerability?** Do not open a public issue. Use the private channel: repo tab Security, then "Report a vulnerability". See SECURITY.md.
+  - type: textarea
+    id: what
+    attributes:
+      label: "What would you like, and why? / ¿Qué te gustaría, y por qué? / O que você gostaria, e por quê?"
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy considerations
+      description: "How does it fit NIDO's rules (works offline, encrypted, local-first)? Would it need a new permission?"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered (optional)
+  - type: textarea
+    id: impl
+    attributes:
+      label: Proposed implementation (optional)

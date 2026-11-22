@@ -1,0 +1,14 @@
+/.idea
+/.vscode
+node_modules
+.DS_Store
+
+/dist
+/tsconfig.tsbuildinfo
+/dist-electron
+/release
+/models
+
+# Evidencia del banco: los informes sí; la copia alterada del test
+# de D-1 no (397 MB, la regenera el propio banco)
+bench-results/tampered-models/

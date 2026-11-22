@@ -1,0 +1,56 @@
+name: Installer issue
+description: The installer will not install, Windows warns, the hash does not match, or uninstall problems / Problemas con el instalador / Problemas com o instalador
+title: "[INSTALLER] "
+labels: ["installer"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Privacy first.** Do NOT paste passwords, keys or personal data. You can write in English, Español or Português.
+        **About the Windows warning:** NIDO PC is free and open source and its installer is NOT code-signed, so Windows SmartScreen shows an "unknown publisher" warning on first install. That warning alone is expected. What protects you is the hash: compare the installer's sha256 with the one published on the Releases page before installing. If the hash does NOT match, do not install it and report it here.
+        **Sobre el aviso de Windows:** NIDO PC es gratis y de código abierto y su instalador NO lleva firma comercial, así que SmartScreen enseña un aviso de "editor desconocido" la primera vez. Ese aviso, solo, es lo esperado. Lo que te protege es la huella: compara el sha256 del instalador con el publicado en la página de Releases antes de instalar. Si la huella NO coincide, no lo instales y repórtalo aquí.
+  - type: dropdown
+    id: stage
+    attributes:
+      label: "Where does it fail? / ¿Dónde falla? / Onde falha?"
+      options:
+        - Download from the Releases page
+        - Hash (sha256) does not match the published one
+        - SmartScreen or antivirus blocks it and I cannot continue
+        - Installer starts but errors out
+        - Installs, but the app will not open
+        - Uninstall problem (data kept or removed wrongly)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: "Installer version and hash / Versión y huella / Versão e hash"
+      description: "The file name you downloaded and its sha256, as shown on the Releases page."
+      placeholder: "NidoPC-Setup-1.0.0.exe / sha256:d9210..."
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: "Operating system / Sistema operativo / Sistema operacional"
+      placeholder: "Windows 11 24H2 / Windows 10 22H2 / Ubuntu 24.04"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: "What happened? / ¿Qué pasó? / O que aconteceu?"
+      description: Exact message Windows or the installer showed, word for word if you can. Remove anything personal first.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I compared the installer hash with the one on the Releases page (or I report that I could not).
+          required: true
+        - label: I removed personal data from this report.
+          required: true
