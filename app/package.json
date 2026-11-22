@@ -15,7 +15,7 @@
     "markdown-it": "^14.3.3",
     "node-llama-cpp": "^3.22.3",
     "pdfjs-dist": "4.10.38",
-    "pretty-ms": "^9.3.1",
+    "pretty-ms": "^10.0.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "tar": "7.5.23",
