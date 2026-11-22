@@ -92,7 +92,10 @@ describe("RISK-3 integración real", () => {
       formatId: "test.db",
       supportedMajor: 1,
       ErrorClass: TestVersionError,
-      migrations: MEMORY_MIGRATIONS, // vacío
+      // E10 (paso 6): el registro real ya no está vacío (trae
+      // la 1→2 de sesiones); este caso cobra el comportamiento
+      // con registro vacío y lo pasa vacío a propósito.
+      migrations: [],
     });
     expect(result.migrated).toBe(false);
     expect(result.from).toBe(1);
@@ -102,6 +105,23 @@ describe("RISK-3 integración real", () => {
       "SELECT value FROM meta WHERE key = 'schema_version'"
     );
     expect(ver?.value).toBe("1");
+  });
+
+  it("2b. Registro real (E10 paso 6): una base v1 sube a v2 por la migración de sesiones", async () => {
+    const db = createFakeDb("1");
+    const result = await applyMigrations(db as any, {
+      formatId: "test.db",
+      supportedMajor: 2,
+      ErrorClass: TestVersionError,
+      migrations: MEMORY_MIGRATIONS,
+    });
+    expect(result.migrated).toBe(true);
+    expect(result.from).toBe(1);
+    expect(result.to).toBe(2);
+    const ver = await db.getFirstAsync<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'schema_version'",
+    );
+    expect(ver?.value).toBe("2");
   });
 
   it("3. DB nueva sin versión: se estampa con la versión soportada", async () => {

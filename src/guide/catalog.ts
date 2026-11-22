@@ -52,6 +52,7 @@ export type GuideRouteClass =
   | "model-judged"
   | "model-judged-tone"
   | "self-knowledge"
+  | "deep-research"
   | "abstention";
 
 export interface GuideExampleDecl {
@@ -59,7 +60,7 @@ export interface GuideExampleDecl {
   /** La herramienta que el turno ejecuta, cuando la clase es `tool`. */
   tool?: string;
   /** El corpus de la fixture que la batería sirve, cuando la ruta lo pide. */
-  corpus?: "cpr" | "burn";
+  corpus?: "cpr" | "burn" | "aqueduct";
   /** La cifra que la respuesta servida trae, por idioma, cuando la promesa es una cifra. */
   expectContains?: Partial<Record<GuideLang, string>>;
 }
@@ -199,6 +200,27 @@ export const lessons: GuideLessonDecl[] = [
     module: "conocimiento",
     labels: ["pcSurface.packsTab", "pcSurface.docsTitle", "pcSurface.docsAdd"],
     examples: [],
+  },
+  {
+    // E10 (paso 5): la lección de la investigación profunda
+    // nace con su etapa, en la sede de su paso 5 (GUIA.md
+    // §2): enseña los latidos 1 a 9 y el 11 — el modo y su
+    // plan con coste, la edición y el ámbito, el juez por
+    // pasada, el suelo sin fuentes, los huecos declarados,
+    // los cuatro estilos, los dos recibos y la emergencia
+    // que nunca se investiga. El latido 10 (parar y seguir
+    // mañana) se escribió en el paso 6, cuando las sesiones
+    // existieron: es el sexto paso de la letra, y con él el
+    // loop de la lección queda cerrado.
+    id: "investigacion-profunda",
+    module: "conocimiento",
+    labels: [
+      "pcSurface.research",
+      "pcSurface.researchPlanTitle",
+      "pcSurface.researchStyleCompleto",
+      "pcSurface.researchReceiptClaims",
+    ],
+    examples: [{ route: "deep-research", corpus: "aqueduct" }],
   },
   {
     id: "acerca-de-y-donaciones",

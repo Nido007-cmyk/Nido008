@@ -52,7 +52,7 @@ const onMain = new Set(grab(mainSrc, /ipcMain\.on\("([^"]+)"/g));
 const emitted = new Set(grab(mainSrc, /\.send\("([^"]+)"/g));
 
 describe("IPC channel contract census (tanda 14)", () => {
-  it("the preload surface is the signed one (50 invokes, 2 sends, 7 listeners)", () => {
+  it("the preload surface is the signed one (54 invokes, 2 sends, 7 listeners)", () => {
     // Re-firmado en E4 (paso 6): la superficie del gestor
     // añadió tres canales (model-download, model-download-pause
     // y model-discard); modelsListLight reusa models-list.
@@ -100,7 +100,18 @@ describe("IPC channel contract census (tanda 14)", () => {
     // voz añade dos canales (voice-assets y
     // voice-asset-install) y un evento de progreso
     // (voice-asset-progress).
-    expect(invoked.size).toBe(50);
+    // Re-firmado en E10 (paso 4): el plan de investigación
+    // visible añade un canal (research-plan); el plan
+    // editado viaja en la carga de turn-send, sin canal
+    // nuevo.
+    // Re-firmado en E10 (paso 5): la exportación del
+    // informe añade un canal (research-report-export),
+    // solo por acción explícita de la persona.
+    // Re-firmado en E10 (paso 6): las sesiones de
+    // investigación añaden dos canales (research-sessions
+    // y research-session-delete); la reanudación viaja en
+    // la carga de turn-send, sin canal nuevo.
+    expect(invoked.size).toBe(54);
     expect(sent).toEqual(new Set(["nido:confirm-response", "nido:voice-dictation-audio"]));
     // Re-firmado en E8 (paso 6): el clic de la notificación
     // del sistema y las acciones de la bandeja emiten
@@ -192,7 +203,14 @@ describe("IPC channel contract census (tanda 14)", () => {
     // voiceSpeakRelease, la lectura.
     // 59 → 62 en E9 (paso 5): voiceAssets, voiceAssetInstall
     // y onVoiceAssetProgress, la tarjeta de activos de voz.
-    expect(exposed.size).toBe(62);
+    // 62 → 63 en E10 (paso 4): researchPlan, el plan de
+    // investigación visible.
+    // 63 → 64 en E10 (paso 5): researchReportExport, la
+    // exportación del informe por acción explícita.
+    // 64 → 66 en E10 (paso 6): researchSessions y
+    // researchSessionDelete, la lista de investigaciones
+    // guardadas y su borrado con doble toque.
+    expect(exposed.size).toBe(66);
     expect([...typed].sort()).toEqual([...exposed].sort());
   });
 

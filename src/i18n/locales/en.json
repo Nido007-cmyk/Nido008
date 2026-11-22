@@ -336,23 +336,23 @@
     "clearAllButton": "Clear All",
     "clearAllChatHistory": "Clear All Chat History"
   },
-  "voiceSettings":   {
-      "title": "Voice",
-      "stateLocal": "NIDO's voice is on this PC: dictation and reading work offline.",
-      "stateReserve": "You are using your operating system's voice, not NIDO's. It sounds different and depends on your system.",
-      "stateNone": "This PC has no voice yet: NIDO's speech model still needs to be downloaded. The download is below.",
-      "dictateLabel": "Voice dictation",
-      "dictateBody": "Type by speaking, with the PC's microphone. Recognition is local: your voice never leaves this machine.",
-      "readAloudLabel": "Read answers aloud",
-      "readAloudBody": "NIDO reads each answer aloud when it finishes writing it. You can stop it at any time.",
-      "reserveLabel": "System voice as fallback",
-      "reserveBody": "If NIDO's voice is not downloaded, reading can use your operating system's voice instead.",
-      "assetsTitle": "Voice models",
-      "assetsNote": "Listening model: 487 MB. Speech model: 350 MB. They download once and work offline.",
-      "installed": "Installed",
-      "memoryNote": "When dictation or reading ends, the models are released to free memory; the system keeps part of it and frees the rest when NIDO closes.",
-      "provisionalNote": "The Spanish and Portuguese voices are provisional: the final ones are chosen once you hear them and give your verdict.",
-      "ptChainNote": "Portuguese is understood and read aloud, but its quality is lower than Spanish and English for now."
+  "voiceSettings": {
+    "title": "Voice",
+    "stateLocal": "NIDO's voice is on this PC: dictation and reading work offline.",
+    "stateReserve": "You are using your operating system's voice, not NIDO's. It sounds different and depends on your system.",
+    "stateNone": "This PC has no voice yet: NIDO's speech model still needs to be downloaded. The download is below.",
+    "dictateLabel": "Voice dictation",
+    "dictateBody": "Type by speaking, with the PC's microphone. Recognition is local: your voice never leaves this machine.",
+    "readAloudLabel": "Read answers aloud",
+    "readAloudBody": "NIDO reads each answer aloud when it finishes writing it. You can stop it at any time.",
+    "reserveLabel": "System voice as fallback",
+    "reserveBody": "If NIDO's voice is not downloaded, reading can use your operating system's voice instead.",
+    "assetsTitle": "Voice models",
+    "assetsNote": "Listening model: 487 MB. Speech model: 350 MB. They download once and work offline.",
+    "installed": "Installed",
+    "memoryNote": "When dictation or reading ends, the models are released to free memory; the system keeps part of it and frees the rest when NIDO closes.",
+    "provisionalNote": "The Spanish and Portuguese voices are provisional: the final ones are chosen once you hear them and give your verdict.",
+    "ptChainNote": "Portuguese is understood and read aloud, but its quality is lower than Spanish and English for now."
   },
   "interfaceSettings": {
     "hapticFeedbackLabel": "Haptic feedback",
@@ -1153,12 +1153,12 @@
     "offerHeldUnverified": "{{name}}'s offer is paused: you have not compared fingerprints yet. Once you have, ask them to send it again.",
     "offerHeldUnverifiedGeneric": "An offer is paused: you have not compared fingerprints with that contact yet. Once you have, ask them to send it again."
   },
-  "voiceInputAlert":   {
-      "title": "Voice dictation",
-      "onDeviceTitle": "Local dictation",
-      "onDeviceMessage": "NIDO recognizes your voice on this PC, offline, and the audio never leaves this machine.",
-      "systemMessage": "Without the listening model downloaded, dictation is not available: you can download it in Settings, in the Voice section. NIDO's dictation never uses third-party services.",
-      "cancel": "Cancel"
+  "voiceInputAlert": {
+    "title": "Voice dictation",
+    "onDeviceTitle": "Local dictation",
+    "onDeviceMessage": "NIDO recognizes your voice on this PC, offline, and the audio never leaves this machine.",
+    "systemMessage": "Without the listening model downloaded, dictation is not available: you can download it in Settings, in the Voice section. NIDO's dictation never uses third-party services.",
+    "cancel": "Cancel"
   },
   "tasks": {
     "approvalTitle": "Task request",
@@ -1672,6 +1672,24 @@
             ],
             "examples": [],
             "tip": "When an answer cites your document, the page rules: open it and check the passage before trusting it. And the other way round: if the model mentions a page in its prose and there is no citation under it, that is just its wording, not a source."
+          },
+          {
+            "id": "investigacion-profunda",
+            "title": "Deep research",
+            "what": "Some questions deserve more than one quick answer. Deep research is a mode you turn on for a question: NIDO splits it into smaller questions, looks each one up in your packs and your documents, checks every part against its sources, and writes one report. One model does the work, in passes, so it takes longer than a normal answer. Everything happens on your computer.",
+            "steps": [
+              "Turn it on with the Deep research chip next to the message box; it also lives in Settings. It applies to the questions you send while it is on.",
+              "Before anything runs, you see the Research plan: the smaller questions your question was split into, and what the run is expected to cost. Nothing is spent until you press Research now.",
+              "The plan is yours to touch: remove a question, add one of your own, and choose where it looks, your packs, your documents, or both, with the source count of each. What you add goes through the same safety check as everything else.",
+              "Each pass comes back judged: supported, partial (with the unsupported sentences removed and counted), or with no sources at all. If nothing turns up anywhere, NIDO says your local library has nothing on it instead of inventing a report.",
+              "Read the same report four ways, Full report, Executive brief, Side by side and Timeline, from the style selector under the answer. Changing the style changes the shape, never what was claimed or its citations. Under Every claim, with its source, tap a claim to open the passage it came from, and the run receipt shows the model, the time and the tokens.",
+              "If you stop a run, the work is not lost: each finished part is saved in your encrypted memory, and tomorrow you can resume the session where it closed from the saved sessions list. Deleting a session deletes that document of yours, and the app asks you to confirm it first.",
+              "An emergency is never researched: if your question uncovers one, the protected guide answers instead, even with the mode on."
+            ],
+            "examples": [
+              "How did Roman aqueducts carry water across valleys?"
+            ],
+            "tip": "The report is saved in your encrypted memory together with its receipts. Export it with the button under the answer when you want a copy in your Downloads; nothing leaves the computer on its own."
           }
         ]
       },
@@ -1998,6 +2016,42 @@
     "recommendationTitle": "The recommended one for this computer",
     "research": "Deep research",
     "researchPreempted": "Deep research stepped aside: a verified answer took over.",
+    "researchPlanTitle": "Research plan",
+    "researchPlanCovered": "Covered by the plan",
+    "researchPlanGaps": "Not covered",
+    "researchPlanNone": "none",
+    "researchPlanSources": "Sources for this search",
+    "researchPlanScopePacks": "Knowledge packs",
+    "researchPlanScopeDocuments": "Your documents",
+    "researchPlanScopeBoth": "Packs and documents",
+    "researchPlanScopeEmpty": "This scope has no sources yet, so the research cannot start.",
+    "researchPlanEstimate": "Estimated cost: about {{tokens}} tokens (roughly {{minutes}} min on this computer)",
+    "researchPlanAddPlaceholder": "Add a sub-question…",
+    "researchPlanAdd": "Add",
+    "researchPlanRemove": "Remove",
+    "researchPlanRun": "Research now",
+    "researchPlanCancel": "Cancel",
+    "researchStyleLabel": "Report style",
+    "researchStyleCompleto": "Full report",
+    "researchStyleEjecutivo": "Executive brief",
+    "researchStyleComparativo": "Side by side",
+    "researchStyleCronologico": "Timeline",
+    "researchReceiptClaims": "Every claim, with its source",
+    "researchReceiptRun": "Run receipt",
+    "researchReceiptModel": "Model",
+    "researchReceiptTime": "Time",
+    "researchReceiptFragments": "Sources consulted",
+    "researchReceiptJudge": "Final check, kept / removed",
+    "researchReceiptGaps": "Declared gaps",
+    "researchExport": "Export report (.md)",
+    "researchExported": "Saved to Downloads",
+    "researchSessionsTitle": "Saved research sessions",
+    "researchSessionProgress": "{{done}} of {{total}} parts done",
+    "researchSessionDone": "Finished",
+    "researchSessionResume": "Resume",
+    "researchSessionDelete": "Delete",
+    "researchSessionDeleteConfirm": "Delete it for good",
+    "researchPlanPlanning": "Preparing the research plan…",
     "security": "Security",
     "securityBody": "Your vault locks with your password. While it is open, your data lives only on this device.",
     "passwordFixedNote": "The password is set when the vault is created: it cannot be changed or recovered.",

@@ -217,6 +217,9 @@ interface StoredTurn {
   warnings?: string[];
   timedOut?: boolean;
   researchPreempted?: boolean;
+  /** E10 (paso 5): el informe de la investigación de este turno. */
+  research?: ResearchTurnData;
+  researchReportId?: string;
   stopped?: boolean;
   contextNote?: "filling" | "dropping";
   at: string;
@@ -274,6 +277,7 @@ interface Boot {
   noticesPermissionAsked?: boolean;
   voiceInputEnabled?: boolean;
   readAloudEnabled?: boolean;
+  deepResearchMode?: boolean;
   voiceSystemReserveEnabled?: boolean;
   noticesShowText?: boolean;
   noticesResident?: boolean | null;
@@ -286,6 +290,72 @@ interface Boot {
     diskUsedBytes: number | null;
     diskTotalBytes: number | null;
     lastGenRate: number | null;
+  };
+}
+
+/**
+ * E10 (paso 4): el plan de investigación tal como viaja por el
+ * puente: la forma de `ResearchPlan` de la raíz, declarada aquí
+ * porque la superficie solo lo lee y lo devuelve editado.
+ */
+interface ResearchPlanData {
+  query: string;
+  lang: string;
+  scope: "packs" | "documents" | "both";
+  subQuestions: string[];
+  coverage: { covered: string[]; gaps: string[] };
+  scopeCounts: { packs: number; documents: number; both: number };
+  scopeEmpty: boolean;
+  intercepted: boolean;
+  /** E10 (paso 5): el estilo de informe elegido con el plan. */
+  style: "completo" | "ejecutivo" | "comparativo" | "cronologico";
+  estimatedTokens: number;
+  estimatedSeconds: number;
+}
+
+type ResearchStyleId = ResearchPlanData["style"];
+
+/** E10 (paso 6): el resumen de una sesión guardada, para la lista. */
+interface ResearchSessionSummaryData {
+  id: string;
+  query: string;
+  stage: "plan" | "passes" | "contrast" | "done";
+  updatedAt: string;
+  closedPasses: number;
+  planSize: number;
+}
+
+/**
+ * E10 (paso 5): el informe de un turno de investigación, tal
+ * como viaja por el puente (la forma de `ResearchReceipt` de
+ * la raíz): las cuatro formas de lectura y los dos recibos.
+ */
+interface ResearchTurnData {
+  style: ResearchStyleId;
+  styles: Record<ResearchStyleId, string>;
+  receipt: {
+    claims: {
+      claim: string;
+      citations: { n: number; chunkId: string; docId: string; title: string }[];
+    }[];
+    run: {
+      model: string | null;
+      style: ResearchStyleId;
+      totalMs: number;
+      totalTokens: number;
+      stages: { stage: string; ms: number; tokens: number | null }[];
+      passes: {
+        subQuestion: string;
+        sourceCount: number;
+        verdict?: { status: string; kept: number; removed: number };
+      }[];
+      finalJudge: { kept: number; removed: number } | null;
+      judgeMs: number;
+      fragmentsConsulted: number;
+      gapsDeclared: string[];
+      gapRoundUsed: boolean;
+      contrast: { conflicts: number; duplicates: number; gaps: number; failed: boolean } | null;
+    };
   };
 }
 
@@ -311,6 +381,21 @@ interface NidoBridge {
     conversation?: Conv;
   }>;
   turnStop(): Promise<{ ok: boolean }>;
+  researchPlan(args: unknown): Promise<{
+    ok: boolean;
+    reason?: string;
+    outcome?: { kind: "plan" | "preempted" | "not-deep"; plan?: ResearchPlanData };
+  }>;
+  researchReportExport(args: unknown): Promise<{
+    ok: boolean;
+    reason?: string;
+    delivered?: string;
+  }>;
+  researchSessions(): Promise<{
+    ok: boolean;
+    sessions?: ResearchSessionSummaryData[];
+  }>;
+  researchSessionDelete(args: unknown): Promise<{ ok: boolean }>;
   conversationDelete(id: string): Promise<{ ok: boolean }>;
   modelsList(): Promise<{ ok: boolean; models: ModelInfo[]; recommendation: Boot["recommendation"] }>;
   modelsListLight(): Promise<{ ok: boolean; models: ModelInfo[]; recommendation: Boot["recommendation"] }>;
@@ -1440,7 +1525,44 @@ function ChatView({
   const [draft, setDraft] = useState("");
   const [streamed, setStreamed] = useState("");
   const [phase, setPhase] = useState<string | null>(null);
-  const [research, setResearch] = useState(false);
+  // E10 (paso 1): el chip de investigación nace del ajuste
+  // persistido (apagado por defecto) y cada toque lo persiste
+  // por el canal de ajustes: la superficie y el turno leen la
+  // misma verdad, como en el móvil.
+  const [research, setResearch] = useState(boot.deepResearchMode ?? false);
+  // E10 (paso 4): el plan pendiente de aprobación. Mientras
+  // existe, el envío está en pausa: la persona ve el plan, lo
+  // edita y decide si la corrida gasta en él.
+  const [pendingPlan, setPendingPlan] = useState<{ plan: ResearchPlanData; text: string } | null>(null);
+  const [planning, setPlanning] = useState(false);
+  // E10 (paso 5): la forma de lectura elegida para un informe
+  // ya servido, por conversación y turno. Es solo de lectura:
+  // el turno guardado conserva la forma servida y sus cuatro
+  // formas; esto cambia cuál se enseña, nunca el documento.
+  const [styleOverrides, setStyleOverrides] = useState<Record<string, string>>({});
+  // E10 (paso 6): las sesiones de investigación guardadas y
+  // la confirmación de borrado en curso (la misma puerta de
+  // doble toque del chat: primer toque arma, segundo borra).
+  const [researchSessionsList, setResearchSessionsList] = useState<ResearchSessionSummaryData[]>([]);
+  const [confirmDeleteSession, setConfirmDeleteSession] = useState<string | null>(null);
+  const loadResearchSessions = useCallback(async () => {
+    try {
+      const r = await window.nido.researchSessions();
+      if (r?.ok && r.sessions) setResearchSessionsList(r.sessions);
+    } catch {
+      // Sin lista (el puente falló), la superficie sigue.
+    }
+  }, []);
+  useEffect(() => {
+    if (research) void loadResearchSessions();
+  }, [research, loadResearchSessions]);
+  const toggleResearch = () => {
+    setResearch((v) => {
+      const next = !v;
+      void window.nido.settingsSet({ deepResearchMode: next });
+      return next;
+    });
+  };
   const [confirm, setConfirm] = useState<ConfirmPayload | null>(null);
   const [panelSource, setPanelSource] = useState<{
     title: string;
@@ -1617,9 +1739,34 @@ function ChatView({
   }, [streamed, sending, scrollToEnd]);
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, planOverride?: ResearchPlanData, sessionId?: string) => {
       const clean = text.trim();
-      if (!clean || sending) return;
+      if (!clean || sending || planning) return;
+      // E10 (paso 4): con el modo de investigación activo y sin
+      // plan aprobado, el envío pide primero el plan. Si el
+      // turno se sirve por otra ruta o la segunda red
+      // intercepta, el envío sigue normal; si hay plan, la
+      // persona lo ve y lo edita antes de gastar en la corrida.
+      // E10 (paso 6): reanudar una sesión no pide plan: la
+      // sesión ya lo trae cerrado.
+      if (research && !planOverride && !sessionId) {
+        setPlanning(true);
+        setPhase("researchPlanPlanning");
+        try {
+          const rp = await window.nido.researchPlan({ text: clean });
+          if (rp?.ok && rp.outcome?.kind === "plan" && rp.outcome.plan) {
+            setPendingPlan({ plan: rp.outcome.plan, text: clean });
+            setDraft("");
+            setPhase(null);
+            setPlanning(false);
+            return;
+          }
+        } catch {
+          // Sin plan (el puente falló), el envío corre normal.
+        }
+        setPlanning(false);
+        setPhase(null);
+      }
       const id = currentId ?? `conv-${Date.now()}`;
       if (!currentId) setCurrentId(id);
       activeTurnConv.current = id;
@@ -1633,6 +1780,8 @@ function ChatView({
         conversationId: id,
         text: clean,
         researchMode: research,
+        researchPlan: planOverride,
+        researchSessionId: sessionId,
       })) as {
         ok: boolean;
         result?: {
@@ -1660,6 +1809,7 @@ function ChatView({
       if (loadFailed || noGenerate) setDraft(clean);
       else setDraft("");
       await refresh();
+      if (research) void loadResearchSessions();
       } catch {
         // F-UI-10: si el puente lanza, el envío se asienta
         // como fallido en la línea de fase en vez de morir en
@@ -1677,7 +1827,7 @@ function ChatView({
         void send(P("emergencyQuery"));
       }
     },
-    [currentId, sending, onSendingChange, research, refresh, P],
+    [currentId, sending, planning, onSendingChange, research, refresh, P],
   );
 
   const emergencyNow = async () => {
@@ -1740,7 +1890,7 @@ function ChatView({
                     </div>
                   )}
                   {!(t.text.trim() === "" && (t.warnings ?? []).includes("no-generate-step:no-model-available")) && (
-                    <div className="bubble">{t.text}</div>
+                    <div className="bubble">{styleOverrides[`${currentId}:${i}`] ?? t.text}</div>
                   )}
                   <div className="meta-row">
                     {speechAvailable && t.text.trim() !== "" && (
@@ -1779,6 +1929,18 @@ function ChatView({
                     <div className="context-note">
                       {t.contextNote === "dropping" ? P("contextDropping") : P("contextFilling")}
                     </div>
+                  )}
+                  {t.research && (
+                    <ResearchTurnExtras
+                      P={P}
+                      research={t.research}
+                      reportId={t.researchReportId}
+                      sources={t.sources ?? []}
+                      onOpenSource={(src) => setPanelSource(src)}
+                      onShowText={(text) =>
+                        setStyleOverrides((v) => ({ ...v, [`${currentId}:${i}`]: text }))
+                      }
+                    />
                   )}
                 </div>
               ),
@@ -1911,10 +2073,64 @@ function ChatView({
               <Icon name="warning" size={20} /> {P("emergencyPill")}
             </button>
           )}
+          {research && researchSessionsList.length > 0 && (
+            <div className="research-sessions">
+              <div className="research-plan-title">{P("researchSessionsTitle")}</div>
+              {researchSessionsList.map((s) => (
+                <div key={s.id} className="research-session-row">
+                  <span className="research-session-query">{s.query}</span>
+                  <span className="research-session-progress">
+                    {s.stage === "done"
+                      ? P("researchSessionDone")
+                      : P("researchSessionProgress")
+                          .replace("{{done}}", String(s.closedPasses))
+                          .replace("{{total}}", String(s.planSize))}
+                  </span>
+                  {s.stage !== "done" && (
+                    <button onClick={() => void send(s.query, undefined, s.id)}>
+                      {P("researchSessionResume")}
+                    </button>
+                  )}
+                  {confirmDeleteSession === s.id ? (
+                    <button
+                      className="btn danger"
+                      onClick={() =>
+                        void window.nido.researchSessionDelete({ id: s.id }).then(() => {
+                          setConfirmDeleteSession(null);
+                          void loadResearchSessions();
+                        })
+                      }
+                    >
+                      {P("researchSessionDeleteConfirm")}
+                    </button>
+                  ) : (
+                    <button onClick={() => setConfirmDeleteSession(s.id)}>
+                      {P("researchSessionDelete")}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {pendingPlan && (
+            <ResearchPlanPanel
+              P={P}
+              plan={pendingPlan.plan}
+              onRun={(edited) => {
+                const text = pendingPlan.text;
+                setPendingPlan(null);
+                void send(text, edited);
+              }}
+              onCancel={() => {
+                setDraft(pendingPlan.text);
+                setPendingPlan(null);
+              }}
+            />
+          )}
           <div className="composer-toggles">
             <button
               className={`chip-toggle${research ? " on" : ""}`}
-              onClick={() => setResearch((v) => !v)}
+              onClick={toggleResearch}
               title={P("research")}
             >
               <Icon name="deep-research" size={16} /> {P("research")}
@@ -1976,6 +2192,259 @@ function ChatView({
         </div>
       </div>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------
+// E10 (paso 5) · Los extras del informe bajo su turno: el
+// selector de estilo reenseña la forma elegida del MISMO
+// material ya producido (sin correr nada de nuevo; el cambio
+// es solo de lectura y no toca el documento guardado), el
+// recibo por afirmación navega de cada afirmación a su
+// fragmento en el panel de fuentes, el recibo de corrida
+// enseña lo que la corrida hizo, y la exportación escribe el
+// documento guardado en las Descargas solo al pulsarla.
+// ---------------------------------------------------------------------
+
+function ResearchTurnExtras({
+  P,
+  research,
+  reportId,
+  sources,
+  onOpenSource,
+  onShowText,
+}: {
+  P: (k: string) => string;
+  research: ResearchTurnData;
+  reportId?: string;
+  sources: NonNullable<StoredTurn["sources"]>;
+  onOpenSource: (src: NonNullable<StoredTurn["sources"]>[number]) => void;
+  onShowText: (text: string) => void;
+}) {
+  const [shown, setShown] = useState<ResearchStyleId>(research.style);
+  const [showReceipt, setShowReceipt] = useState(false);
+  const [exported, setExported] = useState<string | null>(null);
+  const run = research.receipt.run;
+  const styleChips: { id: ResearchStyleId; label: string }[] = [
+    { id: "completo", label: P("researchStyleCompleto") },
+    { id: "ejecutivo", label: P("researchStyleEjecutivo") },
+    { id: "comparativo", label: P("researchStyleComparativo") },
+    { id: "cronologico", label: P("researchStyleCronologico") },
+  ];
+  const pick = (id: ResearchStyleId) => {
+    setShown(id);
+    onShowText(research.styles[id]);
+  };
+  return (
+    <div className="research-extras">
+      <div className="research-plan-meta">
+        <span>{P("researchStyleLabel")}:</span>
+        {styleChips.map((st) => (
+          <button
+            key={st.id}
+            className={`chip-toggle${shown === st.id ? " on" : ""}`}
+            onClick={() => pick(st.id)}
+          >
+            {st.label}
+          </button>
+        ))}
+      </div>
+      <div className="research-receipt">
+        <div className="research-receipt-title">{P("researchReceiptClaims")}</div>
+        <ul className="research-claims">
+          {research.receipt.claims.map((c, i) => (
+            <li key={i}>
+              <button
+                className="research-claim"
+                onClick={() => {
+                  const first = c.citations[0];
+                  const src = first ? sources[first.n - 1] : undefined;
+                  if (src) onOpenSource(src);
+                }}
+              >
+                {c.claim}
+                <span className="research-claim-refs">
+                  {c.citations.map((r) => `[${r.n}]`).join(" ")}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+        <button className="research-receipt-toggle" onClick={() => setShowReceipt((v) => !v)}>
+          {P("researchReceiptRun")}
+        </button>
+        {showReceipt && (
+          <div className="research-run-receipt">
+            <div>
+              {P("researchReceiptModel")}: {run.model ?? "—"}
+            </div>
+            <div>
+              {P("researchReceiptTime")}: {Math.round(run.totalMs / 1000)}s · {run.totalTokens}{" "}
+              tokens
+            </div>
+            <div>
+              {P("researchReceiptFragments")}: {run.fragmentsConsulted}
+            </div>
+            {run.finalJudge && (
+              <div>
+                {P("researchReceiptJudge")}: {run.finalJudge.kept} / {run.finalJudge.removed}
+              </div>
+            )}
+            {run.gapsDeclared.length > 0 && (
+              <div>
+                {P("researchReceiptGaps")}: {run.gapsDeclared.join(" · ")}
+              </div>
+            )}
+          </div>
+        )}
+        {reportId && (
+          <div className="research-export">
+            <button
+              onClick={() => {
+                void window.nido
+                  .researchReportExport({ id: reportId })
+                  .then((r) => setExported(r.ok ? (r.delivered ?? "") : null));
+              }}
+            >
+              {P("researchExport")}
+            </button>
+            {exported !== null && exported !== "" && (
+              <span>
+                {P("researchExported")}: {exported}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// E10 (paso 4) · El panel del plan de investigación: la persona
+// ve el plan antes de que la corrida gaste (la cobertura sin
+// modelo con sus huecos, el conteo de fuentes del ámbito y el
+// coste estimado) y lo edita: quita subpreguntas, añade las
+// suyas y elige el ámbito. La corrida sigue el plan editado.
+// ---------------------------------------------------------------------
+
+function ResearchPlanPanel({
+  P,
+  plan,
+  onRun,
+  onCancel,
+}: {
+  P: (k: string) => string;
+  plan: ResearchPlanData;
+  onRun: (edited: ResearchPlanData) => void;
+  onCancel: () => void;
+}) {
+  const [items, setItems] = useState<string[]>(plan.subQuestions);
+  const [scope, setScope] = useState<ResearchPlanData["scope"]>(plan.scope);
+  const [style, setStyle] = useState<ResearchStyleId>(plan.style);
+  const [extra, setExtra] = useState("");
+  const scopeEmpty = plan.scopeCounts[scope] === 0;
+  const minutes = Math.max(1, Math.round(plan.estimatedSeconds / 60));
+  const estimate = P("researchPlanEstimate")
+    .replace("{{tokens}}", String(plan.estimatedTokens))
+    .replace("{{minutes}}", String(minutes));
+  const addExtra = () => {
+    const clean = extra.trim();
+    if (!clean) return;
+    setItems((v) => [...v, clean]);
+    setExtra("");
+  };
+  const scopes: { id: ResearchPlanData["scope"]; label: string }[] = [
+    { id: "packs", label: P("researchPlanScopePacks") },
+    { id: "documents", label: P("researchPlanScopeDocuments") },
+    { id: "both", label: P("researchPlanScopeBoth") },
+  ];
+  const styles: { id: ResearchStyleId; label: string }[] = [
+    { id: "completo", label: P("researchStyleCompleto") },
+    { id: "ejecutivo", label: P("researchStyleEjecutivo") },
+    { id: "comparativo", label: P("researchStyleComparativo") },
+    { id: "cronologico", label: P("researchStyleCronologico") },
+  ];
+  return (
+    <div className="research-plan">
+      <div className="research-plan-title">{P("researchPlanTitle")}</div>
+      <div className="research-plan-question">{plan.query}</div>
+      <ul className="research-plan-items">
+        {items.map((q, i) => (
+          <li key={`${i}-${q}`}>
+            <span>{q}</span>
+            <button
+              className="research-plan-remove"
+              onClick={() => setItems((v) => v.filter((_, j) => j !== i))}
+              title={P("researchPlanRemove")}
+            >
+              ×
+            </button>
+          </li>
+        ))}
+      </ul>
+      <div className="research-plan-add">
+        <input
+          value={extra}
+          placeholder={P("researchPlanAddPlaceholder")}
+          onChange={(e) => setExtra(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              addExtra();
+            }
+          }}
+        />
+        <button onClick={addExtra}>{P("researchPlanAdd")}</button>
+      </div>
+      <div className="research-plan-meta">
+        <span>
+          {P("researchPlanCovered")}: {plan.coverage.covered.join(", ") || P("researchPlanNone")}
+        </span>
+        <span>
+          {P("researchPlanGaps")}: {plan.coverage.gaps.join(", ") || P("researchPlanNone")}
+        </span>
+      </div>
+      <div className="research-plan-meta">
+        <span>{P("researchPlanSources")}:</span>
+        {scopes.map((sc) => (
+          <button
+            key={sc.id}
+            className={`chip-toggle${scope === sc.id ? " on" : ""}`}
+            onClick={() => setScope(sc.id)}
+          >
+            {sc.label} · {plan.scopeCounts[sc.id]}
+          </button>
+        ))}
+      </div>
+      <div className="research-plan-meta">
+        <span>{P("researchStyleLabel")}:</span>
+        {styles.map((st) => (
+          <button
+            key={st.id}
+            className={`chip-toggle${style === st.id ? " on" : ""}`}
+            onClick={() => setStyle(st.id)}
+          >
+            {st.label}
+          </button>
+        ))}
+      </div>
+      {scopeEmpty ? (
+        <div className="research-plan-empty">{P("researchPlanScopeEmpty")}</div>
+      ) : (
+        <div className="research-plan-meta">{estimate}</div>
+      )}
+      <div className="research-plan-actions">
+        <button
+          className="research-plan-run"
+          disabled={items.length === 0 || scopeEmpty}
+          onClick={() => onRun({ ...plan, subQuestions: items, scope, style })}
+        >
+          {P("researchPlanRun")}
+        </button>
+        <button onClick={onCancel}>{P("researchPlanCancel")}</button>
+      </div>
+    </div>
   );
 }
 

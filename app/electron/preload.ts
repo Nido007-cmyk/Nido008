@@ -22,6 +22,12 @@ contextBridge.exposeInMainWorld("nido", {
     vaultLock: () => ipcRenderer.invoke("nido:vault-lock"),
     prefsSet: (patch: unknown) => ipcRenderer.invoke("nido:prefs-set", {patch}),
     turnSend: (args: unknown) => ipcRenderer.invoke("nido:turn-send", args),
+    researchPlan: (args: unknown) => ipcRenderer.invoke("nido:research-plan", args),
+    researchReportExport: (args: unknown) =>
+      ipcRenderer.invoke("nido:research-report-export", args),
+    researchSessions: () => ipcRenderer.invoke("nido:research-sessions"),
+    researchSessionDelete: (args: unknown) =>
+      ipcRenderer.invoke("nido:research-session-delete", args),
     turnStop: () => ipcRenderer.invoke("nido:turn-stop"),
     conversationDelete: (id: string) => ipcRenderer.invoke("nido:conversation-delete", {id}),
     modelsList: () => ipcRenderer.invoke("nido:models-list"),

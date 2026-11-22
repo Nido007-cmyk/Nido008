@@ -957,3 +957,132 @@ input, textarea, select {
 .progress-track { position: relative; height: 18px; background: var(--accent-soft); border-radius: 6px; overflow: hidden; }
 .progress-fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); opacity: 0.45; }
 .progress-text { position: relative; font-size: 12px; padding: 0 8px; line-height: 18px; }
+
+/* E10 (paso 4): el panel del plan de investigación. */
+.research-plan {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin: 8px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    text-align: left;
+}
+.research-plan-title {
+    font-weight: 600;
+}
+.research-plan-question {
+    color: var(--muted);
+}
+.research-plan-items {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.research-plan-items li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+}
+.research-plan-remove {
+    border: none;
+    background: none;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 1.1em;
+    line-height: 1;
+}
+.research-plan-add {
+    display: flex;
+    gap: 8px;
+}
+.research-plan-add input {
+    flex: 1;
+}
+.research-plan-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    align-items: center;
+    color: var(--muted);
+    font-size: 0.9em;
+}
+.research-plan-empty {
+    color: var(--muted);
+    font-size: 0.9em;
+}
+.research-plan-actions {
+    display: flex;
+    gap: 8px;
+}
+.research-extras {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.research-receipt-title {
+    font-weight: 600;
+    font-size: 0.9em;
+}
+.research-claims {
+    list-style: none;
+    margin: 6px 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.research-claim {
+    text-align: left;
+    background: var(--hatch-widget-surface, transparent);
+    border: 1px solid var(--border, #ccc);
+    border-radius: 8px;
+    padding: 6px 8px;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+.research-claim-refs {
+    margin-left: 6px;
+    color: var(--muted);
+}
+.research-receipt-toggle {
+    align-self: flex-start;
+    font-size: 0.9em;
+}
+.research-run-receipt {
+    font-size: 0.9em;
+    color: var(--muted);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.research-export {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 0.9em;
+}
+.research-sessions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 10px 0;
+}
+.research-session-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 0.92em;
+}
+.research-session-query {
+    font-weight: 600;
+}
+.research-session-progress {
+    color: var(--muted);
+}

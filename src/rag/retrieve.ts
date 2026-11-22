@@ -236,7 +236,21 @@ export function activeRetrievalProfile(): EmbeddingProfile {
   return lastRetrievalProfile;
 }
 
-export async function retrieve(query: string, topK = 6): Promise<RetrievedChunk[]> {
+/**
+ * E10 (paso 4): el ámbito de una búsqueda de investigación —
+ * los paquetes instalados, los documentos personales de la
+ * base de conocimiento, o ambos (el defecto, que es el
+ * comportamiento de siempre de esta función). La elección de
+ * ámbito es de la superficie de investigación (estudio §3.0);
+ * los demás consumidores no pasan ámbito y no cambian.
+ */
+export type RetrievalScope = "packs" | "documents" | "both";
+
+export async function retrieve(
+  query: string,
+  topK = 6,
+  scope: RetrievalScope = "both",
+): Promise<RetrievedChunk[]> {
   // F4-2026-10-06: degradación graceful a FTS-only cuando el JSI de
   // embedding no está disponible. seedCorpus ya soporta indexar sin
   // embeddings; retrieve() no debe fallar en duro en ese mismo build.
@@ -258,10 +272,14 @@ export async function retrieve(query: string, topK = 6): Promise<RetrievedChunk[
     // Sin embeddings: solo búsqueda léxica (built-in + packs).
   }
   const [lexical, semantic, packs] = await Promise.all([
-    lexicalSearch(query, topK * 2),
-    queryVec ? semanticSearch(query, queryVec, topK * 2, profile) : [],
+    scope === "packs" ? Promise.resolve([] as RetrievedChunk[]) : lexicalSearch(query, topK * 2),
+    scope === "packs" || !queryVec
+      ? Promise.resolve([] as RetrievedChunk[])
+      : semanticSearch(query, queryVec, topK * 2, profile),
     // Downloaded knowledge packs (src/rag/packs.ts); a failing pack is skipped, never fatal.
-    searchPacks(query, queryVec, topK * 2, { profile, modelSha256 }).catch(() => ({ lexical: [], semantic: [] })),
+    scope === "documents"
+      ? Promise.resolve({ lexical: [] as RetrievedChunk[], semantic: [] as RetrievedChunk[] })
+      : searchPacks(query, queryVec, topK * 2, { profile, modelSha256 }).catch(() => ({ lexical: [], semantic: [] })),
   ]);
 
   lastRetrievalProfile = profile;

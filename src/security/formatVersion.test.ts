@@ -115,9 +115,12 @@ describe("D-4 · la mitad de memoria del módulo", () => {
     }
   });
 
-  it("all supported majors are 1 in L1", () => {
+  it("supported majors: memoria en 2 desde E10 paso 6, el resto en 1", () => {
     expect(KNOWLEDGE_DB_SCHEMA_VERSION).toBe(1);
-    expect(MEMORY_DB_SCHEMA_VERSION).toBe(1);
+    // E10 (paso 6): la migración 1→2 de las sesiones de
+    // investigación sube la base de memoria; su asiento vive
+    // en memoryMigrations.ts.
+    expect(MEMORY_DB_SCHEMA_VERSION).toBe(2);
     expect(SETTINGS_FORMAT_VERSION).toBe(1);
     expect(INSTALL_JOURNAL_VERSION).toBe(1);
   });

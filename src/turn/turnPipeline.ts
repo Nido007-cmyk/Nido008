@@ -117,6 +117,15 @@ import {
   getModelRoleAssignments,
   getRoutingPreset,
 } from "../models/settings.js";
+import {
+  planResearch,
+  runDeepResearch,
+  type ResearchSessionSnapshot,
+  type ResearchStyle,
+} from "../services/orchestrator.js";
+import { researchBudget } from "../services/researchBudgets.js";
+import type { ResearchPlan } from "../services/researchPlan.js";
+import { renderReportStyle, type ResearchReceipt } from "../services/researchReport.js";
 import { embeddingEngine } from "../rag/embed.js";
 import { embeddingIdleUnloadDue } from "../rag/embedPolicy.js";
 import { buildEvidenceCard, type EvidenceCardData } from "../rag/evidenceCard.js";
@@ -172,6 +181,28 @@ export interface TurnInput {
   summary?: string | null;
   /** El modo de investigación de la persona para ESTE turno. */
   researchMode?: boolean;
+  /**
+   * E10 (paso 4): el plan de investigación que la persona vio
+   * y aprobó en la superficie (planTurn + su edición). Con
+   * plan, la rama profunda investiga sus subpreguntas en su
+   * ámbito y corre la pasada de contraste con su ronda única;
+   * sin plan, la rama descompone y corre como en los pasos 1
+   * a 3.
+   */
+  researchPlan?: ResearchPlan;
+  /**
+   * E10 (paso 6): la sesión de la corrida profunda de este
+   * turno: la foto desde la que reanudar (si la hay) y el
+   * gancho que guarda la foto al cerrar cada etapa. La
+   * carcasa posee el almacén; el turno solo lo pasa al
+   * pipeline.
+   */
+  researchSession?: {
+    resume?: ResearchSessionSnapshot;
+    onStageClosed?: (snapshot: ResearchSessionSnapshot) => void | Promise<void>;
+    scope?: "packs" | "documents" | "both";
+    style?: ResearchStyle;
+  };
   /**
    * La clave de la guía que el llamante ya eligió (los botones
    * de Emergencia, que saben su tema): si resuelve en el pack
@@ -263,7 +294,8 @@ export type TurnRoute =
   | "guide-coherence"
   | "safe-text"
   | "model"
-  | "model-safe-substituted";
+  | "model-safe-substituted"
+  | "deep-research";
 
 export interface TurnResult {
   /** El texto servido, ya juzgado y con las sustituciones aplicadas. */
@@ -306,6 +338,19 @@ export interface TurnResult {
   stopped: boolean;
   /** La generación cerró por plazo. */
   timedOut: boolean;
+  /**
+   * E10 (paso 5): el informe de una corrida de investigación
+   * servida por este turno: el estilo elegido, las cuatro
+   * formas de lectura del mismo material y los dos recibos.
+   * La superficie enseña el selector de estilo y el recibo
+   * navegable desde aquí; el documento guardado en la
+   * memoria cifrada lleva la misma materia.
+   */
+  research?: {
+    style: ResearchStyle;
+    styles: Record<ResearchStyle, string>;
+    receipt: ResearchReceipt;
+  };
 }
 
 const DEFAULT_PRESET: RoutingPreset = "balanced";
@@ -583,8 +628,92 @@ export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnRes
 
   // 5. La puerta antes de la bifurcación (segunda red, mitad del turno).
   const gateHit = gatePreemptsDeepResearch(query, lang);
-  const deepTurn = (input.researchMode ?? false) && !gateHit;
-  const researchPreempted = (input.researchMode ?? false) && gateHit;
+  let deepTurn = (input.researchMode ?? false) && !gateHit;
+  let researchPreempted = (input.researchMode ?? false) && gateHit;
+
+  // 5.1 La investigación profunda (E10, paso 1): con el modo activo
+  // y la puerta en silencio, el pipeline recreado del móvil corre el
+  // turno entero (descomponer, investigar cada subpregunta con su
+  // recuperación, sintetizar con las citas renumeradas por código) y
+  // su respuesta se sirve tal cual, sin el juez del paso 10 ni los
+  // post-chequeos del paso 11: es el hueco !deepTurn de la paridad,
+  // como está (el juez dentro del pipeline es el paso 2 de la
+  // etapa). Si la segunda red del propio pipeline destapa la
+  // emergencia tras descomponer, el turno abandona la investigación
+  // y sigue por la ruta normal como turno protegido, marcado
+  // preemptado: la emergencia nunca se vuelve tema de
+  // investigación.
+  if (deepTurn) {
+    input.onPhase?.("searching");
+    // La residencia del e5 se garantiza antes de investigar, como
+    // antes de juzgar en el paso 10: la recuperación lo usa y el
+    // contexto semántico de los jueces del pipeline (E10, paso 2)
+    // solo existe con él residente; sin él, la corrida degrada a
+    // léxico y el aviso queda asentado por el ayudante.
+    await ensureEmbeddings();
+    const deep = await runDeepResearch(
+      query,
+      input.systemPrompt,
+      {
+        summary: input.summary ?? null,
+        turns: (input.history ?? []).map((t) => ({ role: t.role, text: t.content })),
+      },
+      // E10 (paso 3): la síntesis de la investigación corre al
+      // presupuesto sellado de la clase de la máquina, no al
+      // tope de respuesta del chat: son modos distintos y la
+      // tabla de presupuestos es la que gobierna este.
+      researchBudget().synthesisTokens,
+      undefined,
+      input.onToken,
+      () => input.signal?.aborted ?? false,
+      lang,
+      // E10 (paso 4): con el plan aprobado de la superficie, la
+      // corrida sigue el plan editado y cierra con la pasada de
+      // contraste y su ronda única de huecos.
+      {
+        ...(input.researchPlan
+          ? {
+              plan: {
+                subQuestions: input.researchPlan.subQuestions,
+                scope: input.researchPlan.scope,
+              },
+              contrast: true,
+            }
+          : {}),
+        // E10 (paso 5): el estilo elegido con el plan gobierna
+        // la síntesis; sin plan, el de la sesión que se
+        // reanuda (paso 6) o el de por defecto.
+        style: input.researchPlan?.style ?? input.researchSession?.style ?? "completo",
+        // E10 (paso 6): la sesión de la corrida, si la carcasa
+        // la abrió para este turno.
+        session: input.researchSession,
+      },
+    );
+    if (!deep.emergencyIntercepted) {
+      // E10 (paso 5): las cuatro formas de lectura del mismo
+      // material viajan con el resultado, y el texto servido
+      // es la forma del estilo elegido (la de por defecto es
+      // la respuesta tal cual, como en los pasos 1 a 4).
+      const style = deep.style ?? "completo";
+      const styles: Record<ResearchStyle, string> = {
+        completo: renderReportStyle(deep, "completo", lang),
+        ejecutivo: renderReportStyle(deep, "ejecutivo", lang),
+        comparativo: renderReportStyle(deep, "comparativo", lang),
+        cronologico: renderReportStyle(deep, "cronologico", lang),
+      };
+      return finish({
+        text: style === "completo" ? deep.answer : styles[style],
+        route: "deep-research",
+        sources: deep.citations,
+        evidence: buildEvidenceCard(deep.citations, query),
+        researchPreempted: false,
+        timedOut: deep.timedOut ?? false,
+        research: deep.receipt ? { style, styles, receipt: deep.receipt } : undefined,
+      });
+    }
+    deepTurn = false;
+    researchPreempted = true;
+  }
 
   // 6. La guía literal, con la recuperación reutilizable.
   // C-4: al entrar en este bloque el turno pasa a buscar en
@@ -819,4 +948,41 @@ export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnRes
     stopped: execResult.stopped,
     timedOut: execResult.timedOut,
   });
+}
+
+/**
+ * E10 (paso 4): el resultado de pedir el plan de un turno. La
+ * superficie lo pide antes de enviar cuando el modo de
+ * investigación está activo: si el turno se serviría por una
+ * ruta anterior a la rama profunda (las fijas de seguridad, la
+ * identidad, la charla fija, los hechos de los packs, la
+ * bifurcación del agente) o la segunda red intercepta la
+ * pregunta o su plan, no hay plan que enseñar y el turno corre
+ * normal por su ruta.
+ */
+export type ResearchPlanOutcome =
+  | { kind: "plan"; plan: ResearchPlan }
+  | { kind: "preempted" }
+  | { kind: "not-deep" };
+
+export async function planTurn(input: TurnInput, deps: TurnDeps): Promise<ResearchPlanOutcome> {
+  const { query, lang } = input;
+  if (!input.researchMode) return { kind: "not-deep" };
+  // Los mismos cortes que el turno cobra en sus pasos 1 a 5,
+  // en su orden: si alguno responde, la investigación no es
+  // el camino de este turno.
+  const safety = matchSafetyAnswer(query, lang);
+  if (safety && safety.kind !== "emergency-number") return { kind: "preempted" };
+  if (answerKnowledgeQuery(query, lang)) return { kind: "preempted" };
+  if (matchCanned(query)) return { kind: "preempted" };
+  const { regions, facts } = await deps.packFacts().catch(() => ({ regions: [], facts: [] }));
+  if (composeFactsAnswer(query, lang, regions, facts)) return { kind: "preempted" };
+  if (safety) return { kind: "preempted" };
+  const intent = classifyIntent(query);
+  if (intent === "actuar" || intent === "recordar") return { kind: "not-deep" };
+  if (gatePreemptsDeepResearch(query, lang)) return { kind: "preempted" };
+  await deps.ensureEmbeddings().catch(() => false);
+  const plan = await planResearch(query, lang, "both");
+  if (plan.intercepted) return { kind: "preempted" };
+  return { kind: "plan", plan };
 }

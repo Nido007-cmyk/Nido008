@@ -48,6 +48,15 @@ largos y el catálogo completo de herramientas siempre presente.
   alguna.
 - **Tus propios documentos.** Importas tus documentos y preguntas
   sobre ellos; las respuestas citan el documento y la página.
+- **Investigación profunda.** Le das a NIDO una pregunta difícil
+  y la descompone en subpreguntas, busca en tus paquetes de
+  conocimiento y en tus documentos para cada una, y pasa cada
+  afirmación por el juez de fundamentación antes de que te
+  llegue. Ves el plan y su coste estimado antes de que corra
+  nada, y puedes editarlo. El informe sale en cuatro estilos y
+  queda guardado en la app, y si cierras NIDO a mitad de una
+  investigación, la sesión se reanuda donde quedó cuando
+  vuelves.
 - **Memoria, calendario y recordatorios en tu máquina.** Lo que
   NIDO recuerda por ti, tu calendario y tus contactos viven dentro
   de la app, cifrados, y no se sincronizan con ningún sitio.
@@ -110,12 +119,12 @@ repositorio es una foto de la rama de desarrollo tomada el
 descargas verificadas, la memoria cifrada, el calendario, los
 contactos y los recordatorios, las tareas programadas, la
 biblioteca de documentos, la voz en el dispositivo (dictado y
-lectura en voz alta) y la guía integrada. En desarrollo ahora
-mismo: la investigación profunda, donde NIDO trabaja una
-pregunta en varios pasos y cita lo que encuentra.
+lectura en voz alta), la investigación profunda con sus informes
+guardados y la guía integrada. En desarrollo ahora mismo: la
+última etapa de la primera versión, camino de la primera alfa.
 
-En el último hito verificado, la batería de pruebas corrió 7.046
-pruebas: 7.033 en verde, 13 fallos esperados y ningún fallo
+En el último hito verificado, la batería de pruebas corrió 7.162
+pruebas: 7.149 en verde, 13 fallos esperados y ningún fallo
 inesperado.
 
 NIDO PC es software en alfa temprana. Puede fallar, y va a

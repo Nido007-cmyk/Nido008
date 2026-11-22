@@ -232,17 +232,23 @@ describe("applyMigrations", () => {
   });
 });
 
-describe("MEMORY_MIGRATIONS (L1)", () => {
-  it("registro vacío: applyMigrations es idéntico al check anterior", async () => {
-    expect(MEMORY_MIGRATIONS).toEqual([]);
+describe("MEMORY_MIGRATIONS (E10 paso 6: la primera migración real)", () => {
+  it("el registro trae la 1→2 de las sesiones de investigación", async () => {
+    // E10 (paso 6): el registro dejó de estar vacío con su
+    // etapa; la guarda cobra su forma conocida nueva: una
+    // sola migración, 1→2, cuya subida crea la tabla de
+    // sesiones en la base falsa.
+    expect(MEMORY_MIGRATIONS.length).toBe(1);
+    expect(MEMORY_MIGRATIONS[0].from).toBe(1);
+    expect(MEMORY_MIGRATIONS[0].to).toBe(2);
     const v1 = makeFakeDb("1");
     const res = await applyMigrations(v1, {
       formatId: "nido_memory.db",
-      supportedMajor: 1,
+      supportedMajor: 2,
       ErrorClass: TestVersionError,
       migrations: MEMORY_MIGRATIONS,
     });
-    expect(res).toEqual({ migrated: false, from: 1, to: 1 });
+    expect(res).toEqual({ migrated: true, from: 1, to: 2 });
   });
 
   it("v0 sin camino → MigrationPathMissingError (no MemoryDbVersionError silencioso)", async () => {
@@ -250,7 +256,7 @@ describe("MEMORY_MIGRATIONS (L1)", () => {
     await expect(
       applyMigrations(v0, {
         formatId: "nido_memory.db",
-        supportedMajor: 1,
+        supportedMajor: 2,
         ErrorClass: TestVersionError,
         migrations: MEMORY_MIGRATIONS,
       }),

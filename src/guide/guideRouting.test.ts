@@ -434,7 +434,11 @@ function recordingHandlers(): Record<string, never> {
   return wrapped as Record<string, never>;
 }
 
-async function runExample(text: string, lang: Lang, opts: { tone?: boolean } = {}): Promise<TurnResult> {
+async function runExample(
+  text: string,
+  lang: Lang,
+  opts: { tone?: boolean; research?: boolean } = {},
+): Promise<TurnResult> {
   toolCalls.length = 0;
   const personality = PERSONALITIES.find((p) => p.id === (opts.tone ? "summary" : "succinct"))!;
   const deps = await productionTurnDeps({
@@ -449,7 +453,17 @@ async function runExample(text: string, lang: Lang, opts: { tone?: boolean } = {
     onConfirmTool: async () => true,
   });
   return runTurn(
-    { query: text, lang, systemPrompt: personality.systemPrompt, styleReminder: personality.styleReminder, history: [] },
+    {
+      query: text,
+      lang,
+      systemPrompt: personality.systemPrompt,
+      styleReminder: personality.styleReminder,
+      history: [],
+      // E10 (paso 5): el ejemplo de la lección de
+      // investigación corre con el modo encendido, como la
+      // lección enseña a encenderlo.
+      researchMode: opts.research === true,
+    },
     deps,
   );
 }
@@ -523,6 +537,42 @@ function burnChunks(lang: Lang): ChunkFixture[] {
   });
 }
 
+// E10 (paso 5): el corpus del ejemplo de la lección de
+// investigación: los acueductos, un tema que la puerta no
+// intercepta en ningún idioma y que el índice de ejemplo sí
+// cubre — la misma forma medida en el arnés del juez.
+function aqueductChunks(lang: Lang): ChunkFixture[] {
+  const data: Record<Lang, { title: string; parts: string[] }> = {
+    es: {
+      title: "Acueductos romanos",
+      parts: [
+        "Cómo cruzaban los valles\n- Cuando el terreno bajaba, los romanos levantaban el canal sobre arcos de piedra, la arcuación, para mantener la pendiente suave y constante del agua.\n- La pendiente típica era muy pequeña, a veces de solo unos centímetros por cada cien metros.",
+        "El canal\n- El agua viajaba por un canal cubierto, el especus, que la protegía del sol y de la suciedad.\n- En los puntos bajos de un valle, a veces se usaban sifones invertidos con tuberías de plomo que soportaban la presión.",
+      ],
+    },
+    en: {
+      title: "Roman aqueducts",
+      parts: [
+        "How they crossed valleys\n- When the ground fell away, the Romans raised the channel on stone arches, the arcade, to keep the water's gentle, constant slope.\n- The typical slope was very small, sometimes only a few centimeters over a hundred meters.",
+        "The channel\n- The water travelled in a covered channel, the specus, which protected it from the sun and from dirt.\n- At the low points of a valley, inverted siphons with lead pipes that withstood the pressure were sometimes used.",
+      ],
+    },
+    pt: {
+      title: "Aquedutos romanos",
+      parts: [
+        "Como atravessavam os vales\n- Quando o terreno descia, os romanos erguiam o canal sobre arcos de pedra, a arcada, para manter a inclinação suave e constante da água.\n- A inclinação típica era muito pequena, por vezes de apenas alguns centímetros por cada cem metros.",
+        "O canal\n- A água viajava por um canal coberto, o specus, que a protegia do sol e da sujeira.\n- Nos pontos baixos de um vale, por vezes usavam sifões invertidos com tubos de chumbo que suportavam a pressão.",
+      ],
+    },
+  };
+  const d = data[lang];
+  return d.parts.map((body, i) => {
+    const chunkId = `pack:nido-esencial-e5:${300 + i}`;
+    registerDoc(chunkId, d.title, "NIDO Esencial", d.parts);
+    return { chunkId, docId: chunkId, title: `${d.title} — ${body.split("\n")[0]}`, body, score: 1, rawScore: 0.92, matchType: "semantic" as const };
+  });
+}
+
 interface Decl {
   route: string | Partial<Record<Lang, string>>;
   tool?: string;
@@ -533,11 +583,15 @@ interface Decl {
 async function expectRoute(decl: Decl, lessonId: string, lang: Lang, text: string): Promise<void> {
   if (decl.corpus === "cpr") retrieval.chunks = cprChunks(lang);
   if (decl.corpus === "burn") retrieval.chunks = burnChunks(lang);
+  if (decl.corpus === "aqueduct") retrieval.chunks = aqueductChunks(lang);
   if (decl.tool === "list_notes") {
     mem.notes.push({ id: "seed", title: "Nota del taller", body: "el taller cierra los lunes" });
   }
   const routeClass = typeof decl.route === "string" ? decl.route : decl.route[lang];
-  const r = await runExample(text, lang, { tone: routeClass === "model-judged-tone" });
+  const r = await runExample(text, lang, {
+    tone: routeClass === "model-judged-tone",
+    research: routeClass === "deep-research",
+  });
   const where = `${lessonId} (${lang}): «${text}»`;
   switch (routeClass) {
     case "canned":
@@ -602,6 +656,15 @@ async function expectRoute(decl: Decl, lessonId: string, lang: Lang, text: strin
       expect(r.sources.length, `${where} · sirvió una fuente inventada`).toBe(0);
       expect(r.route, where).toBe("model");
       break;
+    case "deep-research":
+      // E10 (paso 5): la promesa de la lección es la ruta: con
+      // el modo encendido, la pregunta se investiga por el
+      // pipeline (ruta «deep-research») y la puerta no la
+      // aparta. El contenido servido depende del doble del
+      // modelo de la batería, no de la promesa.
+      expect(r.route, where).toBe("deep-research");
+      expect(r.researchPreempted, `${where} · la puerta apartó la investigación`).toBe(false);
+      break;
     default:
       throw new Error(`clase de ruta no conocida en el catálogo: ${decl.route}`);
   }
@@ -657,6 +720,9 @@ describe("cobro 2 · cada ejemplo toma la ruta declarada, por el turno real (uni
       [
         "agent-loop",
         "canned",
+        // E10 (paso 1): la ruta de la investigación profunda,
+        // asentada en la guarda con su etapa.
+        "deep-research",
         "emergency-situation",
         "guide-coherence",
         "guide-forced",

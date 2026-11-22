@@ -336,23 +336,23 @@
     "clearAllButton": "Limpar Tudo",
     "clearAllChatHistory": "Limpar Todo o Histórico de Conversas"
   },
-  "voiceSettings":   {
-      "title": "Voz",
-      "stateLocal": "A voz do NIDO está neste PC: o ditado e a leitura funcionam sem conexão.",
-      "stateReserve": "Você está usando a voz do seu sistema operacional, não a do NIDO. Ela soa diferente e depende do seu sistema.",
-      "stateNone": "Este PC ainda não tem voz: falta baixar o modelo de voz do NIDO. O download está logo abaixo.",
-      "dictateLabel": "Ditado por voz",
-      "dictateBody": "Escreva falando, com o microfone do PC. O reconhecimento é local: sua voz não sai do computador.",
-      "readAloudLabel": "Ler as respostas em voz alta",
-      "readAloudBody": "O NIDO lê cada resposta quando termina de escrevê-la. Você pode parar quando quiser.",
-      "reserveLabel": "Voz do sistema como reserva",
-      "reserveBody": "Se a voz do NIDO não estiver baixada, a leitura pode soar com a voz do seu sistema operacional.",
-      "assetsTitle": "Modelos de voz",
-      "assetsNote": "Modelo de escuta: 487 MB. Modelo de voz: 350 MB. Você baixa uma única vez e eles funcionam sem conexão.",
-      "installed": "Instalado",
-      "memoryNote": "Ao terminar o ditado ou a leitura, os modelos são liberados para deixar a memória livre; o sistema retém uma parte e libera tudo ao fechar o NIDO.",
-      "provisionalNote": "As vozes em espanhol e português são provisórias: as definitivas serão escolhidas quando você as ouvir e der seu veredito.",
-      "ptChainNote": "O português é compreendido e lido, mas por enquanto sua qualidade é menor que a do espanhol e do inglês."
+  "voiceSettings": {
+    "title": "Voz",
+    "stateLocal": "A voz do NIDO está neste PC: o ditado e a leitura funcionam sem conexão.",
+    "stateReserve": "Você está usando a voz do seu sistema operacional, não a do NIDO. Ela soa diferente e depende do seu sistema.",
+    "stateNone": "Este PC ainda não tem voz: falta baixar o modelo de voz do NIDO. O download está logo abaixo.",
+    "dictateLabel": "Ditado por voz",
+    "dictateBody": "Escreva falando, com o microfone do PC. O reconhecimento é local: sua voz não sai do computador.",
+    "readAloudLabel": "Ler as respostas em voz alta",
+    "readAloudBody": "O NIDO lê cada resposta quando termina de escrevê-la. Você pode parar quando quiser.",
+    "reserveLabel": "Voz do sistema como reserva",
+    "reserveBody": "Se a voz do NIDO não estiver baixada, a leitura pode soar com a voz do seu sistema operacional.",
+    "assetsTitle": "Modelos de voz",
+    "assetsNote": "Modelo de escuta: 487 MB. Modelo de voz: 350 MB. Você baixa uma única vez e eles funcionam sem conexão.",
+    "installed": "Instalado",
+    "memoryNote": "Ao terminar o ditado ou a leitura, os modelos são liberados para deixar a memória livre; o sistema retém uma parte e libera tudo ao fechar o NIDO.",
+    "provisionalNote": "As vozes em espanhol e português são provisórias: as definitivas serão escolhidas quando você as ouvir e der seu veredito.",
+    "ptChainNote": "O português é compreendido e lido, mas por enquanto sua qualidade é menor que a do espanhol e do inglês."
   },
   "interfaceSettings": {
     "hapticFeedbackLabel": "Feedback tátil",
@@ -1153,12 +1153,12 @@
     "offerHeldUnverified": "A oferta de {{name}} ficou em pausa: vocês ainda não compararam a impressão digital. Quando compararem, peçam para enviar de novo.",
     "offerHeldUnverifiedGeneric": "Uma oferta ficou em pausa: vocês ainda não compararam a impressão digital com esse contato. Quando compararem, peçam para enviar de novo."
   },
-  "voiceInputAlert":   {
-      "title": "Ditado por voz",
-      "onDeviceTitle": "Ditado local",
-      "onDeviceMessage": "O NIDO reconhece sua voz neste PC, sem conexão, e o áudio nunca sai do computador.",
-      "systemMessage": "Sem o modelo de escuta baixado, o ditado não está disponível: você pode baixá-lo em Ajustes, na seção Voz. O ditado do NIDO nunca usa serviços de terceiros.",
-      "cancel": "Cancelar"
+  "voiceInputAlert": {
+    "title": "Ditado por voz",
+    "onDeviceTitle": "Ditado local",
+    "onDeviceMessage": "O NIDO reconhece sua voz neste PC, sem conexão, e o áudio nunca sai do computador.",
+    "systemMessage": "Sem o modelo de escuta baixado, o ditado não está disponível: você pode baixá-lo em Ajustes, na seção Voz. O ditado do NIDO nunca usa serviços de terceiros.",
+    "cancel": "Cancelar"
   },
   "tasks": {
     "approvalTitle": "Solicitação de tarefa",
@@ -1672,6 +1672,24 @@
             ],
             "examples": [],
             "tip": "Se uma resposta cita o seu documento, quem manda é a página: abra-a e confira o excerto antes de confiar. E o contrário também vale: se o modelo menciona uma página no texto e não há citação por baixo, isso é só a redação dele, não uma fonte."
+          },
+          {
+            "id": "investigacion-profunda",
+            "title": "Pesquisa profunda",
+            "what": "Algumas perguntas merecem mais do que uma resposta rápida. A pesquisa profunda é um modo que você liga para uma pergunta: o NIDO a divide em perguntas menores, procura cada uma nos seus pacotes e nos seus documentos, confere cada parte com as suas fontes e escreve um único relatório. Trabalha um só modelo, em passagens, por isso demora mais do que uma resposta normal. Tudo acontece no seu computador.",
+            "steps": [
+              "Ligue com o botão Pesquisa profunda ao lado da caixa de mensagem; ele também fica em Configurações. Vale para as perguntas que você enviar enquanto estiver ligado.",
+              "Antes de qualquer coisa rodar, você vê o Plano de pesquisa: as perguntas menores em que a sua foi dividida e quanto a pesquisa deve custar. Nada é gasto até você tocar em Pesquisar agora.",
+              "O plano pode ser mexido: tire uma pergunta, adicione uma sua e escolha onde procurar, nos seus pacotes, nos seus documentos ou nos dois, com o número de fontes de cada âmbito. O que você adiciona passa pela mesma verificação de segurança de todo o resto.",
+              "Cada passagem volta julgada: com apoio, parcial (com as frases sem apoio removidas e contadas) ou sem fontes. Se não aparecer nada em lugar nenhum, o NIDO diz que a sua biblioteca local não tem nada sobre isso, em vez de inventar um relatório.",
+              "Leia o mesmo relatório de quatro jeitos, Relatório completo, Resumo executivo, Comparativo e Cronológico, no seletor de estilo abaixo da resposta. Mudar o estilo muda a forma, nunca o que foi afirmado nem as citações. Em Cada afirmação, com a sua fonte, toque numa afirmação para abrir o trecho de onde ela saiu, e o recibo da pesquisa mostra o modelo, o tempo e os tokens.",
+              "Se você parar uma pesquisa, o trabalho não se perde: cada parte terminada fica guardada na sua memória criptografada, e amanhã você pode retomar a sessão de onde ela fechou, na lista de pesquisas guardadas. Apagar uma sessão é apagar um documento seu, e o app pede a sua confirmação antes.",
+              "Uma emergência nunca é pesquisada: se a sua pergunta revelar uma, quem responde é o guia protegido, mesmo com o modo ligado."
+            ],
+            "examples": [
+              "Como os aquedutos romanos levavam a água através dos vales?"
+            ],
+            "tip": "O relatório fica guardado na sua memória criptografada, com os recibos. Exporte pelo botão abaixo da resposta quando quiser uma cópia em Downloads; nada sai do computador sozinho."
           }
         ]
       },
@@ -1998,6 +2016,42 @@
     "recommendationTitle": "O recomendado para este computador",
     "research": "Pesquisa profunda",
     "researchPreempted": "A pesquisa profunda se apartou: assumiu uma resposta verificada.",
+    "researchPlanTitle": "Plano de pesquisa",
+    "researchPlanCovered": "O que o plano cobre",
+    "researchPlanGaps": "Sem cobertura",
+    "researchPlanNone": "nada",
+    "researchPlanSources": "Fontes para esta pesquisa",
+    "researchPlanScopePacks": "Pacotes de conhecimento",
+    "researchPlanScopeDocuments": "Os seus documentos",
+    "researchPlanScopeBoth": "Pacotes e documentos",
+    "researchPlanScopeEmpty": "Este âmbito ainda não tem fontes, por isso a pesquisa não pode começar.",
+    "researchPlanEstimate": "Custo estimado: cerca de {{tokens}} tokens (cerca de {{minutes}} min neste computador)",
+    "researchPlanAddPlaceholder": "Adicione uma subpergunta…",
+    "researchPlanAdd": "Adicionar",
+    "researchPlanRemove": "Remover",
+    "researchPlanRun": "Pesquisar agora",
+    "researchPlanCancel": "Cancelar",
+    "researchStyleLabel": "Estilo do relatório",
+    "researchStyleCompleto": "Relatório completo",
+    "researchStyleEjecutivo": "Resumo executivo",
+    "researchStyleComparativo": "Comparativo",
+    "researchStyleCronologico": "Cronológico",
+    "researchReceiptClaims": "Cada afirmação, com a sua fonte",
+    "researchReceiptRun": "Recibo da pesquisa",
+    "researchReceiptModel": "Modelo",
+    "researchReceiptTime": "Tempo",
+    "researchReceiptFragments": "Fontes consultadas",
+    "researchReceiptJudge": "Verificação final, mantidas / removidas",
+    "researchReceiptGaps": "Lacunas declaradas",
+    "researchExport": "Exportar o relatório (.md)",
+    "researchExported": "Salvo em Downloads",
+    "researchSessionsTitle": "Pesquisas guardadas",
+    "researchSessionProgress": "{{done}} de {{total}} partes prontas",
+    "researchSessionDone": "Concluída",
+    "researchSessionResume": "Retomar",
+    "researchSessionDelete": "Apagar",
+    "researchSessionDeleteConfirm": "Apagar de vez",
+    "researchPlanPlanning": "A preparar o plano de pesquisa…",
     "security": "Segurança",
     "securityBody": "O seu cofre bloqueia-se com a sua senha. Enquanto está aberto, os seus dados só vivem neste dispositivo.",
     "passwordFixedNote": "A senha é definida ao criar o cofre: não pode ser alterada nem recuperada.",

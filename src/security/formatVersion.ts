@@ -26,7 +26,14 @@
 // ── Versiones soportadas (major 1 en todos los formatos, L1) ────────────────
 
 export const KNOWLEDGE_DB_SCHEMA_VERSION = 1;
-export const MEMORY_DB_SCHEMA_VERSION = 1;
+/**
+ * E10 (paso 6): la base de memoria sube a v2 con la migración
+ * 1→2 de `memoryMigrations.ts` (la tabla de sesiones de
+ * investigación). Es la primera migración versionada real del
+ * formato: las instalaciones v1 la aplican al abrir y las
+ * nuevas nacen en v2 con la misma tabla por el DDL unificado.
+ */
+export const MEMORY_DB_SCHEMA_VERSION = 2;
 export const SETTINGS_FORMAT_VERSION = 1;
 export const INSTALL_JOURNAL_VERSION = 1;
 

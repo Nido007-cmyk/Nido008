@@ -45,6 +45,14 @@ full tool catalog always present.
   verified local content with no network at all.
 - **Your own documents.** Import your documents and ask about them;
   answers cite the document and the page.
+- **Deep research.** Give NIDO a hard question and it breaks it
+  down into sub-questions, searches your knowledge packs and your
+  documents for each one, and puts every claim through the
+  grounding judge before it reaches you. You see the plan and its
+  estimated cost before anything runs, and you can edit it. The
+  report comes in four styles and stays saved in the app, and if
+  you close NIDO in the middle of a run, the session resumes
+  where it stopped when you come back.
 - **Memory, calendar and reminders on your machine.** What NIDO
   remembers for you, your calendar and your contacts live inside
   the app, encrypted, and never sync anywhere.
@@ -104,12 +112,12 @@ repository is a snapshot of the development branch taken on
 2026-11-22. Working today: the chat, the model catalog with its
 verified downloads, the encrypted memory, the calendar, contacts
 and reminders, scheduled tasks, the document library, on-device
-voice (dictation and read-aloud) and the built-in guide. In
-development right now: deep research, where NIDO works through
-a question in several steps and cites what it found.
+voice (dictation and read-aloud), deep research with its saved
+reports and the built-in guide. In development right now: the
+last stage of the first version, on the way to the first alpha.
 
-At the last verified milestone, the test battery ran 7,046 tests:
-7,033 passing, 13 expected failures and no unexpected failures.
+At the last verified milestone, the test battery ran 7,162 tests:
+7,149 passing, 13 expected failures and no unexpected failures.
 
 NIDO PC is early alpha software. It can fail, and it will change.
 What every version promises is fewer failures than the one before

@@ -249,6 +249,56 @@ describe("el turno entero: la ruta del modelo", () => {
     expect(r.researchPreempted).toBe(true);
     expect(r.route).toBe("model");
   });
+
+  it("E10 paso 2 · la secuencia de oro (RCP → atragantamiento) se sirve por la ruta protegida también con el modo activo", async () => {
+    // La pregunta de la secuencia de oro de la 0.1.105: la guía de
+    // RCP tienta como respuesta y la buena es la de
+    // atragantamiento. Con el modo de investigación encendido, la
+    // segunda red preempta y el turno sirve su ruta protegida de
+    // siempre: el pipeline de investigación no corre (ni
+    // descomposición ni síntesis entre las llamadas al motor) y
+    // no puede degradar la respuesta de emergencia. La elección
+    // de la guía buena sobre la de RCP la especifica su propia
+    // batería (guideAnswerRun.cascara01105); aquí se cobra la
+    // composición del turno con el juez ya dentro del pipeline.
+    retrieval.chunks = [
+      {
+        chunkId: "pack:nido-esencial-e5:12",
+        docId: "pack:nido-esencial-e5:12",
+        title: "RCP (reanimación) en adultos y niños mayores — Antes de empezar",
+        body: "Si una persona se desploma, no responde y no respira normal (o solo boquea), su corazón probablemente se ha parado.",
+        score: 0.95,
+        rawScore: 0.95,
+        matchType: "semantic",
+      },
+      {
+        chunkId: "pack:nido-esencial-e5:57",
+        docId: "pack:nido-esencial-e5:57",
+        title: "Atragantamiento por edades: bebés y niños — Si no sale o pierde el conocimiento",
+        body: "Si no sale o pierde el conocimiento\n- Llama a emergencias, túmbalo en el suelo y empieza la RCP.",
+        score: 0.9,
+        rawScore: 0.9,
+        matchType: "semantic",
+      },
+    ];
+    const r = await runTurn(
+      { ...baseInput, query: "Que hago si un niño se esta atragantando", researchMode: true },
+      await deps(),
+    );
+    expect(r.researchPreempted).toBe(true);
+    expect(r.route).toBe("model");
+    expect(r.sources).toHaveLength(2);
+    // Una sola generación, la del ejecutor de la ruta protegida:
+    // ninguna llamada lleva la instrucción de descomponer ni la
+    // de sintetizar perspectivas.
+    expect(facade.generate).toHaveBeenCalledTimes(1);
+    for (const call of facade.generate.mock.calls) {
+      const serialized = JSON.stringify(call[0]?.messages ?? call[0]?.prompt ?? "");
+      expect(serialized).not.toContain("Divide esta pregunta de investigación");
+      expect(serialized).not.toContain("Break this research question");
+      expect(serialized).not.toContain("synthesizing multiple research perspectives");
+    }
+  });
 });
 
 describe("las señales honestas del turno (caza de errores de la tanda 14)", () => {

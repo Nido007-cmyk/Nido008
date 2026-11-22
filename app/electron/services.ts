@@ -18,6 +18,7 @@
  * los consumen (D-8), para que ningún turno lea por un handle
  * muerto en silencio.
  */
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { appendFile, copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { freemem, hostname, release as osRelease, totalmem, type as osType } from "node:os";
@@ -93,7 +94,25 @@ import {
   listReminders,
 } from "../../src/agent/memory/memoryStore.js";
 import { reminderWhen } from "../../src/agent/loop/toolRouter.js";
-import { productionTurnDeps, runTurn, type TurnResult } from "../../src/turn/turnPipeline.js";
+import {
+  planTurn,
+  productionTurnDeps,
+  runTurn,
+  type TurnInput,
+  type TurnResult,
+} from "../../src/turn/turnPipeline.js";
+import type { ResearchStyle } from "../../src/services/orchestrator.js";
+import {
+  deleteResearchSession,
+  getResearchSession,
+  listResearchSessions,
+  saveResearchSessionStage,
+} from "../../src/services/researchSessions.js";
+import type { ResearchPlan } from "../../src/services/researchPlan.js";
+import {
+  getResearchReport,
+  saveResearchReport,
+} from "../../src/services/researchReports.js";
 import { decideContextNote } from "../../src/turn/contextNote.js";
 import { loadAllPackFacts } from "../../src/rag/packs.js";
 
@@ -115,6 +134,7 @@ import {
   DEFAULT_MEMORY_SETTINGS,
   getCustomSystemPrompt,
   getDisabledToolNames,
+  getDeepResearchMode,
   getGuideVisited,
   getPersonalityId,
   getMemorySettings,
@@ -126,6 +146,7 @@ import {
   getVoiceSystemReserveEnabled,
   markGuideVisited,
   setCustomSystemPrompt,
+  setDeepResearchMode,
   setDisabledToolNames,
   setLanguageId,
   setMemorySettings,
@@ -180,6 +201,9 @@ interface StoredTurn {
   warnings?: string[];
   timedOut?: boolean;
   researchPreempted?: boolean;
+  /** E10 (paso 5): el informe de la investigación de este turno. */
+  research?: unknown;
+  researchReportId?: string;
   stopped?: boolean;
   contextNote?: "filling" | "dropping";
   at: string;
@@ -679,7 +703,15 @@ function drainPendingConfirms(): void {
 
 async function runOneTurn(
   event: Electron.IpcMainInvokeEvent,
-  args: { conversationId: string; text: string; researchMode?: boolean; guideKey?: string },
+  args: {
+    conversationId: string;
+    text: string;
+    researchMode?: boolean;
+    guideKey?: string;
+    researchPlan?: ResearchPlan;
+    /** E10 (paso 6): la sesión que este turno reanuda, si la trae. */
+    researchSessionId?: string;
+  },
 ): Promise<unknown> {
   if (!session) return { ok: false, reason: "locked" };
   // Cableado, pieza 2: el campo `autoGenerateTitles` gobierna
@@ -765,6 +797,50 @@ async function runOneTurn(
   if (currentAbort) return { ok: false, reason: "turn-in-flight" };
   const abort = new AbortController();
   currentAbort = abort;
+  // E10 (paso 6): la sesión de la corrida profunda. Si el
+  // turno reanuda una sesión guardada, su foto entra como
+  // punto de partida y sus datos (pregunta, ámbito, estilo)
+  // gobiernan; si es una corrida nueva con el modo activo,
+  // nace una sesión nueva y el pipeline va guardando su foto
+  // al cerrar cada etapa. Un fallo del almacén no tumba el
+  // turno: la corrida sigue sin sesión, como antes del paso.
+  let researchSession: TurnInput["researchSession"];
+  let researchSessionId: string | null = null;
+  if (args.researchSessionId) {
+    const row = await getResearchSession(args.researchSessionId).catch(() => null);
+    if (row && row.stage !== "done") {
+      researchSessionId = row.id;
+      researchSession = {
+        resume: row.snapshot,
+        scope: row.scope as "packs" | "documents" | "both",
+        style: row.style as ResearchStyle,
+        onStageClosed: (snapshot) =>
+          saveResearchSessionStage({
+            id: row.id,
+            query: row.query,
+            lang: row.lang,
+            scope: row.scope,
+            style: row.style,
+            snapshot,
+          }).catch(() => undefined),
+      };
+    }
+  }
+  if (!researchSession && args.researchMode === true) {
+    researchSessionId = randomUUID();
+    const newId = researchSessionId;
+    researchSession = {
+      onStageClosed: (snapshot) =>
+        saveResearchSessionStage({
+          id: newId,
+          query: args.text,
+          lang,
+          scope: args.researchPlan?.scope ?? "both",
+          style: args.researchPlan?.style ?? "completo",
+          snapshot,
+        }).catch(() => undefined),
+    };
+  }
   let firstTokenSeen = false;
   let result: TurnResult;
   const turnStartedAt = Date.now();
@@ -781,6 +857,8 @@ async function runOneTurn(
         })),
         summary: conv.summary,
         researchMode: args.researchMode === true,
+        researchPlan: args.researchPlan,
+        researchSession,
         guideKey: args.guideKey,
         signal: abort.signal,
         onToken: (chunk) => {
@@ -801,6 +879,23 @@ async function runOneTurn(
     );
   } finally {
     if (currentAbort === abort) currentAbort = null;
+  }
+  // E10 (paso 5): el informe de una investigación servida se
+  // guarda como documento en la memoria cifrada, con sus dos
+  // recibos; su id viaja con el turno para que la superficie
+  // lo exporte solo por acción explícita. Un fallo al guardar
+  // no tumba el turno: el informe ya se sirvió en el chat.
+  let researchReportId: string | null = null;
+  if (result.research) {
+    researchReportId = await saveResearchReport({
+      query: args.text,
+      style: result.research.style,
+      completoText: result.research.styles.completo,
+      receipt: result.research.receipt,
+      lang,
+    })
+      .then((r) => r.id)
+      .catch(() => null);
   }
   // La última tasa real de la barra (S-1): tokens del texto
   // servido entre el tiempo del turno, medida en esta máquina;
@@ -875,6 +970,11 @@ async function runOneTurn(
       // para morir sin lector.
       timedOut: result.timedOut,
       researchPreempted: result.researchPreempted,
+      // E10 (paso 5): el informe de la investigación, con su
+      // estilo, sus cuatro formas y sus recibos, y el id de su
+      // documento guardado en la memoria cifrada.
+      research: result.research,
+      researchReportId: researchReportId ?? undefined,
       // G-1 en su variante A-2 (dirimen del asiento): la marca de
       // parada se persiste como sus hermanas, para que el turno
       // parado por el bloqueo o por el botón enseñe su estado al
@@ -932,6 +1032,9 @@ async function runOneTurn(
       timedOut: result.timedOut,
       contextNote: result.contextNote ?? null,
       researchPreempted: result.researchPreempted,
+      research: result.research,
+      researchReportId: researchReportId ?? undefined,
+      researchSessionId: researchSessionId ?? undefined,
       generationModelResident: result.generationModelResident,
     },
     conversation: conv,
@@ -1488,6 +1591,10 @@ export async function installServices(): Promise<void> {
     voiceSystemReserveEnabled: session
       ? await getVoiceSystemReserveEnabled().catch(() => true)
       : true,
+    // E10 (paso 1): el modo de investigación profunda, leído de
+    // su ajuste (apagado por defecto, como en el móvil): la
+    // superficie lo enseña en su chip y lo honra en cada turno.
+    deepResearchMode: session ? await getDeepResearchMode().catch(() => false) : false,
     personality: session ? await getPersonalityId().catch(() => null) : null,
     guideVisited: session ? await getGuideVisited().catch(() => []) : [],
     disabledTools: session ? await getDisabledToolNames().catch(() => []) : [],
@@ -1580,6 +1687,74 @@ export async function installServices(): Promise<void> {
   handle("nido:turn-stop", async () => {
     currentAbort?.abort();
     drainPendingConfirms();
+    return { ok: true };
+  });
+
+  // E10 (paso 4): el plan de investigación de un turno, antes
+  // de enviarlo. La superficie lo pide con el modo activo: si
+  // el turno se serviría por otra ruta o la segunda red
+  // intercepta, el resultado lo dice y el envío corre normal;
+  // si hay plan, la persona lo ve, lo edita y el envío lo trae
+  // de vuelta en el payload de turn-send. Planear no crea
+  // conversación ni toca el historial.
+  handle("nido:research-plan", async (_event, args: { text: string }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    if (inFlightTurn) return { ok: false, reason: "turn-in-flight" };
+    const deps = await productionTurnDeps({
+      handlers: buildToolHandlers({
+        requestConfirm: async () => false,
+      }),
+      packFacts: async () => {
+        const all = await loadAllPackFacts();
+        return { regions: all.regions, facts: all.facts };
+      },
+    });
+    const outcome = await planTurn(
+      {
+        query: args.text,
+        lang: prefs.lang,
+        systemPrompt: "",
+        researchMode: true,
+      },
+      deps,
+    );
+    return { ok: true, outcome };
+  });
+
+  // E10 (paso 5): la exportación del informe guardado, solo
+  // por acción explícita de la persona sobre su turno: lee el
+  // documento de la memoria cifrada y lo escribe como .md en
+  // sus Descargas, con nombre desduplicado como el entregador
+  // de colecciones. Nada se exporta solo.
+  handle("nido:research-report-export", async (_event, args: { id: string }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    const report = await getResearchReport(args.id).catch(() => null);
+    if (!report) return { ok: false, reason: "not-found" };
+    const downloads = app.getPath("downloads");
+    const stamp = report.createdAt.slice(0, 10);
+    let filename = `nido-investigacion-${stamp}.md`;
+    let n = 2;
+    while (existsSync(path.join(downloads, filename))) {
+      filename = `nido-investigacion-${stamp}-${n}.md`;
+      n += 1;
+    }
+    await writeFile(path.join(downloads, filename), report.document, "utf8");
+    return { ok: true, delivered: filename };
+  });
+
+  // E10 (paso 6): las sesiones de investigación guardadas:
+  // la lista para la superficie (reanudar o borrar) y el
+  // borrado, que la superficie confirma con la misma puerta
+  // de doble toque del chat antes de llamar aquí.
+  handle("nido:research-sessions", async () => {
+    if (!session) return { ok: false, reason: "locked" };
+    const sessions = await listResearchSessions().catch(() => []);
+    return { ok: true, sessions };
+  });
+
+  handle("nido:research-session-delete", async (_event, args: { id: string }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    await deleteResearchSession(args.id).catch(() => undefined);
     return { ok: true };
   });
 
@@ -1704,7 +1879,7 @@ export async function installServices(): Promise<void> {
     }
   });
 
-  handle("nido:settings-set", async (_e, args: { personality?: string; memoryAutoSummarize?: boolean; memoryHistoryTurnThreshold?: number; memoryMaxSavedSessions?: number; memoryAutoGenerateTitles?: boolean; customSystemPrompt?: string; disabledTools?: unknown; noticesPermissionAsked?: boolean; noticesShowText?: boolean; noticesResident?: boolean; noticesAutostart?: boolean; voiceInputEnabled?: boolean; readAloudEnabled?: boolean; voiceSystemReserveEnabled?: boolean }) => {
+  handle("nido:settings-set", async (_e, args: { personality?: string; memoryAutoSummarize?: boolean; memoryHistoryTurnThreshold?: number; memoryMaxSavedSessions?: number; memoryAutoGenerateTitles?: boolean; customSystemPrompt?: string; disabledTools?: unknown; noticesPermissionAsked?: boolean; noticesShowText?: boolean; noticesResident?: boolean; noticesAutostart?: boolean; voiceInputEnabled?: boolean; readAloudEnabled?: boolean; voiceSystemReserveEnabled?: boolean; deepResearchMode?: boolean }) => {
     // A-3 y A-7: las escrituras selladas exigen la sesión viva
     // (una escritura desde una lectura degradada reescribiría el
     // fichero sellado desde defaults) y su resultado se cobra:
@@ -1782,6 +1957,13 @@ export async function installServices(): Promise<void> {
       }
       if (typeof args?.voiceSystemReserveEnabled === "boolean") {
         await setVoiceSystemReserveEnabled(args.voiceSystemReserveEnabled);
+      }
+      // E10 (paso 1): el chip de investigación profunda persiste
+      // su estado en el ajuste, por el canal que ya existe (sin
+      // canal nuevo): la superficie lo lee al arrancar y el
+      // turno lo honra en el mismo gesto, como en el móvil.
+      if (typeof args?.deepResearchMode === "boolean") {
+        await setDeepResearchMode(args.deepResearchMode);
       }
       if (Array.isArray(args?.disabledTools)) {
         // Los permisos del agente: el cuarto campo del canal que

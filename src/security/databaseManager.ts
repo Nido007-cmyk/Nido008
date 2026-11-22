@@ -276,6 +276,40 @@ CREATE TABLE IF NOT EXISTS learned_skills (
 -- conservan esas dos tablas vacías como huérfanas inocuas y las
 -- nuevas ya no las crean.
 
+-- E10 paso 5: los informes de investigación guardados. Aditiva,
+-- como las demás tablas de esta base: el documento de una
+-- corrida (su forma Completo con los dos recibos) vive en la
+-- memoria cifrada de la persona, y sale de ella solo por la
+-- exportación explícita de la superficie. La fila lleva la
+-- materia entera en JSON (pregunta, estilo, informe y recibos)
+-- para que el paso 6 comparta sede con las sesiones sin
+-- reabrir el esquema.
+CREATE TABLE IF NOT EXISTS research_reports (
+  id TEXT PRIMARY KEY,
+  query TEXT NOT NULL,
+  style TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  document TEXT NOT NULL
+);
+
+-- E10 paso 6: las sesiones de investigación, por etapas. La
+-- misma sentencia que la migración 1→2 de memoryMigrations
+-- aplica a las instalaciones v1; aquí nace con la base en las
+-- instalaciones nuevas (que se estampan en v2 sin correr la
+-- migración). La sesión guarda su foto al cerrar cada etapa;
+-- nunca a mitad de una.
+CREATE TABLE IF NOT EXISTS research_sessions (
+  id TEXT PRIMARY KEY,
+  query TEXT NOT NULL,
+  lang TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  style TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  snapshot TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 -- E7 paso 1: la agenda de la persona (AGENDA-PC §3.1 y §4.1;
 -- AVISOS-ETAPA §3.1). Aditiva, como las tablas de ritmo de arriba:
 -- nace con CREATE TABLE IF NOT EXISTS sobre la base personal, sin
