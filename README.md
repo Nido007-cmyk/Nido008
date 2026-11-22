@@ -1,8 +1,18 @@
 > **Language:** English · [Español](README.es.md)
 
-# NIDO PC
+<p align="center">
+  <img src="app/public/mascot-nido.png" alt="NIDO mascot" width="120">
+</p>
 
-**Your agent, your world, on your computer.**
+<h1 align="center">NIDO PC</h1>
+
+<p align="center"><b>Your agent, your world, on your computer.</b><br>
+A private AI assistant for desktop that runs 100% offline on your own machine.</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green"></a>
+  <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-3A563F">
+</p>
 
 NIDO PC is a private personal assistant for desktop that runs large
 language models on your own machine, 100% offline after the initial
@@ -150,6 +160,13 @@ contributing are in [CONTRIBUTING.md](CONTRIBUTING.md).
   ships with.
 - `docs/`: the project's constitution and principles, and the
   architecture overview.
+
+## Contributing
+
+Bug reports and feedback from testers are the most useful contribution right
+now. Please use the issue templates: the app's own "Report a problem" opens
+the same door. For code, read [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[code of conduct](CODE_OF_CONDUCT.md) first.
 
 ## Credits and license
 
