@@ -24,6 +24,8 @@ database that only your password opens. It shares the soul of the
 a computer unlocks: larger models by default, long contexts, and the
 full tool catalog always present.
 
+**The model is for conversation. The help is not.**
+
 > **In development.** NIDO PC is not finished and there is no public
 > release yet. This repository is its public home: the source code is
 > published as it is built, as a snapshot of the current development

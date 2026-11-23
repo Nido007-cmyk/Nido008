@@ -25,6 +25,8 @@ NIDO](https://github.com/Nido007-cmyk/Nido) y suma lo que una
 computadora desbloquea: modelos más grandes por defecto, contextos
 largos y el catálogo completo de herramientas siempre presente.
 
+**El modelo es para conversar. La ayuda no.**
+
 > **En desarrollo.** NIDO PC no está terminado y todavía no hay
 > ninguna versión pública. Este repositorio es su casa pública: el
 > código se publica conforme se construye, como una foto del estado
