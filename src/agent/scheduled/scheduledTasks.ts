@@ -143,7 +143,6 @@ export const UNATTENDED_FORBIDDEN_TOOLS: readonly string[] = [
   "nido_pair",
   "nido_approve_task",
   "nido_reject_task",
-  "open_app",
   "read_picked_file",
   "create_calendar_event",
   "send_email",

@@ -106,9 +106,11 @@ import {
 import { classifyIntent } from "../agent/loop/intent.js";
 import { isGenericMemoryQuestionShape, memoryGateHit, type MemoryQueryData } from "../agent/loop/memoryQuery.js";
 import { extractRememberFact } from "../agent/loop/rememberRouter.js";
+import { choiceTurnKind, type ChoiceStore } from "../agent/loop/toolRouter.js";
 import { describePolicyConfirmation } from "../agent/policy/confirmText.js";
 import type { PolicyDecision } from "../agent/policy/policyEngine.js";
 import type { ToolHandler } from "../agent/tools/dispatcher.js";
+import i18n from "../i18n/index.js";
 import { productionAgentEngine } from "../inference/agentEngine.js";
 import { llamaEngine, llamaModelsDir } from "../inference/LlamaEngine.js";
 import { MODEL_CATALOG } from "../models/manifest.js";
@@ -250,6 +252,31 @@ export interface TurnDeps {
    * modelo (el defecto R-4/R-5.3 que VERIFICACION-E7 cobró).
    */
   contactSearch?: AgentLoopOptions["contactSearch"];
+  /**
+   * Las dependencias de memoria del bucle (notas, recordatorios,
+   * recuerdos y la elección pendiente): el móvil las pasa todas
+   * en su pantalla de chat; aquí las traen los deps de
+   * producción, construidas sobre el almacén. Sin ellas, las
+   * rutas deterministas de «lee la nota X», «busca en mis
+   * notas», «qué recordatorios tengo», «olvida…» y la respuesta
+   * a «¿cuál?» quedan muertas en el chat: el enrutador las lee
+   * de las opciones del bucle sin respaldo y responde «no
+   * encontré» habiendo (el hueco que la sonda de CONF-1 cobró
+   * en vivo y esta tanda cablea).
+   */
+  listNoteTitles?: AgentLoopOptions["listNoteTitles"];
+  /** Las notas con cuerpo, para buscar dentro de ellas. */
+  listNotesFull?: AgentLoopOptions["listNotesFull"];
+  /** Los recordatorios pendientes, para listarlos y borrarlos por esta vía. */
+  listReminders?: AgentLoopOptions["listReminders"];
+  /** Los recuerdos (hechos del dueño y personas) para el flujo de olvido. */
+  listMemories?: AgentLoopOptions["listMemories"];
+  /**
+   * El almacén de la elección pendiente entre turnos («¿cuál
+   * nota?»): un solo objeto por proceso, creado una vez y
+   * pasado en cada turno, como el ref de la pantalla del móvil.
+   */
+  choiceStore?: AgentLoopOptions["choiceStore"];
   /** La sonda de memoria de la bifurcación (hechos y personas). */
   loadMemoryQueryData?: () => Promise<MemoryQueryData | null>;
   /** Resuelve el modelo del catálogo para el ejecutor. */
@@ -366,6 +393,16 @@ function modelOnDisk(modelId: string): boolean {
   }
 }
 
+/**
+ * La elección pendiente del chat («¿cuál nota?»), una por
+ * proceso: los deps se reconstruyen en cada turno y la
+ * pregunta tiene que sobrevivir entre envíos, así que el
+ * almacén vive en el módulo y `productionTurnDeps` lo pasa
+ * siempre. Es la forma del ref que la pantalla del móvil
+ * crea una vez y pasa en cada envío.
+ */
+const chatChoiceStore: ChoiceStore = { current: null };
+
 /** Las dependencias de producción, sobre las piezas reales del árbol. */
 export async function productionTurnDeps(
   partial: Pick<TurnDeps, "handlers" | "packFacts"> &
@@ -386,8 +423,20 @@ export async function productionTurnDeps(
   return {
     engine: productionAgentEngine,
     onConfirmTool: undefined,
-    loadMemory: undefined,
-    loadMemoryQueryData: undefined,
+    // La memoria guardada, leída fresca en cada turno desde el
+    // almacén persistente (H-01): el snapshot entero para el
+    // bucle y su corte de hechos y personas para la bifurcación
+    // de consultas. Hasta la cura de H-01 los dos iban sin coser
+    // y el turno corría sin memoria.
+    loadMemory: async () => {
+      const { snapshot } = await import("../agent/memory/memoryStore.js");
+      return snapshot();
+    },
+    loadMemoryQueryData: async () => {
+      const { snapshot } = await import("../agent/memory/memoryStore.js");
+      const snap = await snapshot();
+      return { facts: snap.facts, people: snap.people };
+    },
     // El adaptador de contactos, en la forma del móvil: la
     // búsqueda estructurada sobre la agenda de NIDO que el
     // almacén de contactos ya trae (E7), envuelta en el
@@ -399,6 +448,41 @@ export async function productionTurnDeps(
       const { searchContacts } = await import("../agent/memory/contactStore.js");
       return { ok: true, matches: await searchContacts(query) };
     },
+    // Las dependencias de memoria del bucle, en la forma del
+    // móvil (su pantalla de chat) y de las tareas programadas
+    // de este árbol (runScheduled): los listadores leen el
+    // almacén fresco en cada llamada. listMemories trae SOLO
+    // hechos del dueño (getOwnerFacts, como el móvil desde
+    // T-11): la lista alimenta la selección de borrado del
+    // flujo de olvido, y un hecho escrito por un par no puede
+    // ser elegido desde una frase del dueño.
+    listNoteTitles: async () => {
+      const { listNotes } = await import("../agent/memory/memoryStore.js");
+      return (await listNotes(50)).map((n) => ({ id: n.id, title: n.title }));
+    },
+    listNotesFull: async () => {
+      const { listNotes } = await import("../agent/memory/memoryStore.js");
+      return (await listNotes(50)).map((n) => ({ id: n.id, title: n.title, body: n.body }));
+    },
+    listReminders: async () => {
+      const { listReminders } = await import("../agent/memory/memoryStore.js");
+      return (await listReminders(50)).map((r) => ({ id: r.id, text: r.text, dueAt: r.due_at, repeat: r.repeat ?? null }));
+    },
+    listMemories: async () => {
+      const { getOwnerFacts, getPeople } = await import("../agent/memory/memoryStore.js");
+      const [facts, people] = await Promise.all([getOwnerFacts(500), getPeople()]);
+      return [
+        ...facts.map((f) => ({ id: f.id, kind: "fact" as const, label: f.content })),
+        ...people.map((p) => ({
+          id: p.id,
+          kind: "person" as const,
+          label: p.relationship ? `${p.name} (${p.relationship})` : p.name,
+        })),
+      ];
+    },
+    // La elección pendiente es la del módulo: la misma en
+    // cada turno del proceso (ver chatChoiceStore arriba).
+    choiceStore: chatChoiceStore,
     resolveModel: (modelId) => {
       const entry = MODEL_CATALOG.find((m) => m.id === modelId);
       if (!entry) return undefined;
@@ -494,6 +578,13 @@ function toGroundingChunks(chunks: readonly RetrievedChunk[]): GroundingChunk[] 
 
 export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnResult> {
   const { query, lang } = input;
+  // I18N-2: el idioma del turno (el prefs.lang que la carcasa pasa
+  // en cada envío) fija el módulo i18n del núcleo a la entrada:
+  // las tarjetas del handler, los mensajes de confirmación y las
+  // respuestas enlatadas de este turno se sirven en el idioma de
+  // la persona, como la carcasa del móvil lo fija desde su
+  // LanguageContext.
+  i18n.changeLanguage(lang);
   const residentAtOpen = deps.modelResident();
   // H-2 de la caza de errores de la tanda 14: el prompt del turno es
   // el que ESTE turno envió. La fachada guarda el de la última
@@ -591,7 +682,25 @@ export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnRes
   }
 
   // 4. La bifurcación del agente (clasificación + sonda de memoria).
-  const intent = classifyIntent(query);
+  let intent = classifyIntent(query);
+  // 0.1.25 (la puerta de la elección, en la forma del móvil en
+  // su pantalla): si hay una elección pendiente («¿cuál
+  // nota?»), la respuesta de la persona clasifica como
+  // conversar y nunca entraría al bucle: si la resuelve o es
+  // corta, el turno entra para consumirla o repetir la
+  // pregunta; si es un mensaje nuevo y largo, la elección
+  // caduca en silencio y el turno sigue su curso normal
+  // (choiceTurnKind ya cobra la caducidad de 3 minutos). Sin
+  // esta pierna, el almacén de la elección cableado en los
+  // deps no se consumiría jamás en el chat de PC.
+  const pendingChoice = deps.choiceStore?.current ?? null;
+  if (pendingChoice && deps.choiceStore && intent === "conversar") {
+    if (choiceTurnKind(query, pendingChoice) !== "none") {
+      intent = "actuar";
+    } else {
+      deps.choiceStore.current = null;
+    }
+  }
   if (intent === "actuar" || intent === "recordar") {
     let gateOpen = intent === "actuar";
     if (!gateOpen) {
@@ -618,6 +727,11 @@ export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnRes
         lang,
         loadMemory: deps.loadMemory,
         contactSearch: deps.contactSearch,
+        listNoteTitles: deps.listNoteTitles,
+        listNotesFull: deps.listNotesFull,
+        listReminders: deps.listReminders,
+        listMemories: deps.listMemories,
+        choiceStore: deps.choiceStore,
         onConfirmTool: deps.onConfirmTool,
         signal: input.signal,
         onToken: input.onToken,

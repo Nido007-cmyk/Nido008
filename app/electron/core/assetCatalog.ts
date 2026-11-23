@@ -23,10 +23,8 @@
  * vive en su manifiesto: es la cifra medida del archivo del
  * publicador.
  *
- * En esta etapa los activos se censan, no se instalan: la
- * descarga y la extracción verificada (downloadAsset,
- * verifiedAssetDir) llegan en el paso 0 de E9, tras su
- * dirimen V-12.
+ * La descarga y la extracción verificada de estos activos
+ * viven en downloadAsset y verifiedAssetDir.
  */
 
 export interface AssetFile {

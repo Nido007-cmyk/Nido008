@@ -84,7 +84,7 @@ import {
 import {DESKTOP_CATALOG} from "./core/catalog.ts";
 import {LocalEngine} from "./core/engine.ts";
 import {LoadRefusal} from "./core/loadPath.ts";
-import {installServices} from "./services.ts";
+import {installServices, noteExternalLink, noteLinkFromArgv} from "./services.ts";
 import {VoiceProcessManager, voiceHostFactory} from "./voiceProcess.ts";
 import {splitSentences} from "../../src/voice/tts.js";
 import {fileURLToPath} from "node:url";
@@ -1434,7 +1434,7 @@ async function runCapture(window: BrowserWindow) {
         })()`);
     };
     const turnSettled = `(() => {
-        if (document.querySelector(".send-box.stop")) return false;
+        if (document.querySelector(".composer .send-box.stop")) return false;
         const bubbles = document.querySelectorAll(".turn-assistant");
         if (!bubbles.length) return false;
         const last = bubbles[bubbles.length - 1];
@@ -1442,7 +1442,7 @@ async function runCapture(window: BrowserWindow) {
     })()`;
     const sendTurn = async (text: string, timeoutMs: number): Promise<boolean> => {
         await typeDraft(text);
-        await exec(`document.querySelector(".send-box")?.click()`);
+        await exec(`document.querySelector(".composer .send-box:not(.voice):not(.stop)")?.click()`);
         return waitFor(turnSettled, timeoutMs);
     };
     // El re-cobro base del principal: la conversación abierta con
@@ -1469,9 +1469,9 @@ async function runCapture(window: BrowserWindow) {
             await exec(`document.querySelector(".welcome-hero .btn.primary")?.click()`);
             await waitFor(`document.querySelector(".composer textarea")`, 20000);
             await typeDraft("¿Cuál es la capital de Islandia?");
-            await exec(`document.querySelector(".send-box")?.click()`);
+            await exec(`document.querySelector(".composer .send-box:not(.voice):not(.stop)")?.click()`);
             const card = `(() => {
-                if (document.querySelector(".send-box.stop")) return false;
+                if (document.querySelector(".composer .send-box.stop")) return false;
                 return [...document.querySelectorAll(".chat-column .card")].length > 0;
             })()`;
             out.errorCardShown = await waitFor(card, 120000);
@@ -1560,9 +1560,9 @@ async function runCapture(window: BrowserWindow) {
             const sendCanonical = async (): Promise<boolean> => {
                 const before = (await exec(`document.querySelectorAll(".turn-assistant").length`)) as number;
                 await typeDraft(QUESTION);
-                await exec(`document.querySelector(".send-box")?.click()`);
+                await exec(`document.querySelector(".composer .send-box:not(.voice):not(.stop)")?.click()`);
                 return waitFor(`(() => {
-                    if (document.querySelector(".send-box.stop")) return false;
+                    if (document.querySelector(".composer .send-box.stop")) return false;
                     const b = document.querySelectorAll(".turn-assistant");
                     if (b.length <= ${before}) return false;
                     return (b[b.length - 1].textContent ?? "").trim().length > 0;
@@ -1639,6 +1639,668 @@ async function runCapture(window: BrowserWindow) {
                 (out.activations as unknown[]).push(rec);
             }
             recheck = async () => true;
+        } else if (
+            CAPTURE_PHASE === "e11" ||
+            CAPTURE_PHASE === "e11b" ||
+            CAPTURE_PHASE === "e11link" ||
+            CAPTURE_PHASE === "e11s" ||
+            CAPTURE_PHASE === "e11t" ||
+            CAPTURE_PHASE === "e11u" ||
+            CAPTURE_PHASE === "e11v" ||
+            CAPTURE_PHASE === "e11w" ||
+            CAPTURE_PHASE === "e11x"
+        ) {
+            // E11 (paso 10): la pasada de cierre de la etapa
+            // sobre el paquete servido. Tres fases con su
+            // registro en pasos (e11-steps-<fase>.jsonl):
+            // e11link siembra la conversación diana y cobra
+            // las llegadas de enlaces desde fuera (la de la
+            // bóveda cerrada con su espera de la señal del
+            // orquestador, y las de chat y emergencia con la
+            // sesión abierta); e11 recorre las superficies
+            // nuevas de la etapa (panel, dividida, hoja,
+            // paleta, apariencia y zoom, la caminata de M-5)
+            // y ejerce el loop de O-1 por su llamante real,
+            // acabando en la petición de rotación que apaga
+            // la app; e11b entra tras el relanzamiento y
+            // cobra el resultado de la rotación y la bóveda
+            // íntegra. H-12 se cobra tras cada turno como el
+            // coste entero del bootstrap, sin paginación.
+            // El gemelo que la rotación relanza hereda la
+            // fase e11: la marca que la primera corrida
+            // escribe antes de pedirla lo convierte en la
+            // verificación tras rotar (e11b), para que la
+            // pasada no se repita en bucle.
+            const e11Phase =
+                CAPTURE_PHASE === "e11" &&
+                fs.existsSync(path.join(CAPTURE_DIR, "e11-rotacion-en-curso.txt"))
+                    ? "e11b"
+                    : CAPTURE_PHASE;
+            const stepsPath = path.join(CAPTURE_DIR, `e11-steps-${e11Phase}.jsonl`);
+            const step = (rec: Record<string, unknown>) => {
+                fs.appendFileSync(stepsPath, JSON.stringify({at: new Date().toISOString(), ...rec}) + "\n");
+            };
+            const key = async (init: Record<string, unknown>) => {
+                await exec(`window.dispatchEvent(new KeyboardEvent("keydown", ${JSON.stringify(init)}))`);
+                await sleep(350);
+            };
+            const clickNav = async (index: number): Promise<boolean> => {
+                const ok = (await exec(`(() => {
+                    const el = document.querySelectorAll(".sidebar .nav-item")[${index}];
+                    if (!el) return false;
+                    el.click();
+                    return true;
+                })()`)) as boolean;
+                await sleep(500);
+                return ok;
+            };
+            const activeNav = async (): Promise<number> => {
+                return (await exec(`(() => {
+                    const items = [...document.querySelectorAll(".sidebar .nav-item")];
+                    return items.findIndex((el) => el.classList.contains("active"));
+                })()`)) as number;
+            };
+            const enterChatE11 = async (): Promise<boolean> => {
+                // La entrada al chat va por la barra (la
+                // sección Chat), no por el botón de la
+                // bienvenida: en una bóveda fresca la app
+                // aterriza en su guía de primera vez (Ajustes)
+                // y aquel botón no existe allí; la primera
+                // corrida de la pasada lo cobró (el turno se
+                // escribía en el vacío). Con la sección abierta
+                // se pulsa el comienzo de la bienvenida si
+                // está, y el compositor manda.
+                if ((await exec(`!!document.querySelector(".composer textarea")`)) === true) return true;
+                await clickNav(0);
+                if ((await exec(`!!document.querySelector(".composer textarea")`)) === true) return true;
+                await exec(`document.querySelector(".welcome-hero .btn.primary")?.click()`);
+                return waitFor(`document.querySelector(".composer textarea")`, 30000);
+            };
+            const loadSmall = async (): Promise<Record<string, unknown>> => {
+                const listed = (await exec(`window.nido.modelsList()`)) as any;
+                const small = (listed?.models ?? []).find((m: any) => m.id === "qwen3-0.6b-q4km");
+                if (!small) return {seen: false};
+                const r = (await exec(`window.nido.modelLoad("qwen3-0.6b-q4km")`)) as any;
+                return {seen: true, loadOk: r?.ok === true, reason: r?.reason ?? null, error: r?.error ?? null};
+            };
+            const bootstrapCost = async (): Promise<number[]> => {
+                return (await exec(`(async () => {
+                    const costs = [];
+                    for (let i = 0; i < 3; i++) {
+                        const t0 = performance.now();
+                        await window.nido.bootstrap();
+                        costs.push(Math.round(performance.now() - t0));
+                    }
+                    return costs;
+                })()`)) as number[];
+            };
+            const waitFile = async (name: string, timeoutMs: number): Promise<boolean> => {
+                const target = path.join(CAPTURE_DIR, name);
+                const deadline = Date.now() + timeoutMs;
+                while (!fs.existsSync(target) && Date.now() < deadline) await sleep(1000);
+                return fs.existsSync(target);
+            };
+            recheck = async () => true;
+
+            if (CAPTURE_PHASE === "e11x") {
+                // E11 (paso 10, micro-sonda): el buscador
+                // global sobre el paquete: abrir con su atajo,
+                // buscar el turno de RCP, fotografiar los
+                // resultados y saltar al mensaje exacto.
+                out.model = await loadSmall();
+                await enterChatE11();
+                out.turn1 = await sendTurn("How do I do CPR?", 120000);
+                await exec(`document.querySelector(".sidebar .btn.primary")?.click()`);
+                await waitFor(`document.querySelector(".composer textarea")`, 20000);
+                out.turnB = await sendTurn("How do I stop a nosebleed?", 120000);
+                step({step: "sesion", turn1: out.turn1, turnB: out.turnB});
+                await key({key: "F", ctrlKey: true, shiftKey: true});
+                out.searchOpen = await waitFor(`!!document.querySelector(".palette-veil .palette input")`, 15000);
+                await exec(`(() => {
+                    const input = document.querySelector(".palette-veil .palette input");
+                    if (!input) return false;
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                    setter.call(input, "CPR");
+                    input.dispatchEvent(new Event("input", {bubbles: true}));
+                    return true;
+                })()`);
+                out.hits = await waitFor(`document.querySelectorAll(".palette-veil .palette-item").length > 0`, 20000);
+                out.hitTexts = await exec(`[...document.querySelectorAll(".palette-veil .palette-item")].map((el) => (el.textContent ?? "").trim().slice(0, 110))`);
+                step({step: "buscador", open: out.searchOpen, hits: out.hits, texts: out.hitTexts});
+                if (out.hits) await snap("e11-buscador.png");
+                await exec(`document.querySelector(".palette-veil .palette-item")?.click()`);
+                await sleep(1200);
+                out.afterJump = await exec(`(() => ({
+                    sheetGone: !document.querySelector(".palette-veil"),
+                    nav: [...document.querySelectorAll(".sidebar .nav-item")].findIndex((el) => el.classList.contains("active")),
+                    hitMark: !!document.querySelector(".find-hit"),
+                    turns: document.querySelectorAll(".turn-assistant").length,
+                }))()`);
+                step({step: "salto", ...(out.afterJump as Record<string, unknown>)});
+            } else if (CAPTURE_PHASE === "e11w") {
+                // E11 (paso 10, micro-sonda 3): el pulso a la
+                // primera lección con el buscador por el título
+                // exacto de la guía leído del propio bootstrap
+                // servido, y el HTML de la tarjeta tras el pulso.
+                out.model = await loadSmall();
+                await enterChatE11();
+                out.turn1 = await sendTurn("How do I do CPR?", 120000);
+                await clickNav(8);
+                const finder = `(() => {
+                    const cards = [...document.querySelectorAll(".card")];
+                    return cards.find((c) => (c.textContent ?? "").includes("Aprende a usar NIDO") || (c.textContent ?? "").includes("Learn to use NIDO") || (c.textContent ?? "").includes("Aprenda a usar o NIDO"));
+                })()`;
+                out.indexReady = await waitFor(`(() => {
+                    const learn = ${finder};
+                    return !!learn && learn.querySelectorAll("button.row-line").length > 0;
+                })()`, 60000);
+                out.firstRow = await exec(`(() => {
+                    const learn = ${finder};
+                    const row = learn?.querySelector("button.row-line");
+                    return row ? (row.textContent ?? "").trim() : null;
+                })()`);
+                step({step: "indice", ready: out.indexReady, firstRow: out.firstRow});
+                await exec(`(() => {
+                    const learn = ${finder};
+                    learn?.querySelector("button.row-line")?.click();
+                })()`);
+                await sleep(3000);
+                out.after = await exec(`(() => {
+                    const main = document.querySelector(".view-scroll, .main-column");
+                    return {
+                        ol: document.querySelectorAll("ol").length,
+                        ul: document.querySelectorAll("ul").length,
+                        li: document.querySelectorAll("li").length,
+                        html: main ? (main.innerHTML ?? "").slice(0, 1500) : null,
+                    };
+                })()`);
+                step({step: "tras-pulso", after: out.after});
+            } else if (CAPTURE_PHASE === "e11v") {
+                // E11 (paso 10, micro-sonda 2): la serie
+                // temporal del aterrizaje de M-5 en una sesión
+                // asentada: sección activa, tarjeta y filas
+                // cada dos segundos, y el HTML tras el pulso.
+                out.model = await loadSmall();
+                await enterChatE11();
+                out.turn1 = await sendTurn("How do I do CPR?", 120000);
+                step({step: "asentada", turn: out.turn1});
+                await clickNav(8);
+                for (let i = 0; i < 15; i++) {
+                    const probe = (await exec(`(() => {
+                        const items = [...document.querySelectorAll(".sidebar .nav-item")];
+                        const cards = [...document.querySelectorAll(".card")];
+                        const learn = cards.find((c) => (c.textContent ?? "").includes("APRENDER") || (c.textContent ?? "").includes("LEARN"));
+                        return {
+                            active: items.findIndex((el) => el.classList.contains("active")),
+                            learn: !!learn,
+                            rows: learn ? learn.querySelectorAll("button.row-line").length : 0,
+                        };
+                    })()`)) as Record<string, unknown>;
+                    step({step: "serie", t: i * 2, ...probe});
+                    if (probe.learn && (probe.rows as number) > 0) break;
+                    await sleep(2000);
+                }
+                await exec(`(() => {
+                    const cards = [...document.querySelectorAll(".card")];
+                    const learn = cards.find((c) => (c.textContent ?? "").includes("APRENDER") || (c.textContent ?? "").includes("LEARN"));
+                    learn?.querySelector("button.row-line")?.click();
+                })()`);
+                await sleep(3000);
+                out.after = await exec(`(() => {
+                    const cards = [...document.querySelectorAll(".card")];
+                    const learn = cards.find((c) => c.querySelector("ol") || (c.textContent ?? "").includes("APRENDER") || (c.textContent ?? "").includes("LEARN"));
+                    return {
+                        ol: document.querySelectorAll(".card ol").length,
+                        html: learn ? (learn.innerHTML ?? "").slice(0, 500) : null,
+                    };
+                })()`);
+                step({step: "tras-pulso", after: out.after});
+            } else if (CAPTURE_PHASE === "e11u") {
+                // E11 (paso 10, micro-sonda): la dividida con
+                // documento: el turno de RCP sale fundamentado
+                // del paquete sembrado y su primer chip abre
+                // el documento al lado.
+                out.model = await loadSmall();
+                step({step: "modelo", ...(out.model as Record<string, unknown>)});
+                await enterChatE11();
+                out.turn1 = await sendTurn("How do I do CPR?", 120000);
+                out.chips = await exec(`document.querySelectorAll("button.source-chip").length`);
+                step({step: "turno-1", ok: out.turn1, chips: out.chips});
+                await exec(`document.querySelector("button.source-chip")?.click()`);
+                out.splitDoc = await waitFor(`!!document.querySelector(".sources-panel .passage")`, 30000);
+                step({step: "dividida-documento", open: out.splitDoc});
+                if (out.splitDoc) await snap("e11-dividida-documento.png");
+            } else if (CAPTURE_PHASE === "e11t") {
+                // E11 (paso 10, micro-sonda): la apertura de
+                // una lección por pulso, con el HTML de la
+                // tarjeta antes y después, para cerrar el
+                // predicado que la pasada no cazó. La barra se
+                // espera asentada (nueve entradas) antes de
+                // pulsar: en la bóveda fresca la primera
+                // corrida pulsó sobre una barra aún sin
+                // montar y el pulso se perdió.
+                out.shellReady = await waitFor(`document.querySelectorAll(".sidebar .nav-item").length >= 9`, 60000);
+                await clickNav(8);
+                out.indexReady = await waitFor(`(() => {
+                    const cards = [...document.querySelectorAll(".card")];
+                    const learn = cards.find((c) => (c.textContent ?? "").includes("APRENDER") || (c.textContent ?? "").includes("LEARN"));
+                    return !!learn && learn.querySelectorAll("button.row-line").length > 0;
+                })()`, 60000);
+                out.before = await exec(`(() => {
+                    const cards = [...document.querySelectorAll(".card")];
+                    const learn = cards.find((c) => (c.textContent ?? "").includes("APRENDER") || (c.textContent ?? "").includes("LEARN"));
+                    return learn ? (learn.innerHTML ?? "").slice(0, 400) : null;
+                })()`);
+                await exec(`(() => {
+                    const cards = [...document.querySelectorAll(".card")];
+                    const learn = cards.find((c) => (c.textContent ?? "").includes("APRENDER") || (c.textContent ?? "").includes("LEARN"));
+                    learn?.querySelector("button.row-line")?.click();
+                })()`);
+                await sleep(3000);
+                out.after = await exec(`(() => {
+                    const cards = [...document.querySelectorAll(".card")];
+                    const learn = cards.find((c) => (c.textContent ?? "").includes("APRENDER") || (c.textContent ?? "").includes("LEARN") || (c.textContent ?? "").includes("Volver") || (c.textContent ?? "").includes("Back"));
+                    return {
+                        ol: document.querySelectorAll(".card ol").length,
+                        html: learn ? (learn.innerHTML ?? "").slice(0, 400) : null,
+                    };
+                })()`);
+                step({step: "micro", indexReady: out.indexReady, after: out.after});
+            } else if (CAPTURE_PHASE === "e11s") {
+                // E11 (paso 10, sonda de cierre): los cuatro
+                // puntos que la pasada principal dejó abiertos
+                // por selectores del instrumento, re-cobrados
+                // con volcados del DOM servido: la dividida por
+                // su botón nombrado, las filas reales de la
+                // hoja, la paleta con su consulta en el idioma
+                // servido y su Intro despachado en el campo, y
+                // la apertura de una lección con su HTML.
+                out.model = await loadSmall();
+                step({step: "modelo", ...(out.model as Record<string, unknown>)});
+                await enterChatE11();
+                out.turn1 = await sendTurn("How do I do CPR?", 120000);
+                step({step: "turno-1", ok: out.turn1});
+                await exec(`document.querySelector(".sidebar .btn.primary")?.click()`);
+                await waitFor(`document.querySelector(".composer textarea")`, 20000);
+                out.turnB = await sendTurn("How do I stop a nosebleed?", 120000);
+                step({step: "turno-b", ok: out.turnB});
+                out.headerButtons = await exec(`[...document.querySelectorAll(".export-button")].map((b) => ({
+                    title: b.getAttribute("title"),
+                    text: (b.textContent ?? "").trim(),
+                }))`);
+                step({step: "cabecera", buttons: out.headerButtons});
+                await exec(`(() => {
+                    const buttons = [...document.querySelectorAll(".export-button")];
+                    const target = buttons[buttons.length - 1];
+                    target?.click();
+                })()`);
+                out.splitMenu = await waitFor(`!!document.querySelector(".export-menu")`, 10000);
+                await exec(`document.querySelector(".export-menu button")?.click()`);
+                out.splitOpen = await waitFor(`!!document.querySelector(".split-turns")`, 20000);
+                step({step: "dividida", menu: out.splitMenu, open: out.splitOpen});
+                if (out.splitOpen) await snap("e11-dividida.png");
+                await key({key: "/", ctrlKey: true});
+                out.sheetOpen = await waitFor(`!!document.querySelector(".shortcut-sheet")`, 10000);
+                out.sheetDump = await exec(`(() => {
+                    const sheet = document.querySelector(".shortcut-sheet");
+                    if (!sheet) return null;
+                    return {
+                        html: (sheet.innerHTML ?? "").slice(0, 1200),
+                        rows: [...sheet.querySelectorAll("*")].filter((el) => el.children.length === 0 && (el.textContent ?? "").trim().length > 0).length,
+                        texts: [...sheet.querySelectorAll("li, .row-line, tr")].map((r) => (r.textContent ?? "").trim()),
+                    };
+                })()`);
+                step({step: "hoja", open: out.sheetOpen, dump: out.sheetDump});
+                await key({key: "Escape"});
+                await key({key: "k", ctrlKey: true});
+                out.paletteOpen = await waitFor(`!!document.querySelector(".palette")`, 10000);
+                await exec(`(() => {
+                    const input = document.querySelector(".palette input");
+                    if (!input) return false;
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                    setter.call(input, "texto");
+                    input.dispatchEvent(new Event("input", {bubbles: true}));
+                    return true;
+                })()`);
+                await sleep(700);
+                out.paletteTexto = await exec(`[...document.querySelectorAll(".palette-item")].map((el) => ({
+                    label: (el.textContent ?? "").trim(),
+                    hint: (el.querySelector(".palette-hint")?.textContent ?? "").trim(),
+                }))`);
+                step({step: "paleta-texto", results: out.paletteTexto});
+                await exec(`(() => {
+                    const input = document.querySelector(".palette input");
+                    if (!input) return false;
+                    input.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true, cancelable: true}));
+                    return true;
+                })()`);
+                await sleep(900);
+                out.paletteAfterEnter = await exec(`(() => ({
+                    paletteGone: !document.querySelector(".palette"),
+                    fontScale: getComputedStyle(document.documentElement).getPropertyValue("--font-scale").trim(),
+                }))()`);
+                step({step: "paleta-entrar", ...(out.paletteAfterEnter as Record<string, unknown>)});
+                await key({key: "Escape"});
+                await clickNav(8);
+                await sleep(600);
+                await exec(`(() => {
+                    const cards = [...document.querySelectorAll(".card")];
+                    const learn = cards.find((c) => (c.textContent ?? "").includes("APRENDER") || (c.textContent ?? "").includes("LEARN") || (c.textContent ?? "").includes("APRENDA"));
+                    learn?.querySelector("button.row-line")?.click();
+                })()`);
+                await sleep(1500);
+                out.lessonDump = await exec(`(() => {
+                    const cards = [...document.querySelectorAll(".card")];
+                    const withOl = cards.filter((c) => c.querySelector("ol"));
+                    return {
+                        cardsWithOl: withOl.length,
+                        totalOl: document.querySelectorAll(".card ol").length,
+                        anyOl: document.querySelectorAll("ol").length,
+                    };
+                })()`);
+                step({step: "leccion", dump: out.lessonDump});
+                step({step: "cruces-listo"});
+                await waitFile("cruces-go.txt", 180000);
+                await sleep(8000);
+                step({step: "cruces-fin"});
+            } else if (e11Phase === "e11link") {
+                out.hrefAtBoot = await exec(`location.href`);
+                out.bridgePresent = await exec(`typeof window.nido === "object" && !!window.nido`);
+                out.domMounted = await exec(`!!document.querySelector(".sidebar, .welcome-hero, .view-scroll, .vault-gate")`);
+                step({step: "arranque", href: out.hrefAtBoot, bridge: out.bridgePresent, dom: out.domMounted});
+                // La diana nace de un turno de la capa
+                // determinista (asienta en segundos y guarda
+                // la conversación), con el modelo residente
+                // primero: sin residente el compositor no
+                // envía, como la pasada cobró dos veces.
+                out.model = await loadSmall();
+                step({step: "modelo", ...(out.model as Record<string, unknown>)});
+                await enterChatE11();
+                out.turnOk = await sendTurn("How do I do CPR?", 120000);
+                const b = (await exec(`window.nido.bootstrap()`)) as any;
+                out.conversationId = (b?.conversations ?? [])[0]?.id ?? null;
+                step({step: "diana-lista", conversationId: out.conversationId, turnOk: out.turnOk});
+                // La llegada con la bóveda cerrada: el enlace
+                // queda en espera (hold) y cae en su destino
+                // al desbloquear, sin distinguir ids.
+                await exec(`window.nido.vaultLock()`);
+                out.lockedGate = await waitFor(`!!document.querySelector(".vault-gate")`, 20000);
+                step({step: "bloqueada-lista", gate: out.lockedGate});
+                out.goSeen = await waitFile("link-go.txt", 300000);
+                await openVault();
+                out.guiaLanding = await waitFor(`document.querySelectorAll(".card ol").length > 0`, 90000);
+                out.guiaNav = await activeNav();
+                step({step: "llegada-guia", goSeen: out.goSeen, landing: out.guiaLanding, nav: out.guiaNav});
+                await snap("e11-enlace-guia.png");
+                // Las llegadas con la sesión abierta las
+                // envía el orquestador tras cada señal.
+                step({step: "lista-chat"});
+                out.goChat = await waitFile("link-chat-go.txt", 300000);
+                out.chatLanding = await waitFor(`!!document.querySelector(".turn-assistant")`, 90000);
+                out.chatNav = await activeNav();
+                step({step: "llegada-chat", goSeen: out.goChat, landing: out.chatLanding, nav: out.chatNav});
+                step({step: "lista-emergencia"});
+                out.goEmergency = await waitFile("link-emergencia-go.txt", 300000);
+                await sleep(1500);
+                out.emergencyNav = await activeNav();
+                step({step: "llegada-emergencia", goSeen: out.goEmergency, nav: out.emergencyNav});
+                await snap("e11-enlace-emergencia.png");
+            } else if (e11Phase === "e11b") {
+                const b = (await exec(`window.nido.bootstrap()`)) as any;
+                out.rotationOutcome = b?.rotationOutcome ?? null;
+                out.conversationsAfter = (b?.conversations ?? []).length;
+                step({step: "tras-rotacion", outcome: out.rotationOutcome, conversations: out.conversationsAfter});
+                await clickNav(0);
+                out.turnsIntact = await waitFor(`document.querySelectorAll(".turn-assistant").length > 0`, 20000);
+                step({step: "integridad", turnsIntact: out.turnsIntact});
+                await clickNav(7);
+                await exec(`document.querySelectorAll(".settings-nav button")[0]?.click()`);
+                out.cardVisible = await waitFor(`!!document.querySelector(".vault-backup-card")`, 20000);
+                await snap("e11-o1-rotacion.png");
+                step({step: "tarjeta", visible: out.cardVisible});
+            } else {
+                // e11: la pasada principal. Los dos primeros
+                // turnos van por la capa determinista (asientan
+                // en segundos y dejan conversaciones reales
+                // guardadas); el turno del modelo se intenta
+                // después con su presupuesto largo y su
+                // progreso asentado, y la pasada sigue con lo
+                // que haya, porque en esta máquina compartida
+                // la generación es el recurso contendido y su
+                // hueco declarado también es un estado firmado
+                // del panel. El modelo se monta primero:
+                // sin residente el compositor no envía.
+                out.model = await loadSmall();
+                step({step: "modelo", ...(out.model as Record<string, unknown>)});
+                await enterChatE11();
+                out.turn1 = await sendTurn("How do I do CPR?", 120000);
+                out.h12Turn1 = await bootstrapCost();
+                step({step: "turno-1", ok: out.turn1, h12: out.h12Turn1});
+                out.turn2 = await sendTurn("How do I treat a small burn at home?", 120000);
+                out.h12Turn2 = await bootstrapCost();
+                step({step: "turno-2", ok: out.turn2, h12: out.h12Turn2});
+                out.model = await loadSmall();
+                step({step: "modelo", ...(out.model as Record<string, unknown>)});
+                if ((out.model as Record<string, unknown>).loadOk === true) {
+                    await typeDraft("Tell me about the history of the aqueducts of Rome.");
+                    await exec(`document.querySelector(".composer .send-box:not(.voice):not(.stop)")?.click()`);
+                    const modelDeadline = Date.now() + 1200000;
+                    let settled = false;
+                    while (Date.now() < modelDeadline) {
+                        await sleep(60000);
+                        const probe = (await exec(`(() => {
+                            const bubbles = document.querySelectorAll(".turn-assistant");
+                            const last = bubbles[bubbles.length - 1];
+                            return {
+                                generating: !!document.querySelector(".composer .send-box.stop"),
+                                lastLen: (last?.textContent ?? "").trim().length,
+                            };
+                        })()`)) as {generating: boolean; lastLen: number};
+                        step({step: "turno-modelo-progreso", ...probe});
+                        if (!probe.generating && probe.lastLen > 0) {
+                            settled = true;
+                            break;
+                        }
+                    }
+                    out.turnModel = settled;
+                    out.h12TurnModel = await bootstrapCost();
+                    step({step: "turno-modelo", ok: settled, h12: out.h12TurnModel});
+                }
+                const b2 = (await exec(`window.nido.bootstrap()`)) as any;
+                const convs = (b2?.conversations ?? []) as any[];
+                const current = convs[0];
+                const lastTurn = (current?.turns ?? [])[(current?.turns ?? []).length - 1];
+                out.sourcesLastTurn = Array.isArray(lastTurn?.sources) ? lastTurn.sources.length : 0;
+                step({step: "fuentes", sources: out.sourcesLastTurn});
+                await snap("e11-panel-ancho.png");
+                if (await fixAndRead(1024, 900)) {
+                    await snap("foto-4-e11-panel-medio.png");
+                    await fixAndRead(1440, 900);
+                }
+                // La segunda conversación, para la dividida.
+                await exec(`document.querySelector(".sidebar .btn.primary")?.click()`);
+                await waitFor(`document.querySelector(".composer textarea")`, 20000);
+                out.turnB = await sendTurn("How do I stop a nosebleed?", 120000);
+                out.h12TurnB = await bootstrapCost();
+                step({step: "turno-b", ok: out.turnB, h12: out.h12TurnB});
+                // De vuelta a la primera conversación.
+                await exec(`(() => {
+                    const item = [...document.querySelectorAll(".recent-item")].find((el) => !el.classList.contains("active"));
+                    item?.querySelector(".recent-title")?.click();
+                })()`);
+                await waitFor(`document.querySelectorAll(".turn-assistant").length >= 2`, 20000);
+                // La dividida con documento, si el turno dejó
+                // fuentes; si no, queda asentado y la de dos
+                // conversaciones cobra la foto.
+                if ((out.sourcesLastTurn as number) > 0) {
+                    await exec(`document.querySelector("button.source-chip")?.click()`);
+                    out.splitDoc = await waitFor(`!!document.querySelector(".split-turns")`, 15000);
+                    step({step: "dividida-documento", open: out.splitDoc});
+                    if (out.splitDoc) await snap("e11-dividida-documento.png");
+                    await exec(`document.querySelector(".sources-panel button[aria-label='close']")?.click()`);
+                    await sleep(500);
+                }
+                await exec(`document.querySelector(".export-button[title]")?.click()`);
+                await waitFor(`!!document.querySelector(".export-menu")`, 10000);
+                await exec(`document.querySelector(".export-menu button")?.click()`);
+                out.splitConv = await waitFor(`!!document.querySelector(".split-turns")`, 15000);
+                step({step: "dividida-conversacion", open: out.splitConv});
+                if (out.splitConv) await snap("e11-dividida.png");
+                // La hoja de atajos: su contraste contra el
+                // mapa sale del DOM servido y se cobra en el
+                // asiento contra shortcutSheetRows.
+                await key({key: "/", ctrlKey: true});
+                out.sheetOpen = await waitFor(`!!document.querySelector(".shortcut-sheet")`, 10000);
+                out.sheetRows = await exec(`[...document.querySelectorAll(".shortcut-row")].map((r) => ({
+                    keys: (r.querySelector(".shortcut-keys")?.textContent ?? "").trim(),
+                    label: (r.textContent ?? "").trim(),
+                }))`);
+                step({step: "hoja", open: out.sheetOpen, rows: (out.sheetRows as unknown[]).length});
+                if (out.sheetOpen) await snap("e11-hoja-atajos.png");
+                await key({key: "Escape"});
+                out.sheetClosed = await waitFor(`!document.querySelector(".shortcut-sheet")`, 10000);
+                // La paleta: abrir, fotografiar, buscar una
+                // lección y entrar con el teclado.
+                await key({key: "k", ctrlKey: true});
+                out.paletteOpen = await waitFor(`!!document.querySelector(".palette")`, 10000);
+                out.paletteCount = await exec(`document.querySelectorAll(".palette-item").length`);
+                step({step: "paleta", open: out.paletteOpen, items: out.paletteCount});
+                if (out.paletteOpen) await snap("e11-paleta.png");
+                await exec(`(() => {
+                    const input = document.querySelector(".palette input");
+                    if (!input) return false;
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                    setter.call(input, "zoom");
+                    input.dispatchEvent(new Event("input", {bubbles: true}));
+                    return true;
+                })()`);
+                await sleep(600);
+                out.paletteZoom = await exec(`[...document.querySelectorAll(".palette-item")].map((el) => ({
+                    label: (el.textContent ?? "").trim(),
+                    hint: (el.querySelector(".palette-hint")?.textContent ?? "").trim(),
+                }))`);
+                step({step: "paleta-zoom", results: out.paletteZoom});
+                await key({key: "Enter"});
+                await sleep(800);
+                out.paletteAfterEnter = await exec(`(() => {
+                    const cs = getComputedStyle(document.documentElement).getPropertyValue("--font-scale").trim();
+                    return {paletteGone: !document.querySelector(".palette"), fontScale: cs};
+                })()`);
+                step({step: "paleta-entrar", ...(out.paletteAfterEnter as Record<string, unknown>)});
+                await key({key: "Escape"});
+                // Apariencia y los extremos del zoom.
+                await clickNav(7);
+                await exec(`document.querySelectorAll(".settings-nav button")[4]?.click()`);
+                await sleep(700);
+                out.scaleRadios = await exec(`document.querySelectorAll("input[type=radio][name=font-scale]").length`);
+                step({step: "apariencia", radios: out.scaleRadios});
+                await snap("e11-apariencia.png");
+                const clickScale = async (index: number) => {
+                    await exec(`document.querySelectorAll("input[type=radio][name=font-scale]")[${index}]?.click()`);
+                    await sleep(900);
+                };
+                await clickScale(0);
+                await clickNav(0);
+                out.fontSmall = await exec(`getComputedStyle(document.documentElement).getPropertyValue("--font-scale").trim()`);
+                await snap("e11-zoom-pequeno.png");
+                await clickNav(7);
+                await exec(`document.querySelectorAll(".settings-nav button")[4]?.click()`);
+                await sleep(700);
+                await clickScale(4);
+                await clickNav(0);
+                out.fontLarge = await exec(`getComputedStyle(document.documentElement).getPropertyValue("--font-scale").trim()`);
+                await snap("e11-zoom-grande.png");
+                await clickNav(7);
+                await exec(`document.querySelectorAll(".settings-nav button")[4]?.click()`);
+                await sleep(700);
+                await clickScale(2);
+                step({step: "zoom", small: out.fontSmall, large: out.fontLarge});
+                // La caminata de M-5: desde cada sección, la
+                // entrada de la barra al índice (1 gesto) y
+                // del índice a un capítulo (2 gestos).
+                await clickNav(0);
+                await snap("e11-m5-barra.png");
+                const guideTitle = (await exec(`(async () => {
+                    const b = await window.nido.bootstrap();
+                    return b?.strings?.guide?.title ?? "";
+                })()`)) as string;
+                const learnCardJs = `[...document.querySelectorAll(".card")].find((c) => (c.textContent ?? "").includes(${JSON.stringify("GUIDE_TITLE")}))`;
+                out.m5Walk = [];
+                for (let i = 0; i < 8; i++) {
+                    const rec: Record<string, unknown> = {sectionIndex: i};
+                    await clickNav(i);
+                    await sleep(400);
+                    rec.entryClicked = await clickNav(8);
+                    rec.indexVisible = await waitFor(`!!(${learnCardJs.replace("GUIDE_TITLE", guideTitle)})`, 8000);
+                    rec.lessonRows = await exec(`(() => {
+                        const learn = ${learnCardJs.replace("GUIDE_TITLE", guideTitle)};
+                        return learn ? learn.querySelectorAll("button.row-line").length : 0;
+                    })()`);
+                    if (i === 0) await snap("e11-m5-indice.png");
+                    await exec(`(() => {
+                        const learn = ${learnCardJs.replace("GUIDE_TITLE", guideTitle)};
+                        learn?.querySelector("button.row-line")?.click();
+                    })()`);
+                    rec.lessonOpened = await waitFor(`document.querySelectorAll(".card ol").length > 0`, 8000);
+                    (out.m5Walk as unknown[]).push(rec);
+                    step({step: "m5", ...rec});
+                    await exec(`(() => {
+                        const learn = ${learnCardJs.replace("GUIDE_TITLE", guideTitle)};
+                        const back = learn?.querySelector("button.btn");
+                        back?.click();
+                    })()`);
+                    await sleep(500);
+                }
+                // O-1 por su llamante real: la exportación por
+                // el canal que la tarjeta llama tras el diálogo
+                // (el diálogo del sistema no se conduce en el
+                // banco: no hay herramienta X para él; la
+                // sustitución queda asentada) y la rotación por
+                // la tarjeta misma, que apaga la app.
+                await clickNav(7);
+                await exec(`document.querySelectorAll(".settings-nav button")[0]?.click()`);
+                out.cardVisible = await waitFor(`!!document.querySelector(".vault-backup-card")`, 20000);
+                step({step: "o1-tarjeta", visible: out.cardVisible});
+                await exec(`(() => {
+                    const card = document.querySelector(".vault-backup-card");
+                    const input = card?.querySelectorAll("input[type=password]")[0];
+                    if (!input) return false;
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                    setter.call(input, "respaldo-banco-11");
+                    input.dispatchEvent(new Event("input", {bubbles: true}));
+                    return true;
+                })()`);
+                const destPath = path.join(CAPTURE_DIR, "respaldo.nidbackup");
+                out.backupResult = await exec(`window.nido.backupExport({destPath: ${JSON.stringify(destPath)}, backupPassword: "respaldo-banco-11"})`);
+                out.backupFile = fs.existsSync(destPath) ? fs.statSync(destPath).size : 0;
+                step({step: "o1-exportacion", result: out.backupResult, bytes: out.backupFile});
+                await exec(`(() => {
+                    const card = document.querySelector(".vault-backup-card");
+                    const input = card?.querySelectorAll("input[type=password]")[1];
+                    if (!input) return false;
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                    setter.call(input, ${JSON.stringify(PERSIST_PASSWORD)});
+                    input.dispatchEvent(new Event("input", {bubbles: true}));
+                    const box = card?.querySelector("input[type=checkbox]");
+                    if (box && !box.checked) box.click();
+                    return true;
+                })()`);
+                await sleep(600);
+                fs.writeFileSync(path.join(CAPTURE_DIR, "e11-rotacion-en-curso.txt"), "1");
+                step({step: "o1-rotacion-pedida"});
+                await exec(`(() => {
+                    const card = document.querySelector(".vault-backup-card");
+                    const buttons = [...(card?.querySelectorAll("button") ?? [])];
+                    buttons[buttons.length - 1]?.click();
+                })()`);
+                // La app se apaga y relanza sola: este proceso
+                // muere aquí y e11b cobra el resultado. Si en
+                // 30 s sigue viva, la petición fue rechazada.
+                await sleep(30000);
+                out.rotationRejected = await exec(`document.querySelector(".vault-backup-card")?.textContent ?? ""`);
+                step({step: "o1-rotacion-rechazada", text: out.rotationRejected});
+            }
+
         } else if (CAPTURE_PHASE === "principal") {
             // La fase principal de la re-captura (PREP-CURA-RECAPTURA
             // §2.5): una sola bóveda y una sola conversación. La
@@ -1761,10 +2423,10 @@ async function runCapture(window: BrowserWindow) {
             // de la toma detenida; lo cazó la mirada al fotograma.
             const bubblesBefore = (await exec(`document.querySelectorAll(".turn-assistant .bubble").length`)) as number;
             const tEssay = Date.now();
-            await exec(`document.querySelector(".send-box")?.click()`);
+            await exec(`document.querySelector(".composer .send-box:not(.voice):not(.stop)")?.click()`);
             const streaming = `(() => {
                 if (!document.querySelector(".emergency-pill")) return false;
-                if (!document.querySelector(".send-box.stop")) return false;
+                if (!document.querySelector(".composer .send-box.stop")) return false;
                 const bubbles = document.querySelectorAll(".turn-assistant .bubble");
                 if (bubbles.length <= ${bubblesBefore}) return false;
                 return (bubbles[bubbles.length - 1].textContent ?? "").trim().length >= 30;
@@ -2190,8 +2852,8 @@ async function runEsc3(window: BrowserWindow) {
         })()`);
         await sleep(300);
         const t0 = Date.now();
-        await exec(`document.querySelector(".send-box")?.click()`);
-        out.settled = await waitFor(`!document.querySelector(".send-box.stop") && document.querySelectorAll(".turn-assistant .bubble").length > 0`, 150000);
+        await exec(`document.querySelector(".composer .send-box:not(.voice):not(.stop)")?.click()`);
+        out.settled = await waitFor(`!document.querySelector(".composer .send-box.stop") && document.querySelectorAll(".turn-assistant .bubble").length > 0`, 150000);
         out.wallMs = Date.now() - t0;
         out.dom = await exec(`(() => {
             const turns = document.querySelectorAll(".turn-assistant");
@@ -2236,6 +2898,17 @@ if (BENCH_MODE === "capture" || BENCH_MODE === "boot" || BENCH_MODE === "turnpro
         void (async () => {
             await installServices();
             bootShell({
+                // E11 (paso 10): la entrada del banco espeja
+                // los ganchos de la carcasa de la entrada de
+                // producción (index.ts) para la superficie de
+                // enlaces: instancia única y las dos llegadas.
+                // Sin ellos el paquete-banco no puede cobrar
+                // ninguna entrega desde fuera, y la pasada lo
+                // cobró en su primera corrida (la segunda
+                // instancia arrancaba su propia app).
+                singleInstance: true,
+                onSecondInstanceArgv: (argv) => noteLinkFromArgv(argv),
+                onOpenUrl: (url) => noteExternalLink(url),
                 onPageSettled: (window) => {
                     if (BENCH_MODE === "capture") void runCapture(window);
                     else if (BENCH_MODE === "turnprobe") void runTurnProbe(window);
@@ -2276,6 +2949,15 @@ if (BENCH_MODE === "capture" || BENCH_MODE === "boot" || BENCH_MODE === "turnpro
     }
 } else {
     bootShell({
+        // E11 (paso 10): la entrada sin modo del banco es la
+        // que un lanzamiento pelado (un enlace desde fuera)
+        // ejecuta: espeja los ganchos de producción como la
+        // rama de captura, para que la segunda instancia
+        // pida el candado de instancia única y entregue su
+        // argv en vez de arrancar una segunda app.
+        singleInstance: true,
+        onSecondInstanceArgv: (argv) => noteLinkFromArgv(argv),
+        onOpenUrl: (url) => noteExternalLink(url),
         onPageSettled: (window) => {
             if (BENCH_MODE)
                 void runBench(window);

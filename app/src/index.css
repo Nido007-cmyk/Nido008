@@ -860,6 +860,220 @@ input, textarea, select {
     background: var(--raised);
 }
 
+/* E11 (M-6): la pista del atajo en el resultado de la paleta. */
+.palette-hint {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+/* E11 (paso 1): la hoja de atajos y la barra de búsqueda
+   dentro de la conversación. */
+.shortcut-sheet {
+    width: min(560px, 92vw);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--lifted);
+    padding: 16px 20px;
+    max-height: 70vh;
+    overflow-y: auto;
+}
+
+.shortcut-sheet-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.shortcut-sheet-close {
+    background: none;
+    border: none;
+    font-size: 20px;
+    cursor: pointer;
+    color: var(--muted);
+}
+
+.shortcut-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.shortcut-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.shortcut-keys {
+    font-weight: 600;
+    white-space: nowrap;
+    width: 40%;
+    color: var(--accent);
+}
+
+.find-bar {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 6px 0;
+}
+
+.find-bar input {
+    flex: 1 1 auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 8px;
+    background: var(--card);
+    color: var(--text);
+}
+
+.find-bar button {
+    background: var(--raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px 10px;
+    cursor: pointer;
+    color: var(--text);
+}
+
+.find-count {
+    color: var(--muted);
+    min-width: 44px;
+    text-align: center;
+}
+
+.find-hit {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* E11 (pasos 2 y 3): las fichas de la materia adjunta y el
+   aviso de lo que la caída no aceptó. */
+.chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 0;
+}
+
+.attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--raised);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px 6px 3px 10px;
+    font-size: 13px;
+    color: var(--text);
+}
+
+.attachment-chip button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 14px;
+    padding: 0 2px;
+}
+
+.drop-note {
+    color: var(--danger);
+    font-size: 13px;
+    padding: 2px 0 6px;
+}
+
+/* E11 (paso 4): el control de exportación de la cabecera. */
+.export-control {
+    position: relative;
+    display: inline-block;
+    margin-top: 6px;
+}
+
+.export-button {
+    background: var(--raised);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 4px 12px;
+    cursor: pointer;
+    color: var(--text);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+}
+
+.export-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--lifted);
+    display: flex;
+    flex-direction: column;
+    z-index: 30;
+    min-width: 200px;
+    overflow: hidden;
+}
+
+.export-menu button {
+    background: none;
+    border: none;
+    padding: 8px 12px;
+    text-align: left;
+    cursor: pointer;
+    color: var(--text);
+}
+
+.export-menu button:hover {
+    background: var(--raised);
+}
+
+.export-note {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 4px;
+    max-width: 420px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* E11 (paso 7): el aviso llano de un enlace que no aterriza. */
+.link-notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 12px 24px 0;
+    padding: 8px 12px;
+    background: var(--raised);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 14px;
+}
+
+.link-notice button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 16px;
+}
+
+/* E11 (paso 8): la lectura de la otra conversación en el panel. */
+.split-turns {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    overflow-y: auto;
+}
+
 .vault-gate {
     height: 100vh;
     display: flex;

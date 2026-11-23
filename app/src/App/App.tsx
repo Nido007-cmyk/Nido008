@@ -18,6 +18,41 @@ import { LOCAL_TOOLS } from "../../../src/agent/tools/manifest.js";
 import { startListening, stopListening } from "../../../src/voice/voiceInput.js";
 import { speakText, stopSpeaking } from "../../../src/voice/tts.js";
 import { CPR_GUIDE } from "../../../src/cpr/cprCoach.js";
+import { resolveShortcut, shortcutSheetRows } from "../../../src/desktop/atajos.js";
+import {
+  acceptDrop,
+  discardAttachment,
+  type AttachmentChip,
+} from "../../../src/desktop/caida.js";
+import { acceptPaste } from "../../../src/desktop/pegado.js";
+import {
+  conversationToMarkdown,
+  conversationToPlainText,
+  dragOutPayload,
+  exportFileSlug,
+  saveExport,
+} from "../../../src/desktop/exportacion.js";
+import { composePanelFigures } from "../../../src/desktop/panel.js";
+import {
+  closeSplit,
+  closedSplit,
+  openSplit,
+  splitPresentation,
+  type SplitState,
+} from "../../../src/desktop/dividida.js";
+import {
+  FONT_SCALE_STEPS,
+  fontScaleFactor,
+  resetFontScaleStep,
+  stepFontScale,
+} from "../../../src/desktop/zoom.js";
+import {
+  composePaletteItems,
+  searchPaletteItems,
+  type PaletteItem,
+} from "../../../src/desktop/paleta.js";
+import { PACK_CATALOG } from "../../../src/models/packCatalog.js";
+import type { FontScale } from "../../../src/models/settings.js";
 import {
   installTtsPort,
   installVoicePort,
@@ -104,6 +139,18 @@ interface MemoryReminderRow {
   dueLabel: string | null;
 }
 
+/** Las filas del historial de acciones (O-12): la forma del
+ * almacén guardado que el canal `nido:action-log-list` sirve. */
+interface ActionLogRow {
+  id: number;
+  ts: string;
+  tool: string;
+  outcome: string;
+  confirmed: boolean;
+  undone: boolean;
+  undo?: { kind: "note" | "reminder"; id: string };
+}
+
 // E7 (paso 6): las filas de la sección Agenda, en la forma que
 // los canales `nido:agenda-*` sirven (los almacenes del chat).
 interface AgendaEventRow {
@@ -147,6 +194,39 @@ interface AgendaContactRow {
   notes: string;
   alertLeadDays: number;
   nextNoticeAt: number | null;
+}
+
+// Puerta .ics/.vcf: el resumen de una importación como
+// lo sirve el principal, con códigos que la superficie
+// compone en el idioma de la persona.
+interface AgendaImportDiscarded {
+  code: string;
+  label: string | null;
+  prop: string | null;
+  text: string;
+}
+
+interface AgendaImportNamedGroup {
+  count: number;
+  names: string[];
+}
+
+interface AgendaImportSummary {
+  rejectedCode: string | null;
+  rejectedText: string | null;
+  total: number;
+  enter: number;
+  alreadyPresent: number;
+  recurring: number;
+  discarded: AgendaImportDiscarded[];
+  named: {
+    exdate: AgendaImportNamedGroup;
+    valarm: AgendaImportNamedGroup;
+    unboundedRrule: AgendaImportNamedGroup;
+    tzid: AgendaImportNamedGroup;
+    withoutUid: number;
+    truncatedFields: number;
+  } | null;
 }
 
 interface ModelInfo {
@@ -221,6 +301,8 @@ interface StoredTurn {
   research?: ResearchTurnData;
   researchReportId?: string;
   stopped?: boolean;
+  /** N1: el asistente que asienta un fallo de la generación. */
+  failed?: boolean;
   contextNote?: "filling" | "dropping";
   at: string;
 }
@@ -254,7 +336,6 @@ interface Boot {
   prefs: {
     theme: "daylight" | "night";
     lang: "es" | "en" | "pt";
-    fontScale: number;
     sidebarWidth: number;
     sidebarCollapsed: boolean;
   };
@@ -278,6 +359,9 @@ interface Boot {
   voiceInputEnabled?: boolean;
   readAloudEnabled?: boolean;
   deepResearchMode?: boolean;
+  sendOnEnter?: boolean;
+  fontScaleStep?: string;
+  rotationOutcome?: "done" | "recovered" | "failed" | null;
   voiceSystemReserveEnabled?: boolean;
   noticesShowText?: boolean;
   noticesResident?: boolean | null;
@@ -290,6 +374,8 @@ interface Boot {
     diskUsedBytes: number | null;
     diskTotalBytes: number | null;
     lastGenRate: number | null;
+    contextUsedFraction?: number | null;
+    appMemoryBytes?: number;
   };
 }
 
@@ -391,6 +477,12 @@ interface NidoBridge {
     reason?: string;
     delivered?: string;
   }>;
+  exportSaveDialog(args: { defaultName: string }): Promise<{
+    ok: boolean;
+    path?: string | null;
+  }>;
+  exportWrite(args: { path: string; content: string }): Promise<{ ok: boolean }>;
+  exportDragStart(args: { fileName: string; content: string }): Promise<{ ok: boolean }>;
   researchSessions(): Promise<{
     ok: boolean;
     sessions?: ResearchSessionSummaryData[];
@@ -481,10 +573,22 @@ interface NidoBridge {
   tasksList(): Promise<{ ok: boolean; reason?: string; tasks?: unknown[] }>;
   tasksSave(args: unknown): Promise<{ ok: boolean; reason?: string; errors?: string[] }>;
   tasksDelete(args: unknown): Promise<{ ok: boolean; reason?: string }>;
+  actionLogList(): Promise<{ ok: boolean; reason?: string; actions?: ActionLogRow[] }>;
+  actionLogUndo(id: number): Promise<{ ok: boolean; reason?: string }>;
+  actionLogClear(): Promise<{ ok: boolean; reason?: string }>;
   agendaEventSave(args: unknown): Promise<{ ok: boolean; reason?: string; event?: AgendaEventRow }>;
   agendaEventDelete(id: string): Promise<{ ok: boolean; reason?: string }>;
   agendaContactSave(args: unknown): Promise<{ ok: boolean; reason?: string; contact?: AgendaContactRow }>;
   agendaContactDelete(id: string): Promise<{ ok: boolean; reason?: string }>;
+  agendaImportPreview(
+    kind: string,
+    path: string,
+  ): Promise<{ ok: boolean; reason?: string; token?: string | null; summary?: AgendaImportSummary }>;
+  agendaImportCommit(
+    kind: string,
+    token: string,
+  ): Promise<{ ok: boolean; reason?: string; inserted?: number; summary?: AgendaImportSummary }>;
+  agendaExport(kind: string): Promise<{ ok: boolean; reason?: string; content?: string; defaultName?: string }>;
   copyText(text: string): Promise<{ ok: boolean }>;
   openExternal(url: string): Promise<{ ok: boolean }>;
   confirmResponse(id: string, approved: boolean): void;
@@ -492,6 +596,24 @@ interface NidoBridge {
   onTurnPhase(cb: (p: { phase: string }) => void): () => void;
   onConfirmRequest(cb: (p: ConfirmPayload) => void): () => void;
   onVaultLocked(cb: () => void): () => void;
+  linkPending(args: { afterSeq: number }): Promise<{
+    ok: boolean;
+    seq?: number;
+    resolution?: import("../../../src/desktop/enlaces.js").LinkResolution;
+  }>;
+  conversationSearch(args: { query: string }): Promise<{
+    ok: boolean;
+    reason?: string;
+    hits?: { conversationId: string; messageIndex: number }[];
+  }>;
+  backupExport(args: { destPath: string; backupPassword: string }): Promise<{
+    ok: boolean;
+    reason?: string;
+    message?: string;
+    entries?: string[];
+  }>;
+  vaultRotateRequest(args: { password: string }): Promise<{ ok: boolean; reason?: string }>;
+  onLink(cb: (payload: { seq?: number }) => void): () => void;
   onNoticesShow(cb: (p: { target?: string }) => void): () => void;
   checkForUpdates(): Promise<unknown>;
   // La voz (E9 paso 1): el dictado, por su proceso propio.
@@ -536,6 +658,7 @@ interface ConfirmPayload {
   id: string;
   kind: string;
   tool: string;
+  title?: string | null;
   scope: string | null;
   message: string;
 }
@@ -735,6 +858,23 @@ export function App() {
   // del envío lo libera sea cual sea la vista montada.
   const [sending, setSending] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // E11 (paso 1): la hoja de atajos y el buscador global
+  // viven en la raíz con la paleta: el mapa de la ventana
+  // se decide aquí, y la vista del chat registra sus
+  // costuras (ir al final, buscar dentro) en la referencia.
+  const [shortcutSheetOpen, setShortcutSheetOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const chatKeysRef = useRef<{ goEnd?: () => void; openFind?: () => void }>({});
+  // E11 (paso 7): el enlace nido:// que llega de fuera. El
+  // principal lo retiene y lo resuelve contra el mundo de
+  // la sesión; aquí solo se aplica su resolución (navegar
+  // o avisar) y se recuerda el último número aplicado.
+  const [guideLink, setGuideLink] = useState<{ id: string; seq: number } | null>(null);
+  const [linkNotice, setLinkNotice] = useState<string | null>(null);
+  const lastLinkSeq = useRef(0);
+  // E11 (paso 9): el salto pedido por el buscador global:
+  // la vista del chat lo cobra al montar o al cambiar.
+  const [jumpRequest, setJumpRequest] = useState<{ index: number; seq: number } | null>(null);
   // E7 (paso 6): la ruta interna de la ficha,
   // `#/agenda/contacto/<id>`, abre la Agenda con esa ficha.
   const [agendaContactId, setAgendaContactId] = useState<string | null>(null);
@@ -801,6 +941,49 @@ export function App() {
     void refresh();
   }, [refresh]);
 
+  // E11 (paso 7): la recogida del enlace retenido: al
+  // aviso en caliente, al arrancar y tras desbloquear (la
+  // resolución «hold» no se marca aplicada: la ruta se
+  // dirime cuando la bóveda abre, sin que un id existente
+  // y uno inexistente se distingan antes).
+  const pullLink = useCallback(async () => {
+    if (!boot) return;
+    const r = await window.nido
+      .linkPending({ afterSeq: lastLinkSeq.current })
+      .catch(() => null);
+    if (!r?.ok || !r.resolution || typeof r.seq !== "number") return;
+    const res = r.resolution;
+    if (res.kind === "hold") return;
+    lastLinkSeq.current = r.seq;
+    if (res.kind === "navigate") {
+      if (res.conversationId) setCurrentId(res.conversationId);
+      if (res.guideId) setGuideLink({ id: res.guideId, seq: r.seq });
+      setSection(res.section);
+    } else {
+      setSection(res.section);
+      const keys: Record<string, string> = {
+        malformed: "linkMalformed",
+        "chat-missing": "linkChatMissing",
+        "guide-missing": "linkGuideMissing",
+        "guide-not-installed": "linkGuideNotInstalled",
+      };
+      setLinkNotice(
+        lookup(boot.strings as Strings, "pcSurface", keys[res.notice] ?? "linkMalformed"),
+      );
+    }
+  }, [boot]);
+
+  useEffect(() => {
+    const off = window.nido?.onLink(() => {
+      void pullLink();
+    });
+    return off;
+  }, [pullLink]);
+
+  useEffect(() => {
+    if (boot?.vault.unlocked) void pullLink();
+  }, [boot?.vault.unlocked, pullLink]);
+
   // E9 (paso 5): la oferta de la reserva del sistema gobierna
   // el adaptador de lectura desde el bootstrap.
   useEffect(() => {
@@ -839,7 +1022,13 @@ export function App() {
     const root = document.documentElement;
     if (boot.prefs.theme === "night") root.dataset.theme = "night";
     else delete root.dataset.theme;
-    root.style.setProperty("--font-scale", String(boot.prefs.fontScale));
+    // E11 (paso 6): la escala sale del escalón del almacén
+    // y de su única tabla (zoom.ts); la preferencia
+    // numérica de la carcasa quedó retirada con D-3.
+    root.style.setProperty(
+      "--font-scale",
+      String(fontScaleFactor((boot.fontScaleStep ?? "standard") as FontScale)),
+    );
     root.style.setProperty("--sidebar-width", `${boot.prefs.sidebarWidth}px`);
   }, [boot]);
 
@@ -853,6 +1042,121 @@ export function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // La aplicación de una acción del mapa: la comparten el
+  // enrutador de teclas y la paleta (que invoca las mismas
+  // acciones por su id de la hoja), para que un gesto y su
+  // entrada en la paleta hagan exactamente lo mismo.
+  const applyShortcutAction = useCallback(
+    (action: import("../../../src/desktop/atajos.js").ShortcutAction) => {
+      if (!boot) return;
+      switch (action.kind) {
+        case "new-chat":
+          setCurrentId(`conv-${Date.now()}`);
+          setSection("chat");
+          break;
+        case "global-search":
+          setSearchOpen(true);
+          break;
+        case "search-in-chat":
+          if (section === "chat") chatKeysRef.current.openFind?.();
+          break;
+        case "go-end":
+          if (section === "chat") chatKeysRef.current.goEnd?.();
+          break;
+        case "stop":
+          void window.nido.turnStop();
+          break;
+        case "close-sheet":
+          setPaletteOpen(false);
+          setShortcutSheetOpen(false);
+          setSearchOpen(false);
+          break;
+        case "section":
+          setSection(NAV[action.index].id);
+          break;
+        case "model-manager":
+          setSection("modelos");
+          break;
+        case "shortcut-sheet":
+          setShortcutSheetOpen(true);
+          break;
+        case "zoom-in":
+        case "zoom-out":
+        case "zoom-reset": {
+          // E11 (paso 6): el zoom mueve el escalón del
+          // almacén por su única tabla y lo persiste por
+          // el canal de ajustes.
+          const current = (boot.fontScaleStep ?? "standard") as FontScale;
+          const next =
+            action.kind === "zoom-reset"
+              ? resetFontScaleStep()
+              : stepFontScale(current, action.kind === "zoom-in" ? 1 : -1);
+          if (next !== current) {
+            void window.nido.settingsSet({ fontScaleStep: next }).then(() => refresh());
+          }
+          break;
+        }
+        default:
+          break; // el envío vive en el composer
+      }
+    },
+    [boot, section, refresh],
+  );
+
+  // La invocación desde la paleta: el id de la hoja se
+  // traduce a su acción por la misma lista (la fila de la
+  // hoja trae su acción), sin una segunda lista.
+  const runPaletteAction = useCallback(
+    (id: string) => {
+      if (!boot) return;
+      const row = shortcutSheetRows(boot.sendOnEnter ?? true).find((r) => r.id === id);
+      if (row) applyShortcutAction(row.action);
+    },
+    [boot, applyShortcutAction],
+  );
+
+  // E11 (paso 1): el mapa de atajos de la ventana, decidido
+  // por el resolvedor de la pieza (src/desktop/atajos.ts)
+  // contra el contexto vivo. Intro lo posee el composer
+  // (su propio manejador decide enviar, saltar o la
+  // emergencia) y Fin dentro de un campo de texto es del
+  // texto; aquí vive el resto del mapa. Ningún atajo es
+  // global: sin el foco en la ventana, este escuchador no
+  // produce efecto alguno, y con la bóveda cerrada el mapa
+  // entero duerme.
+  useEffect(() => {
+    if (!boot?.vault.unlocked) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Enter") return;
+      const el = document.activeElement as HTMLElement | null;
+      const inComposer = el?.dataset?.composer === "true";
+      const inTextField =
+        el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+      if (e.key === "End" && (inComposer || inTextField)) return;
+      const action = resolveShortcut(
+        {
+          key: e.key,
+          ctrlKey: e.ctrlKey,
+          shiftKey: e.shiftKey,
+          altKey: e.altKey,
+          metaKey: e.metaKey,
+        },
+        {
+          generating: sending,
+          emergencyPill: false,
+          sheetOpen: paletteOpen || shortcutSheetOpen || searchOpen,
+          inComposer,
+          sendOnEnter: boot.sendOnEnter ?? true,
+        },
+      );
+      if (!action) return;
+      e.preventDefault();
+      applyShortcutAction(action);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [boot, sending, paletteOpen, shortcutSheetOpen, searchOpen, applyShortcutAction]);
 
   if (!boot) {
     if (!bootFailed) return null;
@@ -904,8 +1208,17 @@ export function App() {
         currentId={currentId}
         setCurrentId={setCurrentId}
         refresh={refresh}
+        goLearn={goLearn}
       />
       <div className="main-column">
+        {linkNotice && (
+          <div className="link-notice">
+            <span>{linkNotice}</span>
+            <button onClick={() => setLinkNotice(null)} aria-label={P("findClose")}>
+              ×
+            </button>
+          </div>
+        )}
         {section === "chat" &&
           (!anyInstalled && !resident && boot.conversations.length === 0 ? (
             <NoModelView boot={boot} goModels={() => setSection("modelos")} refresh={refresh} />
@@ -929,6 +1242,8 @@ export function App() {
               onSendingChange={setSending}
               refresh={refresh}
               guideDraft={guideDraft}
+              keysRef={chatKeysRef}
+              jumpRequest={jumpRequest}
               goModels={() => setSection("modelos")}
               goTone={() => { setSettingsTab("tone"); setSection("settings"); }}
               goVoice={() => { setSettingsTab("voice"); setSection("settings"); }}
@@ -941,7 +1256,12 @@ export function App() {
         {section === "modelos" && <ModelsView boot={boot} refresh={refresh} />}
         {section === "nido" && <DeclaredView boot={boot} titleKey="nidoDeclaredTitle" bodyKey="nidoDeclaredBody" icon="pairing" />}
         {section === "library" && (
-          <LibraryView boot={boot} onGuideExample={onGuideExample} learnSignal={learnSignal} />
+          <LibraryView
+            boot={boot}
+            onGuideExample={onGuideExample}
+            learnSignal={learnSignal}
+            guideLink={guideLink}
+          />
         )}
         {section === "memory" && <MemoryView boot={boot} />}
         {section === "settings" && (
@@ -966,7 +1286,281 @@ export function App() {
             setPaletteOpen(false);
           }}
           openSettings={openSettings}
+          runAction={runPaletteAction}
+          openGuide={(lessonId) => {
+            setGuideLink({ id: lessonId, seq: Date.now() });
+            setSection("library");
+            setPaletteOpen(false);
+          }}
+          openPack={() => {
+            setSection("library");
+            setPaletteOpen(false);
+          }}
         />
+      )}
+      {shortcutSheetOpen && boot.vault.unlocked && (
+        <ShortcutSheet
+          P={P}
+          sendOnEnter={boot.sendOnEnter ?? true}
+          close={() => setShortcutSheetOpen(false)}
+        />
+      )}
+      {searchOpen && boot.vault.unlocked && (
+        <GlobalSearch
+          boot={boot}
+          P={P}
+          close={() => setSearchOpen(false)}
+          onJump={(convId, index) => {
+            setCurrentId(convId);
+            setSection("chat");
+            setJumpRequest({ index, seq: Date.now() });
+            setSearchOpen(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// E11 (paso 9) · El buscador global (Ctrl+Mayús+F): busca
+// en el índice cifrado y cada resultado salta a su
+// conversación, a su mensaje exacto. Los resultados se
+// calculan en el principal sobre la base de la bóveda:
+// con ella bloqueada el buscador lo dice, no finge una
+// lista vacía.
+// ---------------------------------------------------------------------
+
+function GlobalSearch({
+  boot,
+  P,
+  close,
+  onJump,
+}: {
+  boot: Boot;
+  P: (k: string) => string;
+  close: () => void;
+  onJump: (conversationId: string, messageIndex: number) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<{ conversationId: string; messageIndex: number }[]>([]);
+  const [lockedNote, setLockedNote] = useState(false);
+  const [searched, setSearched] = useState(false);
+  useEffect(() => {
+    if (!query.trim()) {
+      setHits([]);
+      setLockedNote(false);
+      setSearched(false);
+      return;
+    }
+    const t = setTimeout(() => {
+      void window.nido.conversationSearch({ query }).then((r) => {
+        setSearched(true);
+        if (!r.ok) {
+          setLockedNote(true);
+          setHits([]);
+          return;
+        }
+        setLockedNote(false);
+        setHits(r.hits ?? []);
+      });
+    }, 180);
+    return () => clearTimeout(t);
+  }, [query]);
+  const convOf = (id: string) => boot.conversations.find((c) => c.id === id);
+  return (
+    <div className="palette-veil" onClick={close}>
+      <div className="palette" onClick={(e) => e.stopPropagation()}>
+        <input
+          autoFocus
+          value={query}
+          placeholder={P("searchPlaceholder")}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        {lockedNote && <div className="drop-note">{P("searchLocked")}</div>}
+        {searched && !lockedNote && hits.length === 0 && (
+          <div className="muted">{P("searchNoResults")}</div>
+        )}
+        {hits.map((h, i) => {
+          const conv = convOf(h.conversationId);
+          const text = conv?.turns[h.messageIndex]?.text ?? "";
+          return (
+            <button
+              key={`${h.conversationId}-${h.messageIndex}-${i}`}
+              className="palette-item"
+              onClick={() => onJump(h.conversationId, h.messageIndex)}
+            >
+              <Icon name="search" size={16} />
+              <span>
+                <strong>{conv?.title || P("untitledChat")}</strong>
+                {" · "}
+                {text.length > 90 ? `${text.slice(0, 90)}…` : text}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// E11 (paso 1) · La hoja de atajos: enseña el mapa entero
+// en la posición vigente del ajuste de envío. Sus líneas
+// salen de la misma lista que el resolvedor aplica
+// (shortcutSheetRows): la hoja no mantiene un mapa suyo.
+// ---------------------------------------------------------------------
+
+function ShortcutSheet({
+  P,
+  sendOnEnter,
+  close,
+}: {
+  P: (k: string) => string;
+  sendOnEnter: boolean;
+  close: () => void;
+}) {
+  const rows = shortcutSheetRows(sendOnEnter);
+  return (
+    <div className="palette-veil" onClick={close}>
+      <div className="shortcut-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="shortcut-sheet-head">
+          <h3>{P("shortcutsTitle")}</h3>
+          <button className="shortcut-sheet-close" onClick={close} aria-label={P("findClose")}>
+            ×
+          </button>
+        </div>
+        <table className="shortcut-table">
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id}>
+                <td className="shortcut-keys">{row.keys}</td>
+                <td>{P(row.labelKey)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// E11 (paso 4) · Exportar la conversación abierta: guardar
+// como Markdown o como texto llano, con el diálogo del
+// sistema, o arrastrar el botón fuera para soltar el .md
+// donde la persona lo suelte. Solo por su gesto expreso:
+// nada se exporta solo. La pieza (exportacion.ts) compone
+// el contenido entero y decide el guardado; aquí viven
+// los gestos y las vías del puente.
+// ---------------------------------------------------------------------
+
+function ExportControl({
+  P,
+  title,
+  messages,
+}: {
+  P: (k: string) => string;
+  title: string;
+  messages: { role: string; text: string }[];
+}) {
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const conv = { title, messages };
+  const labels = { user: P("exportYou"), assistant: "NIDO" };
+
+  const save = async (kind: "md" | "txt") => {
+    setOpen(false);
+    const content =
+      kind === "md"
+        ? conversationToMarkdown(conv, labels)
+        : conversationToPlainText(conv, labels);
+    const defaultName = `${exportFileSlug(title)}.${kind}`;
+    const r = await saveExport(
+      {
+        showSaveDialog: async (name) => {
+          const d = await window.nido.exportSaveDialog({ defaultName: name });
+          return d.ok ? (d.path ?? null) : null;
+        },
+        writeFile: async (path, text) => {
+          await window.nido.exportWrite({ path, content: text });
+        },
+      },
+      defaultName,
+      content,
+    );
+    if (r.saved && r.path) setNote(fill(P("exportedTo"), { path: r.path }));
+  };
+
+  return (
+    <div className="export-control">
+      <button
+        className="export-button"
+        draggable
+
+        onDragStart={() => {
+          const payload = dragOutPayload(conv, labels);
+          void window.nido.exportDragStart({
+            fileName: payload.fileName,
+            content: payload.content,
+          });
+        }}
+        onClick={() => setOpen((v) => !v)}
+        title={P("exportConversation")}
+      >
+        <Icon name="download" size={16} /> {P("exportConversation")}
+      </button>
+      {open && (
+        <div className="export-menu">
+          <button onClick={() => void save("md")}>{P("exportAsMarkdown")}</button>
+          <button onClick={() => void save("txt")}>{P("exportAsText")}</button>
+        </div>
+      )}
+      {note && <div className="export-note">{note}</div>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// E11 (paso 8) · Dividir: leer otra conversación al lado
+// de la principal, en el panel. La principal no se
+// sustituye: la división es solo lectura y el composer
+// sigue siendo de la conversación abierta.
+// ---------------------------------------------------------------------
+
+function SplitControl({
+  P,
+  others,
+  onPick,
+}: {
+  P: (k: string) => string;
+  others: { id: string; title: string }[];
+  onPick: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="export-control">
+      <button
+        className="export-button"
+        onClick={() => setOpen((v) => !v)}
+        title={P("splitOpen")}
+      >
+        <Icon name="menu" size={16} /> {P("splitOpen")}
+      </button>
+      {open && (
+        <div className="export-menu">
+          {others.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => {
+                setOpen(false);
+                onPick(c.id);
+              }}
+            >
+              {c.title || P("untitledChat")}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -983,6 +1577,7 @@ function Sidebar({
   currentId,
   setCurrentId,
   refresh,
+  goLearn,
 }: {
   boot: Boot;
   section: Section;
@@ -990,10 +1585,15 @@ function Sidebar({
   currentId: string | null;
   setCurrentId: (id: string | null) => void;
   refresh: () => Promise<void>;
+  goLearn: () => void;
 }) {
   const s = boot.strings as Strings;
   const P = (k: string) => lookup(s, "pcSurface", k);
   const D = (k: string) => lookup(s, "drawer", k);
+  // E11 (M-5): el nombre de la entrada de la guía es el
+  // título del propio árbol de la guía, en su idioma.
+  const guideTitle =
+    ((s as Record<string, unknown>).guide as GuideTree | undefined)?.title ?? "Aprende";
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const collapsed = boot.prefs.sidebarCollapsed;
   const dragging = useRef(false);
@@ -1027,16 +1627,22 @@ function Sidebar({
     return (
       <aside className="sidebar rail">
         <img src="/mascot-nido.png" alt="" width={32} height={32} />
-        {NAV.map((n) => (
+        {NAV.map((n, i) => (
           <button
             key={n.id}
             className={`nav-item${section === n.id ? " active" : ""}`}
-            title={P(n.key)}
+            title={`${P(n.key)} · Ctrl+${i + 1}`}
             onClick={() => setSection(n.id)}
           >
             <Icon name={n.icon} size={20} />
           </button>
         ))}
+        {/* E11 (M-5): la entrada permanente de la guía,
+            también en el riel: una sola, sin parada de
+            Ctrl+número. */}
+        <button className="nav-item" title={guideTitle} onClick={goLearn}>
+          <Icon name="ideas" size={20} />
+        </button>
         <button
           className="nav-item"
           title={P("expandRail")}
@@ -1048,6 +1654,27 @@ function Sidebar({
     );
   }
 
+  // E11 (paso 5): el panel crece sobre este pie: las cifras
+  // se componen en la pieza (panel.ts) desde sus fuentes
+  // vivas del bootstrap y del modelo residente, y el pie
+  // las pinta sin calcular las suyas. En el régimen medio
+  // la regla de la barra esconde los span del pie, como
+  // hoy: el panel es del régimen ancho.
+  const residentModel = boot.models.find((m) => m.resident) ?? null;
+  const panelFigures = composePanelFigures({
+    ramUsedBytes: boot.stats.ramUsedBytes,
+    ramTotalBytes: boot.stats.ramTotalBytes,
+    diskUsedBytes: boot.stats.diskUsedBytes,
+    diskTotalBytes: boot.stats.diskTotalBytes,
+    lastGenRate: boot.stats.lastGenRate,
+    modelName: residentModel?.plainLabel ?? null,
+    modelSizeBytes: residentModel?.sizeBytes ?? null,
+    contextSize: residentModel?.contextSize ?? null,
+    contextUsedFraction: boot.stats.contextUsedFraction ?? null,
+    memoryUsedBytes: () => boot.stats.appMemoryBytes ?? 0,
+  });
+  const panelFig = (id: string) => panelFigures.find((f) => f.id === id);
+
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -1058,18 +1685,28 @@ function Sidebar({
         <span className="status-dot" />
         <span>{P("statusLocal")}</span>
       </div>
-      <button className="btn primary" onClick={newChat}>
+      <button className="btn primary" onClick={newChat} title="Ctrl+N">
         <Icon name="new-chat" size={20} /> {D("newChat")}
       </button>
-      {NAV.map((n) => (
+      {NAV.map((n, i) => (
         <button
           key={n.id}
           className={`nav-item${section === n.id ? " active" : ""}`}
+          title={`Ctrl+${i + 1}`}
           onClick={() => setSection(n.id)}
         >
           <Icon name={n.icon} size={20} /> {P(n.key)}
         </button>
       ))}
+      {/* E11 (M-5): la entrada permanente de la barra a la
+          guía: una sola, visible en todo régimen en que la
+          barra vive, sin parada de Ctrl+número (el mapa
+          sigue en n = 8) y sin duplicar los enlaces por
+          sección, que siguen en su sitio. Aterriza en el
+          índice de «Aprende» por la vía del gancho. */}
+      <button className="nav-item" onClick={goLearn}>
+        <Icon name="ideas" size={20} /> {guideTitle}
+      </button>
       <div className="recents">
         <span className="recents-title">{D("recentSessions")}</span>
         {boot.conversations.length === 0 && (
@@ -1113,16 +1750,23 @@ function Sidebar({
         ))}
       </div>
       <div className="sidebar-footer">
+        <span>RAM {panelFig("ram")?.text}</span>
         <span>
-          RAM {gb(boot.stats.ramUsedBytes)} / {gb(boot.stats.ramTotalBytes)} GB
-        </span>
-        <span>
-          {P("diskUsed")}: {boot.stats.diskUsedBytes != null ? `${gb(boot.stats.diskUsedBytes)} / ${gb(boot.stats.diskTotalBytes ?? 0)} GB` : "—"}
+          {P("diskUsed")}: {panelFig("disk")?.text}
         </span>
         <span>
           {boot.stats.lastGenRate != null
             ? fill(lookup(s, "drawerFooterStats", "lastQuery"), { rate: boot.stats.lastGenRate })
             : P("lastRateNone")}
+        </span>
+        {panelFig("model") && !panelFig("model")!.hole && <span>{panelFig("model")!.text}</span>}
+        {panelFig("context") && !panelFig("context")!.hole && (
+          <span>
+            {P("panelContext")}: {panelFig("context")!.text}
+          </span>
+        )}
+        <span>
+          {P("panelMemory")}: {panelFig("memory")?.text}
         </span>
         <button
           className="nav-item"
@@ -1374,7 +2018,7 @@ function EmergencyView({
           {failed && <p className="vault-error">{P("phaseFailed")}</p>}
           {confirm && (
             <div className="confirm-card">
-              <div>{P("confirmTitle")}</div>
+              <div>{confirm.title ?? P("confirmTitle")}</div>
               {confirm.scope && <div className="scope">{confirm.scope}</div>}
               <div>{confirm.message}</div>
               <div className="confirm-actions">
@@ -1506,6 +2150,8 @@ function ChatView({
   goModels,
   goTone,
   goVoice,
+  keysRef,
+  jumpRequest,
 }: {
   boot: Boot;
   currentId: string | null;
@@ -1517,6 +2163,8 @@ function ChatView({
   goModels: () => void;
   goTone: () => void;
   goVoice: () => void;
+  keysRef: React.MutableRefObject<{ goEnd?: () => void; openFind?: () => void }>;
+  jumpRequest?: { index: number; seq: number } | null;
 }) {
   const s = boot.strings as Strings;
   const P = (k: string) => lookup(s, "pcSurface", k);
@@ -1573,6 +2221,80 @@ function ChatView({
     pageHeader?: string;
     pageText?: string;
   } | null>(null);
+  // E11 (paso 8): la vista dividida sobre este panel. El
+  // estado de la pieza (dividida.ts) guarda el ancla y la
+  // conversación principal; el panel pinta la división
+  // abierta (una fuente, un documento de la biblioteca o
+  // otra conversación) y al cerrar vuelve al sitio.
+  const [split, setSplit] = useState<SplitState>(() => closedSplit("msg-0"));
+  const [mediumRegime, setMediumRegime] = useState(
+    () => window.matchMedia("(max-width: 1199px)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 1199px)");
+    const onChange = () => setMediumRegime(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  // Cambiar de conversación cierra la división: era de la otra.
+  useEffect(() => {
+    setSplit(closedSplit("msg-0"));
+    setPanelSource(null);
+  }, [currentId]);
+
+  const currentAnchorId = useCallback(() => {
+    const box = scrollRef.current;
+    if (!box) return "msg-0";
+    const top = box.getBoundingClientRect().top;
+    for (const n of Array.from(box.querySelectorAll("[data-turn]"))) {
+      if (n.getBoundingClientRect().bottom > top + 8) {
+        return `msg-${n.getAttribute("data-turn")}`;
+      }
+    }
+    return "msg-0";
+  }, []);
+
+  const openSourceSplit = (
+    src: NonNullable<StoredTurn["sources"]>[number],
+    turnIndex: number,
+  ) => {
+    // La forma servida dirime la división: un documento
+    // personal paginado se lee como documento de la
+    // biblioteca; un fragmento de paquete, como fuente.
+    const kind = src.pageText ? "library-doc" : "source";
+    setSplit(
+      openSplit(
+        closedSplit(`msg-${turnIndex}`, currentId ?? undefined),
+        kind,
+        `fuente:${src.label ?? src.title}`,
+      ),
+    );
+    setPanelSource(src);
+  };
+
+  const openConversationSplit = (otherId: string) => {
+    setSplit(
+      openSplit(
+        closedSplit(currentAnchorId(), currentId ?? undefined),
+        "conversation",
+        otherId,
+      ),
+    );
+    setPanelSource(null);
+  };
+
+  const closeSplitSurface = () => {
+    const anchorIdx = Number(split.anchor.replace("msg-", ""));
+    setSplit(closeSplit(split));
+    setPanelSource(null);
+    if (Number.isFinite(anchorIdx)) {
+      requestAnimationFrame(() => {
+        scrollRef.current
+          ?.querySelector(`[data-turn="${anchorIdx}"]`)
+          ?.scrollIntoView({ block: "center" });
+      });
+    }
+  };
   const [noModelTurn, setNoModelTurn] = useState(false);
   // El dictado por voz (E9 paso 1): el botón vive solo si la
   // escucha local está presente (el estado del motor se cobra
@@ -1713,10 +2435,6 @@ function ChatView({
     };
   }, []);
 
-  useEffect(() => {
-    setPanelSource(null);
-  }, [currentId]);
-
   // F-UI-02: el área de texto crece con el borrador hasta el
   // tope de 160 px que ya declara la hoja; al vaciarse (envío
   // o restauración) vuelve a una línea, porque todo pasa por
@@ -1733,6 +2451,189 @@ function ChatView({
     if (el) el.scrollTop = el.scrollHeight;
     setShowGoEnd(false);
   }, []);
+
+  // E11 (paso 1): buscar dentro de la conversación (Ctrl+F).
+  // El índice es la propia conversación abierta: cada salto
+  // cae en el mensaje exacto que contiene el texto, y la
+  // barra se cierra sin dejar rastro en el turno.
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findIdx, setFindIdx] = useState(0);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const findMatches = useMemo(() => {
+    if (!findOpen || !findQuery.trim()) return [] as number[];
+    const q = findQuery.toLocaleLowerCase();
+    const out: number[] = [];
+    turns.forEach((t, i) => {
+      if (t.text.toLocaleLowerCase().includes(q)) out.push(i);
+    });
+    return out;
+  }, [findOpen, findQuery, turns]);
+  const findHit =
+    findMatches.length > 0
+      ? findMatches[Math.min(findIdx, findMatches.length - 1)]
+      : null;
+  // E11 (paso 9): el salto del buscador global aterriza en
+  // el mensaje exacto y lo marca un momento, sin dejar
+  // estado en el turno.
+  const [jumpHit, setJumpHit] = useState<number | null>(null);
+  useEffect(() => {
+    if (!jumpRequest) return;
+    const i = jumpRequest.index;
+    const raf = requestAnimationFrame(() => {
+      scrollRef.current
+        ?.querySelector(`[data-turn="${i}"]`)
+        ?.scrollIntoView({ block: "center" });
+      setJumpHit(i);
+    });
+    const t = setTimeout(() => setJumpHit(null), 2400);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(t);
+    };
+  }, [jumpRequest]);
+  useEffect(() => {
+    if (findHit == null) return;
+    scrollRef.current
+      ?.querySelector(`[data-turn="${findHit}"]`)
+      ?.scrollIntoView({ block: "center" });
+  }, [findHit]);
+  const stepFind = useCallback(
+    (dir: 1 | -1) => {
+      if (findMatches.length === 0) return;
+      setFindIdx((v) => (v + dir + findMatches.length) % findMatches.length);
+    },
+    [findMatches.length],
+  );
+
+  // Las costuras que el mapa de la raíz invoca sobre esta
+  // vista: ir al final (Fin) y abrir la búsqueda (Ctrl+F).
+  useEffect(() => {
+    keysRef.current.goEnd = scrollToEnd;
+    keysRef.current.openFind = () => {
+      setFindOpen(true);
+      requestAnimationFrame(() => findInputRef.current?.focus());
+    };
+    return () => {
+      keysRef.current.goEnd = undefined;
+      keysRef.current.openFind = undefined;
+    };
+  }, [keysRef, scrollToEnd]);
+
+  // E11 (pasos 2 y 3): la materia adjunta del composer. Lo
+  // caído y lo pegado entra por las piezas (caida/pegado),
+  // clasificado por sus bytes contra el contrato vivo; la
+  // superficie guarda con cada ficha su ruta (la extracción
+  // del turno es por ruta, como la importación de E6) o sus
+  // bytes si no la tiene (la imagen pegada). Nada de lo
+  // adjunto se indexa: unirse a la Biblioteca pasa por la
+  // confirmación de E6, no por esta cola.
+  type ChipEntry = { chip: AttachmentChip; path?: string; dataBase64?: string };
+  const [chipEntries, setChipEntries] = useState<ChipEntry[]>([]);
+  const [dropNote, setDropNote] = useState<string | null>(null);
+  const chipEntriesRef = useRef<ChipEntry[]>([]);
+  useEffect(() => {
+    chipEntriesRef.current = chipEntries;
+  }, [chipEntries]);
+  const attachNextRef = useRef(false);
+
+  const noteRejections = (rejected: { name: string; reason: string }[]) => {
+    if (rejected.length === 0) return;
+    const reasonKeys: Record<string, string> = {
+      archive: "dropReasonArchive",
+      spreadsheet: "dropReasonSpreadsheet",
+      "old-office": "dropReasonOldOffice",
+      unknown: "dropReasonUnknown",
+    };
+    setDropNote(
+      rejected
+        .map((x) => `${x.name}: ${P(reasonKeys[x.reason] ?? "dropReasonUnknown")}`)
+        .join(" · "),
+    );
+  };
+
+  const addDroppedFiles = async (files: File[]) => {
+    if (files.length === 0) return;
+    const dropped: { name: string; bytes: Uint8Array; path?: string }[] = [];
+    for (const f of files) {
+      const sample = new Uint8Array(await f.slice(0, 8192).arrayBuffer());
+      dropped.push({
+        name: f.name,
+        bytes: sample,
+        path: window.nido.docFilePath(f) || undefined,
+      });
+    }
+    const r = acceptDrop(
+      dropped.map(({ name, bytes }) => ({ name, bytes })),
+      { vaultUnlocked: boot.vault.unlocked },
+    );
+    const byName = new Map(dropped.map((d) => [d.name, d]));
+    setChipEntries((prev) => [
+      ...prev,
+      ...r.accepted.map((chip) => ({ chip, path: byName.get(chip.name)?.path })),
+    ]);
+    noteRejections(r.rejected);
+  };
+
+  const removeChip = (id: string) => {
+    setChipEntries((prev) => {
+      const kept = discardAttachment(
+        prev.map((e) => e.chip),
+        id,
+      );
+      return prev.filter((e) => kept.some((c) => c.id === e.chip.id));
+    });
+  };
+
+  const base64Of = (bytes: Uint8Array): string => {
+    let bin = "";
+    const CH = 0x8000;
+    for (let i = 0; i < bytes.length; i += CH) {
+      bin += String.fromCharCode(...bytes.subarray(i, i + CH));
+    }
+    return btoa(bin);
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const cd = e.clipboardData;
+    if (!cd) return;
+    const files = Array.from(cd.files ?? []);
+    const imageItem = Array.from(cd.items ?? []).find((it) =>
+      it.type.startsWith("image/"),
+    );
+    // El texto pegado es el gesto nativo del campo: la casa
+    // solo intercepta la materia que el campo no sabe poner.
+    if (files.length === 0 && !imageItem) return;
+    e.preventDefault();
+    void (async () => {
+      const dropped: { name: string; bytes: Uint8Array; path?: string }[] = [];
+      for (const f of files) {
+        const sample = new Uint8Array(await f.slice(0, 8192).arrayBuffer());
+        dropped.push({
+          name: f.name,
+          bytes: sample,
+          path: window.nido.docFilePath(f) || undefined,
+        });
+      }
+      let image: Uint8Array | undefined;
+      const imgFile = files.length === 0 ? imageItem?.getAsFile() : null;
+      if (imgFile) image = new Uint8Array(await imgFile.arrayBuffer());
+      const r = acceptPaste({
+        files: dropped.map(({ name, bytes }) => ({ name, bytes })),
+        image,
+      });
+      if (r.kind !== "attachments") return;
+      const byName = new Map(dropped.map((d) => [d.name, d]));
+      setChipEntries((prev) => [
+        ...prev,
+        ...r.chips.map((chip) => {
+          const src = byName.get(chip.name);
+          if (src) return { chip, path: src.path };
+          return { chip, dataBase64: image ? base64Of(image) : undefined };
+        }),
+      ]);
+    })();
+  };
 
   useEffect(() => {
     if (sending) scrollToEnd();
@@ -1776,12 +2677,27 @@ function ChatView({
       setPhase("phaseThinking");
       setLoadError(false);
       try {
+      // E11 (pasos 2 y 3): la materia del composer viaja con
+      // su turno y solo con el suyo: la marca la pone el
+      // gesto del composer y se consume aquí, en el envío
+      // real (tras el plan, si lo hubo); la emergencia y las
+      // reanudaciones no la heredan.
+      const attach = attachNextRef.current;
+      attachNextRef.current = false;
       const r = (await window.nido.turnSend({
         conversationId: id,
         text: clean,
         researchMode: research,
         researchPlan: planOverride,
         researchSessionId: sessionId,
+        attachments: attach
+          ? chipEntriesRef.current.map((e) => ({
+              name: e.chip.name,
+              kind: e.chip.kind,
+              path: e.path,
+              dataBase64: e.dataBase64,
+            }))
+          : undefined,
       })) as {
         ok: boolean;
         result?: {
@@ -1807,7 +2723,12 @@ function ChatView({
       // el texto de la persona queda intacto en el campo, carácter
       // a carácter; solo un turno servido lo limpia.
       if (loadFailed || noGenerate) setDraft(clean);
-      else setDraft("");
+      else {
+        setDraft("");
+        // La materia servida se va con su turno; la de un
+        // turno no generado se queda, como el borrador.
+        if (attach) setChipEntries([]);
+      }
       await refresh();
       if (research) void loadResearchSessions();
       } catch {
@@ -1830,6 +2751,13 @@ function ChatView({
     [currentId, sending, planning, onSendingChange, research, refresh, P],
   );
 
+  // El envío del composer: marca que la materia adjunta
+  // viaja con este turno (la emergencia no pasa por aquí).
+  const sendFromComposer = () => {
+    attachNextRef.current = true;
+    void send(draft);
+  };
+
   const emergencyNow = async () => {
     if (!sending) {
       void send(P("emergencyQuery"));
@@ -1849,6 +2777,20 @@ function ChatView({
     <>
       <div className="chat-header">
         <div className="local-line">{P("statusLocal")}</div>
+        {conv && turns.length > 0 && (
+          <ExportControl
+            P={P}
+            title={conv.title || P("untitledChat")}
+            messages={turns.map((t) => ({ role: t.role, text: t.text }))}
+          />
+        )}
+        {conv && boot.conversations.length > 1 && (
+          <SplitControl
+            P={P}
+            others={boot.conversations.filter((c) => c.id !== currentId)}
+            onPick={openConversationSplit}
+          />
+        )}
         <div className="model-line">
           {resident ? (
             <>
@@ -1873,11 +2815,11 @@ function ChatView({
             )}
             {turns.map((t, i) =>
               t.role === "user" ? (
-                <div key={i} className="turn-user">
+                <div key={i} className={`turn-user${(findHit === i || jumpHit === i) ? " find-hit" : ""}`} data-turn={i}>
                   {t.text}
                 </div>
               ) : (
-                <div key={i} className="turn-assistant">
+                <div key={i} className={`turn-assistant${(findHit === i || jumpHit === i) ? " find-hit" : ""}`} data-turn={i}>
                   {t.evidence && (
                     <div className="evidence-card">
                       <div className="key-phrase">{t.evidence.highlight}</div>
@@ -1911,12 +2853,13 @@ function ChatView({
                       <span>{warningText(t.warnings, P)}</span>
                     )}
                     {(t.timedOut || t.stopped) && <span>{P("phaseStopped")}</span>}
+                    {t.failed && <span>{P("phaseFailed")}</span>}
                     {t.researchPreempted && <span>{P("researchPreempted")}</span>}
                   </div>
                   {t.sources && t.sources.length > 0 && (
                     <div>
                       {t.sources.map((src, j) => (
-                        <button key={j} className="source-chip" onClick={() => setPanelSource(src)}>
+                        <button key={j} className="source-chip" onClick={() => openSourceSplit(src, i)}>
                           <Icon name="knowledge" size={16} /> {src.label ?? src.title}
                           {typeof src.rawScore === "number" && src.rawScore >= 0 && src.rawScore <= 1
                             ? ` · ${fill(P("sourceRelevance"), { pct: Math.round(src.rawScore * 100) })}`
@@ -1936,7 +2879,7 @@ function ChatView({
                       research={t.research}
                       reportId={t.researchReportId}
                       sources={t.sources ?? []}
-                      onOpenSource={(src) => setPanelSource(src)}
+                      onOpenSource={(src) => openSourceSplit(src, i)}
                       onShowText={(text) =>
                         setStyleOverrides((v) => ({ ...v, [`${currentId}:${i}`]: text }))
                       }
@@ -1961,7 +2904,7 @@ function ChatView({
             )}
             {confirm && (
               <div className="confirm-card">
-                <div>{P("confirmTitle")}</div>
+                <div>{confirm.title ?? P("confirmTitle")}</div>
                 {confirm.scope && <div className="scope">{confirm.scope}</div>}
                 <div>{confirm.message}</div>
                 <div className="confirm-actions">
@@ -2017,18 +2960,47 @@ function ChatView({
             )}
           </div>
         </div>
-        {panelSource && (
-          <aside className="sources-panel">
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <h3>{panelSource.label ?? panelSource.title}</h3>
-              <button onClick={() => setPanelSource(null)} aria-label="close">
-                <Icon name="close" size={20} />
-              </button>
-            </div>
-            <span className="section-label">{P("sourcesLabel")}</span>
-            {panelSource.pageHeader && <div className="section-label">{panelSource.pageHeader}</div>}
-            <div className="passage">{panelSource.pageText ?? panelSource.body}</div>
-            {panelSource.truncated && <span className="truncated-note">…</span>}
+        {splitPresentation(split, mediumRegime ? "medium" : "wide") !== "none" && (
+          <aside
+            className="sources-panel"
+            data-presentation={splitPresentation(split, mediumRegime ? "medium" : "wide")}
+          >
+            {split.open === "conversation" ? (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <h3>
+                    {boot.conversations.find((c) => c.id === split.ref)?.title ||
+                      P("untitledChat")}
+                  </h3>
+                  <button onClick={closeSplitSurface} aria-label="close">
+                    <Icon name="close" size={20} />
+                  </button>
+                </div>
+                <span className="section-label">{P("splitReadBeside")}</span>
+                <div className="split-turns">
+                  {(boot.conversations.find((c) => c.id === split.ref)?.turns ?? []).map(
+                    (t, j) => (
+                      <div key={j} className={t.role === "user" ? "turn-user" : "turn-assistant"}>
+                        <div className="bubble">{t.text}</div>
+                      </div>
+                    ),
+                  )}
+                </div>
+              </>
+            ) : panelSource ? (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <h3>{panelSource.label ?? panelSource.title}</h3>
+                  <button onClick={closeSplitSurface} aria-label="close">
+                    <Icon name="close" size={20} />
+                  </button>
+                </div>
+                <span className="section-label">{P("sourcesLabel")}</span>
+                {panelSource.pageHeader && <div className="section-label">{panelSource.pageHeader}</div>}
+                <div className="passage">{panelSource.pageText ?? panelSource.body}</div>
+                {panelSource.truncated && <span className="truncated-note">…</span>}
+              </>
+            ) : null}
           </aside>
         )}
       </div>
@@ -2037,7 +3009,14 @@ function ChatView({
           <Icon name="chev-down" size={20} />
         </button>
       )}
-      <div className="composer-zone">
+      <div
+        className="composer-zone"
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          e.preventDefault();
+          void addDroppedFiles(Array.from(e.dataTransfer.files ?? []));
+        }}
+      >
         <div className="composer-column">
           {turns.length === 0 && ideas.length > 0 && (
             <div className="ideas-row">
@@ -2127,6 +3106,56 @@ function ChatView({
               }}
             />
           )}
+          {chipEntries.length > 0 && (
+            <div className="chip-row">
+              {chipEntries.map(({ chip }) => (
+                <span key={chip.id} className="attachment-chip">
+                  <Icon name="knowledge" size={14} /> {chip.name}
+                  <button
+                    onClick={() => removeChip(chip.id)}
+                    aria-label={P("attachmentRemove")}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          {dropNote && <div className="drop-note">{dropNote}</div>}
+          {findOpen && (
+            <div className="find-bar">
+              <input
+                ref={findInputRef}
+                value={findQuery}
+                placeholder={P("findPlaceholder")}
+                onChange={(e) => {
+                  setFindQuery(e.target.value);
+                  setFindIdx(0);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    stepFind(e.shiftKey ? -1 : 1);
+                  }
+                  if (e.key === "Escape") setFindOpen(false);
+                }}
+              />
+              <span className="find-count">
+                {findQuery.trim()
+                  ? `${findMatches.length > 0 ? Math.min(findIdx, findMatches.length - 1) + 1 : 0}/${findMatches.length}`
+                  : ""}
+              </span>
+              <button onClick={() => stepFind(-1)} aria-label={P("findPrevious")}>
+                ↑
+              </button>
+              <button onClick={() => stepFind(1)} aria-label={P("findNext")}>
+                ↓
+              </button>
+              <button onClick={() => setFindOpen(false)} aria-label={P("findClose")}>
+                ×
+              </button>
+            </div>
+          )}
           <div className="composer-toggles">
             <button
               className={`chip-toggle${research ? " on" : ""}`}
@@ -2146,14 +3175,44 @@ function ChatView({
               ref={composerRef}
               rows={1}
               value={draft}
+              data-composer="true"
               placeholder={C("inputPlaceholder")}
               onChange={(e) => setDraft(e.target.value)}
+              onPaste={handlePaste}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void send(draft);
+                if (e.key === "End" && e.ctrlKey) {
+                  scrollToEnd();
+                  return;
                 }
-                if (e.key === "End" && e.ctrlKey) scrollToEnd();
+                // E11 (paso 1): Intro lo decide el mapa, en
+                // la posición vigente del ajuste de envío y
+                // con la precedencia de la emergencia: enviar,
+                // saltar de línea o enviar la emergencia son
+                // las tres salidas del resolvedor; el salto
+                // y el cursor son el gesto propio del texto.
+                const action = resolveShortcut(
+                  {
+                    key: e.key,
+                    ctrlKey: e.ctrlKey,
+                    shiftKey: e.shiftKey,
+                    altKey: e.altKey,
+                    metaKey: e.metaKey,
+                  },
+                  {
+                    generating: sending,
+                    emergencyPill: sending,
+                    sheetOpen: false,
+                    inComposer: true,
+                    sendOnEnter: boot.sendOnEnter ?? true,
+                  },
+                );
+                if (action?.kind === "send") {
+                  e.preventDefault();
+                  sendFromComposer();
+                } else if (action?.kind === "emergency-send") {
+                  e.preventDefault();
+                  void emergencyNow();
+                }
               }}
             />
             {(boot.voiceInputEnabled ?? true) && voiceAvailable ? (
@@ -2184,7 +3243,7 @@ function ChatView({
                 <Icon name="stop" size={20} />
               </button>
             ) : (
-              <button className="send-box" onClick={() => void send(draft)} title={P("send")}>
+              <button className="send-box" onClick={() => sendFromComposer()} title={P("send")}>
                 <Icon name="send" size={20} />
               </button>
             )}
@@ -2456,10 +3515,12 @@ function LibraryView({
   boot,
   onGuideExample,
   learnSignal,
+  guideLink,
 }: {
   boot: Boot;
   onGuideExample: (text: string) => void;
   learnSignal: number;
+  guideLink?: { id: string; seq: number } | null;
 }) {
   const s = boot.strings as Strings;
   const P = (k: string) => lookup(s, "pcSurface", k);
@@ -2522,7 +3583,12 @@ function LibraryView({
           </div>
         </div>
         <LibraryDocsSection boot={boot} />
-        <LearnSection boot={boot} onGuideExample={onGuideExample} learnSignal={learnSignal} />
+        <LearnSection
+          boot={boot}
+          onGuideExample={onGuideExample}
+          learnSignal={learnSignal}
+          guideLink={guideLink}
+        />
       </div>
     </div>
   );
@@ -2873,10 +3939,12 @@ function LearnSection({
   boot,
   onGuideExample,
   learnSignal,
+  guideLink,
 }: {
   boot: Boot;
   onGuideExample: (text: string) => void;
   learnSignal: number;
+  guideLink?: { id: string; seq: number } | null;
 }) {
   const s = boot.strings as Strings;
   const L = (k: string) => lookup(s, "library", k);
@@ -2886,6 +3954,21 @@ function LearnSection({
   useEffect(() => {
     setOpenId(null);
   }, [learnSignal]);
+  // E11 (paso 7): el aterrizaje de un enlace nido://guia/:
+  // la lección nombrada se abre en su sitio, como si la
+  // persona la hubiera tocado en el índice.
+  useEffect(() => {
+    if (!guideLink || !guide) return;
+    for (const m of guide.modules) {
+      if (m.lessons.some((lesson) => lesson.id === guideLink.id)) {
+        setOpenId(guideLink.id);
+        const key = `${m.id}.${guideLink.id}`;
+        setVisited((v) => (v.includes(key) ? v : [...v, key]));
+        void window.nido.guideMark(key).catch(() => undefined);
+        break;
+      }
+    }
+  }, [guideLink, guide]);
   // La lectura de la lección entera (paso 2 de E9).
   const speechAvailable = useSpeechAvailable();
   const { readingId, toggleRead } = useReading(boot.prefs.lang);
@@ -3058,6 +4141,17 @@ function AgendaView({ boot, contactId, noticesSignal }: { boot: Boot; contactId:
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [eventDraft, setEventDraft] = useState<EventDraft | null>(null);
   const [contactDraft, setContactDraft] = useState<ContactDraft | null>(null);
+  // Puerta .ics/.vcf: la vista previa de una importación
+  // espera la confirmación de la persona (la regla R4:
+  // nada se guarda sin ver el resumen y aprobarlo).
+  const [importPreview, setImportPreview] = useState<{
+    kind: "ics" | "vcf";
+    token: string | null;
+    summary: AgendaImportSummary;
+  } | null>(null);
+  const [importNote, setImportNote] = useState<string | null>(null);
+  const icsInputRef = useRef<HTMLInputElement>(null);
+  const vcfInputRef = useRef<HTMLInputElement>(null);
   const now = new Date();
   const [cursor, setCursor] = useState({ y: now.getFullYear(), m: now.getMonth() });
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
@@ -3180,6 +4274,136 @@ function AgendaView({ boot, contactId, noticesSignal }: { boot: Boot; contactId:
     }
   };
 
+  // Puerta .ics/.vcf: elegir el fichero enseña primero
+  // el resumen; Guardar es la confirmación que guarda
+  // exactamente lo anunciado. Exportar compone el
+  // fichero entero de la clase y lo guarda donde la
+  // persona diga, por los canales de guardado de la casa.
+  const pickImportFile = async (kind: "ics" | "vcf", files: FileList | null) => {
+    const f = files?.[0];
+    if (!f) return;
+    setImportNote(null);
+    const p = window.nido.docFilePath(f);
+    if (!p) return;
+    const r = await window.nido.agendaImportPreview(kind, p);
+    if (!r.ok || !r.summary) {
+      setImportPreview(null);
+      setImportNote(AG("importUnreadable"));
+      return;
+    }
+    setImportPreview({ kind, token: r.token ?? null, summary: r.summary });
+  };
+
+  const confirmImport = async () => {
+    if (!importPreview || !importPreview.token) return;
+    const r = await window.nido.agendaImportCommit(importPreview.kind, importPreview.token);
+    setImportPreview(null);
+    if (r.ok) {
+      setImportNote(fill(AG("importDone"), { n: r.inserted ?? 0 }));
+      await load();
+    }
+  };
+
+  const exportAgendaFile = async (kind: "ics" | "vcf") => {
+    const r = await window.nido.agendaExport(kind);
+    if (!r.ok || r.content === undefined) return;
+    const d = await window.nido.exportSaveDialog({
+      defaultName: r.defaultName ?? (kind === "ics" ? "nido-calendario.ics" : "nido-contactos.vcf"),
+    });
+    if (d.ok && d.path) {
+      await window.nido.exportWrite({ path: d.path, content: r.content });
+      setImportNote(fill(AG("exportDone"), { path: d.path }));
+    }
+  };
+
+  const importSummaryLines = (sp: { kind: "ics" | "vcf"; summary: AgendaImportSummary }): string[] => {
+    const sm = sp.summary;
+    const lines: string[] = [];
+    if (sm.rejectedCode || sm.rejectedText) {
+      const key =
+        sm.rejectedCode === "too-large"
+          ? "importRejectedTooLarge"
+          : sm.rejectedCode === "line-too-long"
+            ? "importRejectedLineTooLong"
+            : sm.rejectedCode === "too-many"
+              ? "importRejectedTooMany"
+              : null;
+      lines.push(key ? AG(key) : (sm.rejectedText ?? AG("importUnreadable")));
+      return lines;
+    }
+    lines.push(
+      fill(AG(sp.kind === "ics" ? "importCountsEvents" : "importCountsContacts"), {
+        enter: sm.enter,
+        total: sm.total,
+        already: sm.alreadyPresent,
+      }),
+    );
+    if (sp.kind === "ics" && sm.recurring > 0) lines.push(fill(AG("importRecurring"), { n: sm.recurring }));
+    const namedLine = (group: AgendaImportNamedGroup, key: string) => {
+      if (group.count <= 0) return;
+      const shown = group.names.slice(0, 3).join(", ");
+      const rest = group.count - Math.min(3, group.names.length);
+      lines.push(fill(AG(key), { names: rest > 0 ? `${shown} +${rest}` : shown }));
+    };
+    if (sm.named) {
+      namedLine(sm.named.exdate, "importNamedExdate");
+      namedLine(sm.named.valarm, "importNamedValarm");
+      namedLine(sm.named.unboundedRrule, "importNamedUnbounded");
+      namedLine(sm.named.tzid, "importNamedTzid");
+      if (sm.named.withoutUid > 0) lines.push(fill(AG("importWithoutUid"), { n: sm.named.withoutUid }));
+      if (sm.named.truncatedFields > 0) lines.push(fill(AG("importTruncated"), { n: sm.named.truncatedFields }));
+    }
+    for (const d of sm.discarded) {
+      const key =
+        d.code === "property-too-large"
+          ? "importDiscardProperty"
+          : d.code === "event-no-start"
+            ? "importDiscardNoStart"
+            : d.code === "event-start-out-of-subset"
+              ? "importDiscardBadStart"
+              : d.code === "event-too-many-occurrences"
+                ? "importDiscardTooManyOccurrences"
+                : d.code === "recurrence-out-of-subset"
+                  ? "importDiscardRecurrence"
+                  : d.code === "photo-not-stored"
+                    ? "importDiscardPhoto"
+                    : d.code === "card-no-name"
+                      ? "importDiscardNoName"
+                      : null;
+      if (!key) {
+        lines.push(d.text);
+      } else if (key === "importDiscardProperty") {
+        lines.push(fill(AG(key), { prop: d.prop ?? "", name: d.label ?? "" }));
+      } else if (key === "importDiscardNoName") {
+        lines.push(AG(key));
+      } else {
+        lines.push(fill(AG(key), { name: d.label ?? "" }));
+      }
+    }
+    return lines;
+  };
+
+  const importPanel = importPreview && (
+    <div className="card">
+      <h3>{AG(importPreview.kind === "ics" ? "importTitleEvents" : "importTitleContacts")}</h3>
+      <ul className="lib-docs-files">
+        {importSummaryLines(importPreview).map((l, i) => (
+          <li key={`${i}-${l}`}>{l}</li>
+        ))}
+      </ul>
+      <div style={{ display: "flex", gap: 6 }}>
+        {importPreview.token && (
+          <button className="btn primary" onClick={() => void confirmImport()}>
+            {AG("importSave")}
+          </button>
+        )}
+        <button className="btn" onClick={() => setImportPreview(null)}>
+          {AG("importCancel")}
+        </button>
+      </div>
+    </div>
+  );
+
   const remove = async (kind: "ev" | "ct", id: string) => {
     const r = kind === "ev" ? await window.nido.agendaEventDelete(id) : await window.nido.agendaContactDelete(id);
     if (r.ok) {
@@ -3235,6 +4459,29 @@ function AgendaView({ boot, contactId, noticesSignal }: { boot: Boot; contactId:
             </button>
           </div>
         </div>
+
+        {importPanel}
+        {importNote && <p>{importNote}</p>}
+        <input
+          ref={icsInputRef}
+          type="file"
+          accept=".ics"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            void pickImportFile("ics", e.target.files);
+            e.target.value = "";
+          }}
+        />
+        <input
+          ref={vcfInputRef}
+          type="file"
+          accept=".vcf"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            void pickImportFile("vcf", e.target.files);
+            e.target.value = "";
+          }}
+        />
 
         {!residentDecidedLocal &&
           (data?.notices ?? []).some((n) => n.state === "armed" || n.state === "snoozed") && (
@@ -3338,6 +4585,14 @@ function AgendaView({ boot, contactId, noticesSignal }: { boot: Boot; contactId:
                 >
                   {AG("newEvent")}
                 </button>
+                <span style={{ display: "flex", gap: 6 }}>
+                  <button className="btn" onClick={() => icsInputRef.current?.click()}>
+                    {AG("importEvents")}
+                  </button>
+                  <button className="btn" onClick={() => void exportAgendaFile("ics")}>
+                    {AG("exportFile")}
+                  </button>
+                </span>
               </div>
               {eventDraft && (
                 <div>
@@ -3445,6 +4700,14 @@ function AgendaView({ boot, contactId, noticesSignal }: { boot: Boot; contactId:
               >
                 {AG("newContact")}
               </button>
+              <span style={{ display: "flex", gap: 6 }}>
+                <button className="btn" onClick={() => vcfInputRef.current?.click()}>
+                  {AG("importContacts")}
+                </button>
+                <button className="btn" onClick={() => void exportAgendaFile("vcf")}>
+                  {AG("exportFile")}
+                </button>
+              </span>
             </div>
             {contactDraft && (
               <div>
@@ -3964,6 +5227,16 @@ function MemoryView({ boot }: { boot: Boot }) {
 
 const SETTINGS_TABS = ["security", "tone", "models", "knowledge", "appearance", "language", "voice", "memory", "notices", "about"] as const;
 
+// E11 (paso 6): los nombres de los cinco escalones de
+// tamaño, en el grupo pcSurface de los locales.
+const FONT_STEP_LABELS: Record<string, string> = {
+  small: "fontStepSmall",
+  compact: "fontStepCompact",
+  standard: "fontStepStandard",
+  large: "fontStepLarge",
+  "extra-large": "fontStepExtraLarge",
+};
+
 const PERSONALITY_IDS = ["succinct", "detailed", "summary", "custom"] as const;
 
 /**
@@ -4138,6 +5411,200 @@ function VoiceSection({ boot, refresh }: { boot: Boot; refresh: () => Promise<vo
   );
 }
 
+// ---------------------------------------------------------------------
+// E11 (O-1·E11) · El respaldo y la rotación en Seguridad,
+// dentro de la sesión de la bóveda: dos gestos expresos
+// de la persona y ninguno más. El respaldo pide su
+// contraseña propia (distinta de la de la bóveda) y el
+// destino en el diálogo de guardar; la rotación pide la
+// credencial otra vez y su confirmación, y termina en
+// reinicio: se ejecuta al desbloquear, antes de abrir
+// ninguna base. Con la bóveda bloqueada la tarjeta ni se
+// ofrece (la monta solo la sesión abierta).
+// ---------------------------------------------------------------------
+
+function VaultBackupCard({
+  P,
+  rotationOutcome,
+}: {
+  P: (k: string) => string;
+  rotationOutcome: "done" | "recovered" | "failed" | null;
+}) {
+  const [backupPassword, setBackupPassword] = useState("");
+  const [backupNote, setBackupNote] = useState<string | null>(null);
+  const [rotatePassword, setRotatePassword] = useState("");
+  const [rotateConfirm, setRotateConfirm] = useState(false);
+  const [rotateNote, setRotateNote] = useState<string | null>(null);
+
+  const doExport = async () => {
+    if (backupPassword.length < 8) {
+      setBackupNote(P("vaultBackupPasswordShort"));
+      return;
+    }
+    const d = await window.nido.exportSaveDialog({ defaultName: "nido-respaldo.nidbackup" });
+    if (!d.ok || !d.path) return; // cancelado: no se escribe nada
+    const r = await window.nido.backupExport({
+      destPath: d.path,
+      backupPassword,
+    });
+    if (r.ok) {
+      setBackupPassword("");
+      setBackupNote(fill(P("vaultBackupDone"), { path: d.path }));
+    } else {
+      setBackupNote(r.message ?? P("vaultBackupFailed"));
+    }
+  };
+
+  const doRotate = async () => {
+    const r = await window.nido
+      .vaultRotateRequest({ password: rotatePassword })
+      .catch(() => null);
+    // Si la app no salió, la petición fue rechazada.
+    if (r && !r.ok) setRotateNote(P("vaultRotateReauthFailed"));
+  };
+
+  return (
+    <div className="card vault-backup-card">
+      <h3>{P("vaultBackupTitle")}</h3>
+      <p>{P("vaultBackupBody")}</p>
+      <div className="field">
+        <span>{P("vaultBackupPassword")}</span>
+        <input
+          type="password"
+          value={backupPassword}
+          onChange={(e) => setBackupPassword(e.target.value)}
+          autoComplete="new-password"
+        />
+      </div>
+      <button className="btn" onClick={() => void doExport()}>
+        {P("vaultBackupExport")}
+      </button>
+      {backupNote && <p>{backupNote}</p>}
+      <h3>{P("vaultRotateTitle")}</h3>
+      <p>{P("vaultRotateBody")}</p>
+      {rotationOutcome === "done" && <p>{P("vaultRotateDone")}</p>}
+      {rotationOutcome === "recovered" && <p>{P("vaultRotateRecovered")}</p>}
+      {rotationOutcome === "failed" && <p>{P("vaultRotateFailed")}</p>}
+      <div className="field">
+        <span>{P("vaultRotatePassword")}</span>
+        <input
+          type="password"
+          value={rotatePassword}
+          onChange={(e) => setRotatePassword(e.target.value)}
+          autoComplete="current-password"
+        />
+      </div>
+      <div className="row-line">
+        <span>{P("vaultRotateConfirm")}</span>
+        <input
+          type="checkbox"
+          checked={rotateConfirm}
+          onChange={(e) => setRotateConfirm(e.target.checked)}
+        />
+      </div>
+      <button
+        className="btn"
+        disabled={!rotateConfirm || rotatePassword.length === 0}
+        onClick={() => void doRotate()}
+      >
+        {P("vaultRotateButton")}
+      </button>
+      {rotateNote && <p>{rotateNote}</p>}
+    </div>
+  );
+}
+
+/** La mitad de historial de la tarjeta de permisos (O-12): lo
+ * que el agente hizo, leído del historial guardado por su canal,
+ * con el deshacer de lo que creó (nota o recordatorio) tras la
+ * confirmación en línea de la casa y el borrado del historial
+ * entero. Es la mitad que la tarjeta del móvil ya tenía y que
+ * en PC faltaba porque no existía el almacén; la cura O-12 lo
+ * porta y esta pieza lo enseña. */
+function AgentHistory({ s }: { s: Strings }) {
+  const H = (k: string) => lookup(s, "agentPermissions", k);
+  const [actions, setActions] = useState<ActionLogRow[] | null>(null);
+  const [confirmUndo, setConfirmUndo] = useState<number | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [undoFailed, setUndoFailed] = useState(false);
+
+  const load = useCallback(async () => {
+    const r = await window.nido.actionLogList();
+    if (r.ok) setActions(r.actions ?? []);
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const undo = async (a: ActionLogRow) => {
+    const r = await window.nido.actionLogUndo(a.id);
+    setConfirmUndo(null);
+    if (r.ok) {
+      setUndoFailed(false);
+      await load();
+    } else {
+      setUndoFailed(true);
+    }
+  };
+
+  const clear = async () => {
+    const r = await window.nido.actionLogClear();
+    setConfirmClear(false);
+    if (r.ok) await load();
+  };
+
+  const canUndo = (a: ActionLogRow) => a.outcome === "executed" && !!a.undo && !a.undone;
+
+  return (
+    <>
+      <h3>{H("historyTitle")}</h3>
+      <p>{H("historyBody")}</p>
+      {actions !== null && actions.length === 0 && <p>{H("historyEmpty")}</p>}
+      {actions?.map((a) => (
+        <div key={a.id} className="row-line">
+          <span>
+            {a.tool}
+            <span style={{ color: "var(--muted)", display: "block", fontSize: "0.85em" }}>
+              {H(`outcome.${a.outcome}`)}
+              {a.confirmed ? ` · ${H("confirmed")}` : ""}
+              {a.undone ? ` · ${H("undone")}` : ""}
+              {` · ${new Date(a.ts).toLocaleString()}`}
+            </span>
+          </span>
+          {canUndo(a) &&
+            (confirmUndo === a.id ? (
+              <span>
+                <span style={{ display: "block", fontSize: "0.85em" }}>
+                  {a.undo?.kind === "note" ? H("undoNoteBody") : H("undoReminderBody")}
+                </span>
+                <button className="btn danger" onClick={() => void undo(a)}>
+                  {H("undo")}
+                </button>
+              </span>
+            ) : (
+              <button aria-label={fill(H("undoLabel"), { tool: a.tool })} onClick={() => setConfirmUndo(a.id)}>
+                {H("undo")}
+              </button>
+            ))}
+        </div>
+      ))}
+      {undoFailed && <p>{H("undoFailed")}</p>}
+      {actions !== null &&
+        actions.length > 0 &&
+        (confirmClear ? (
+          <div className="row-line">
+            <span>{H("clearBody")}</span>
+            <button className="btn danger" onClick={() => void clear()}>
+              {H("clearTitle")}
+            </button>
+          </div>
+        ) : (
+          <button onClick={() => setConfirmClear(true)}>{H("clearTitle")}</button>
+        ))}
+    </>
+  );
+}
+
 function SettingsView({
   boot,
   tab,
@@ -4221,6 +5688,9 @@ function SettingsView({
               </button>
             </div>
           )}
+          {tab === "security" && boot.vault.unlocked && (
+            <VaultBackupCard P={P} rotationOutcome={boot.rotationOutcome ?? null} />
+          )}
           {tab === "tone" && (
             <div className="card">
               <h3>{lookup(s, "personalitySettings", "title")}</h3>
@@ -4270,17 +5740,19 @@ function SettingsView({
           )}
           {tab === "tone" && (
             <div className="card">
-              {/* Los permisos del agente (bloque de cableado, pieza 1):
-                  la mitad de permisos de la tarjeta del móvil, sin su
-                  mitad de historial (en PC no existe actionLogStore:
-                  ausencia hermana con nombre propio, otra pieza). La
-                  lista es la viva del manifiesto (LOCAL_TOOLS) y el
-                  estado es la foto del bootstrap, la misma que la
-                  marca de la guía lee. El interruptor es controlado
-                  por esa foto: al moverlo se escribe por el canal y
-                  se relee el bootstrap; si la escritura vuelve
-                  ok: false, la foto no cambia y el interruptor vuelve
-                  a su estado anterior, sin fingir el cambio. */}
+              {/* La tarjeta del agente entera, como la del móvil:
+                  la mitad de historial (O-12: el almacén guardado
+                  y su deshacer, por los canales nido:action-log-*)
+                  sobre la mitad de permisos (bloque de cableado,
+                  pieza 1). La lista de permisos es la viva del
+                  manifiesto (LOCAL_TOOLS) y el estado es la foto
+                  del bootstrap, la misma que la marca de la guía
+                  lee. El interruptor es controlado por esa foto:
+                  al moverlo se escribe por el canal y se relee el
+                  bootstrap; si la escritura vuelve ok: false, la
+                  foto no cambia y el interruptor vuelve a su
+                  estado anterior, sin fingir el cambio. */}
+              <AgentHistory s={s} />
               <h3>{lookup(s, "agentPermissions", "toolsTitle")}</h3>
               <p>{lookup(s, "agentPermissions", "toolsBody")}</p>
               {LOCAL_TOOLS.map((tool) => {
@@ -4347,17 +5819,34 @@ function SettingsView({
               </div>
               <div className="row-line">
                 <span>{P("fontSize")}</span>
+                <span />
+              </div>
+              {FONT_SCALE_STEPS.map((step) => (
+                <div key={step.id} className="row-line">
+                  <span>{P(FONT_STEP_LABELS[step.id])}</span>
+                  <input
+                    type="radio"
+                    name="font-scale"
+                    checked={(boot.fontScaleStep ?? "standard") === step.id}
+                    onChange={() =>
+                      void window.nido
+                        .settingsSet({ fontScaleStep: step.id })
+                        .then(() => refresh())
+                    }
+                  />
+                </div>
+              ))}
+              <div className="row-line">
+                <span>{P("sendWithEnter")}</span>
                 <input
-                  type="range"
-                  min={1}
-                  max={1.4}
-                  step={0.05}
-                  value={boot.prefs.fontScale}
+                  type="checkbox"
+                  checked={boot.sendOnEnter ?? true}
                   onChange={(e) =>
-                    void window.nido.prefsSet({ fontScale: Number(e.target.value) }).then(() => refresh())
+                    void window.nido.settingsSet({ sendOnEnter: e.target.checked }).then(() => refresh())
                   }
                 />
               </div>
+              <div className="muted">{P("sendWithEnterHint")}</div>
             </div>
           )}
           {tab === "language" && (
@@ -4800,13 +6289,24 @@ function ModelsTab({ boot, refresh }: { boot: Boot; refresh: () => Promise<void>
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<{ id: string; message: string } | null>(null);
+  // El sello de emisión de la guardia de secuencia (AU-2):
+  // cada lectura y cada gesto toman el siguiente número al
+  // emitir, y una respuesta solo escribe si su sello sigue
+  // siendo el vigente al volver. Una foto generada antes de
+  // una operación (la completa del montaje, cuyo refresh se
+  // encola por delante de la activación del clic) no puede
+  // así enterrar el resultado de la operación aterrizando
+  // después: superada, se descarta en silencio.
+  const applySeq = useRef(0);
   const models = data?.models ?? boot.models;
   const recommendation = data?.recommendation ?? boot.recommendation;
 
   const pull = useCallback(
     async (light: boolean) => {
+      const seq = ++applySeq.current;
       const apply = (r: { ok: boolean; models: ModelInfo[]; recommendation: Boot["recommendation"] }) => {
-        if (r.ok) setData({ models: r.models, recommendation: r.recommendation });
+        if (r.ok && seq === applySeq.current)
+          setData({ models: r.models, recommendation: r.recommendation });
       };
       try {
         apply(light ? await window.nido.modelsListLight() : await window.nido.modelsList());
@@ -4829,16 +6329,43 @@ function ModelsTab({ boot, refresh }: { boot: Boot; refresh: () => Promise<void>
     [],
   );
   useEffect(() => {
+    // Al montar llegan las dos formas (AU-1): la ligera
+    // aterriza en milisegundos con las tarjetas vivas — si
+    // hay una transferencia en curso empezada antes de
+    // entrar, su fila entra en «downloading» y el sondeo se
+    // arma — y la completa aterriza cuando la cola se
+    // libera, con el censo fresco, que es su papel. Pedir
+    // solo la completa dejaba a la vista recién montada con
+    // la foto del arranque hasta que la transferencia
+    // terminara, porque la completa espera tras la cola
+    // serie que la descarga entera ocupa.
+    void pull(true);
     void pull(false);
   }, [pull]);
-  const anyDownloading = models.some((m) => m.state === "downloading");
+  // El sondeo se arma también con el gesto en vuelo
+  // (busy), no solo con la fila ya en «downloading»:
+  // armarlo solo con la fila descubierta es el huevo y la
+  // gallina de AU-1, porque la fila solo llega a decir
+  // «downloading» si alguien lee el almacén vivo mientras
+  // la transferencia corre, y el gesto es lo primero que
+  // sabe que corre. La pierna cubre también la carga y el
+  // descarte: son lecturas ligeras de solo lectura, sin
+  // censo ni cola, inofensivas ahí y útiles en el
+  // descarte, que sí espera tras la cola.
+  const anyDownloading =
+    busy !== null || models.some((m) => m.state === "downloading");
   useEffect(() => {
     if (!anyDownloading) return;
     const t = setInterval(() => void pull(true), 600);
     return () => clearInterval(t);
   }, [anyDownloading, pull]);
 
-  const applyModels = (r: { models?: ModelInfo[] }) => {
+  const applyModels = (r: { models?: ModelInfo[] }, seq: number) => {
+    // Con sello viejo, la vuelta es en silencio y entera
+    // (AU-2): ni escribe los datos ni dispara el pull de la
+    // rama sin modelos, porque una emisión más nueva ya
+    // está en vuelo y traerá la verdad.
+    if (seq !== applySeq.current) return;
     if (r.models) {
       setData((d) => ({
         models: r.models as ModelInfo[],
@@ -4848,23 +6375,40 @@ function ModelsTab({ boot, refresh }: { boot: Boot; refresh: () => Promise<void>
   };
   const download = async (id: string) => {
     setBusy(id);
-    const r = await window.nido.modelDownload(id);
+    const seq = ++applySeq.current;
+    // La promesa se captura y la ligera se pide en el
+    // acto, antes del await (AU-1): la llamada del canal
+    // no responde hasta que la transferencia entera
+    // termina, y esperar su asentamiento antes de leer
+    // nada dejaba la fila en «sin descargar» durante
+    // minutos, sin barra ni pausa. La semántica de
+    // asentamiento no cambia: misma espera, mismo
+    // applyModels al final. Es la forma del móvil
+    // traducida a esta carcasa: allí el gesto pone la
+    // fila en el almacén observable en síncrono; aquí,
+    // la vista pide la foto viva del almacén del
+    // principal en el mismo gesto.
+    const pending = window.nido.modelDownload(id);
+    void pull(true);
+    const r = await pending;
     setBusy(null);
-    applyModels(r);
+    applyModels(r, seq);
   };
   const discard = async (id: string) => {
     setBusy(id);
+    const seq = ++applySeq.current;
     const r = await window.nido.modelDiscard(id);
     setBusy(null);
-    applyModels(r);
+    applyModels(r, seq);
   };
   const load = async (id: string, retryLess: boolean) => {
     setBusy(id);
+    const seq = ++applySeq.current;
     const r = retryLess ? await window.nido.modelLoadRetryLess(id) : await window.nido.modelLoad(id);
     setBusy(null);
     if (r.ok) {
       setLoadError(null);
-      applyModels(r);
+      applyModels(r, seq);
       void refresh();
     } else setLoadError({ id, message: r.error ?? r.reason ?? "" });
   };
@@ -5242,48 +6786,114 @@ function Palette({
   go,
   openSettings,
   canWrite,
+  runAction,
+  openGuide,
+  openPack,
 }: {
   boot: Boot;
   close: () => void;
   go: (sec: Section, convId?: string) => void;
   openSettings: (tab: string) => void;
   canWrite: boolean;
+  runAction: (id: string) => void;
+  openGuide: (lessonId: string) => void;
+  openPack: () => void;
 }) {
   const s = boot.strings as Strings;
   const P = (k: string) => lookup(s, "pcSurface", k);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
-  // Diacritic folding on both sides: the search meets the person,
-  // not only the exact accented spelling of the active language.
-  const fold = (x: string) =>
-    x.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  const q = fold(query.trim());
-  const hit = (label: string) => q === "" || fold(label).includes(q);
-  type Item = { key: string; label: string; icon: string; run: () => void };
-  const items: Item[] = [];
-  for (const n of NAV) {
-    if (hit(P(n.key))) items.push({ key: "nav-" + n.id, label: P(n.key), icon: n.icon, run: () => go(n.id) });
-  }
-  for (const c of boot.conversations) {
-    const label = c.title || P("untitledChat");
-    if (hit(label)) items.push({ key: "conv-" + c.id, label, icon: "chat", run: () => go("chat", c.id) });
-  }
-  // Settings tabs WITHOUT a section twin: "Modelos" and "Memoria" used
-  // to appear twice under one label with two different destinations.
-  // They live as sections; the palette lists each destination once.
+  // E11 (paleta M-2): el índice se compone en la pieza
+  // (paleta.ts) desde las mismas fuentes de las demás
+  // superficies: las acciones salen de la hoja de atajos
+  // (con su pista en la posición vigente), las secciones
+  // de la barra real, las pestañas sin gemela de sección
+  // (con la de voz, que la semilla no listaba), las
+  // lecciones del árbol de la guía y los paquetes de la
+  // biblioteca. La búsqueda es la léxica de la pieza.
   const tabNames: Record<string, string> = {
     security: P("security"),
     tone: lookup(s, "personalitySettings", "title"),
+    models: P("models"),
     knowledge: P("packsTab"),
     appearance: P("appearance"),
     language: P("language"),
+    voice: lookup(s, "voiceSettings", "title"),
+    memory: P("navMemory"),
     notices: lookup(s, "noticesSettings", "title"),
     about: P("about"),
   };
-  for (const t of SETTINGS_TABS) {
-    if (t === "models" || t === "memory") continue;
-    if (hit(tabNames[t])) items.push({ key: "tab-" + t, label: tabNames[t], icon: "settings", run: () => { openSettings(t); close(); } });
-  }
+  const guideTree = (s as Record<string, unknown>).guide as GuideTree | undefined;
+  const bootLibrary = (
+    boot as Boot & {
+      library?: { packs: { id: string; name: string; outdated: boolean }[]; factCount: number };
+    }
+  ).library;
+  const composed = composePaletteItems({
+    sections: NAV.map((n) => ({ id: n.id, label: P(n.key), icon: n.icon })),
+    conversations: boot.conversations.map((c) => ({
+      id: c.id,
+      title: c.title || P("untitledChat"),
+    })),
+    settingsTabs: SETTINGS_TABS.map((t) => ({ id: t, label: tabNames[t] ?? t })),
+    actions: shortcutSheetRows(boot.sendOnEnter ?? true)
+      .filter((r) => r.inPalette)
+      .map((r) => ({ id: r.id, label: P(r.labelKey), hint: r.keys })),
+    lessons: (guideTree?.modules ?? []).flatMap((m) =>
+      m.lessons.map((l) => ({ id: l.id, title: l.title })),
+    ),
+    packs: bootLibrary
+      ? bootLibrary.packs.map((p) => ({ id: p.id, name: p.name }))
+      : PACK_CATALOG.map((p) => ({ id: p.id, name: p.label })),
+    vaultUnlocked: boot.vault.unlocked,
+  });
+  const found = searchPaletteItems(composed, query);
+  const iconFor = (it: PaletteItem): string => {
+    switch (it.cls) {
+      case "section":
+        return NAV.find((n) => n.id === it.target)?.icon ?? "menu";
+      case "conversation":
+        return "chat";
+      case "settings":
+        return "settings";
+      case "guide":
+        return "ideas";
+      case "pack":
+        return "knowledge";
+      default:
+        return "compass";
+    }
+  };
+  const items = found.map((it) => ({
+    key: it.key,
+    label: it.label,
+    hint: it.hint,
+    icon: iconFor(it),
+    run: () => {
+      switch (it.cls) {
+        case "action":
+          runAction(it.target);
+          close();
+          break;
+        case "section":
+          go(it.target as Section);
+          break;
+        case "conversation":
+          go("chat", it.target);
+          break;
+        case "settings":
+          openSettings(it.target);
+          close();
+          break;
+        case "guide":
+          openGuide(it.target);
+          break;
+        case "pack":
+          openPack();
+          break;
+      }
+    },
+  }));
   const idx = Math.min(active, Math.max(0, items.length - 1));
   return (
     <div className="palette-veil" onClick={close}>
@@ -5303,6 +6913,7 @@ function Palette({
         {items.map((it, i) => (
           <button key={it.key} className={"palette-item" + (i === idx ? " active" : "")} onMouseEnter={() => setActive(i)} onClick={it.run}>
             <Icon name={it.icon} size={20} /> {it.label}
+            {it.hint && <span className="palette-hint">{it.hint}</span>}
           </button>
         ))}
         {items.length === 0 && <p style={{ color: "var(--muted)" }}>{P("paletteEmpty")}</p>}

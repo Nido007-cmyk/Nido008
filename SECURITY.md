@@ -92,7 +92,7 @@ will not pursue legal action over the research itself.
 
 ## The trust chain for downloads and packs
 
-Releases are published with a `.sha256` file so you can verify the
+Releases will be published with a `.sha256` file so you can verify the
 installer before you run it. Knowledge packs are verified the same
 way inside the app, and a pack whose hash or signature does not
 match is refused, never opened.

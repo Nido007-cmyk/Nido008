@@ -249,10 +249,15 @@ describe("toolForAction — cada acción usa una herramienta del manifiesto", ()
       { kind: "nidoInbox", lang: "es" },
       { kind: "nidoCode", lang: "es" },
       { kind: "nidoTasks", lang: "es" },
-      { kind: "openLink", url: "https://a.b", lang: "es" },
       { kind: "pickFile", analyze: false, lang: "es" },
     ];
-    for (const a of samples) expect(names.has(toolForAction(a))).toBe(true);
+    // openLink ya no entra en este mapa: con la cura O-1 su
+    // herramienta salió del catálogo y toolForAction devuelve null
+    // (la acción la responde el enrutador). Su contrato vive en
+    // openAppRetired.test.ts.
+    // toolForAction puede devolver null (openLink, cura O-1); las
+    // muestras no lo incluyen, y un null caería fuera del conjunto.
+    for (const a of samples) expect(names.has(toolForAction(a) ?? "")).toBe(true);
   });
 });
 

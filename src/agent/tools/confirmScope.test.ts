@@ -66,24 +66,7 @@ describe("P-3: la frase de alcance de cada herramienta sensible", () => {
       "nido_pair",
       "nido_reject_task",
       "nido_send_message",
-      "open_app",
     ]);
-  });
-
-  it("open_app: el alcance nombra el destino exacto y cambia con él", async () => {
-    const a = await capture(buildToolHandlers(), "open_app", { link: "https://example.org/uno" });
-    expect(a.scope).toBeTruthy();
-    expect(a.scope).toContain("example.org/uno");
-    const b = await capture(buildToolHandlers(), "open_app", { link: "https://example.org/dos" });
-    expect(b.scope).toContain("example.org/dos");
-    expect(b.scope).not.toBe(a.scope);
-  });
-
-  it("open_app con destino inválido: el alcance dice que no se abrirá nada", async () => {
-    const a = await capture(buildToolHandlers(), "open_app", { link: "javascript:alert(1)" });
-    expect(a.scope).toBeTruthy();
-    expect(a.scope!.length).toBeGreaterThan(5);
-    expect(a.scope).not.toContain("javascript:");
   });
 
   it("create_calendar_event: el alcance nombra el evento y su hora", async () => {

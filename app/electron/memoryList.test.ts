@@ -241,3 +241,53 @@ describe("§2 · la vista de Memoria: la lista y el borrado por los canales", ()
     expect(still.some((f) => f.id === fact.id)).toBe(true);
   });
 });
+
+describe("A-21 · la aceptación de H-01: la memoria sobrevive al reinicio", () => {
+  // El reinicio de la aceptación: la bóveda se cierra, los
+  // servicios se instalan de nuevo sobre el mismo userData y la
+  // bóveda se abre con la misma contraseña. Lo que la lista
+  // enseñe después solo puede venir de la base cifrada: si la
+  // memoria viviera en el proceso, aquí no habría nada.
+  async function reiniciarServicios(): Promise<void> {
+    await call("nido:vault-lock");
+    await installServices();
+    const un = await call("nido:vault-unlock", { password: PASSWORD });
+    expect(un.ok).toBe(true);
+  }
+
+  it("la lista tras el reinicio trae lo guardado antes de reiniciar", async () => {
+    const fact = await memoryStore.saveFact({ content: "Mi color favorito es el verde" });
+    const note = await memoryStore.saveNote({ title: "Taller", body: "El taller cierra los lunes" });
+    await reiniciarServicios();
+    const r = await callList();
+    expect(r.ok).toBe(true);
+    expect(r.facts?.some((f) => f.id === fact.id)).toBe(true);
+    expect(r.notes?.some((n) => n.id === note.id)).toBe(true);
+  }, 120_000);
+
+  it("el borrado tras el reinicio quita la fila y no vuelve en el siguiente", async () => {
+    const reminder = await memoryStore.saveReminder({ text: "Regar las plantas", dueAt: DUE_AT });
+    await reiniciarServicios();
+    const del = await call("nido:memory-delete", { kind: "reminder", id: reminder.id });
+    expect(del.ok).toBe(true);
+    const after = await callList();
+    expect(after.reminders?.some((x) => x.id === reminder.id)).toBe(false);
+    await reiniciarServicios();
+    const after2 = await callList();
+    expect(after2.reminders?.some((x) => x.id === reminder.id)).toBe(false);
+  }, 120_000);
+
+  it("la persona guardada se lee en la lista tras el reinicio", async () => {
+    const person = await memoryStore.savePerson({
+      name: "Carmen Ruiz",
+      relationship: "hermana",
+      notes: "Le gustan los tulipanes",
+    });
+    await reiniciarServicios();
+    const r = await callList();
+    expect(r.ok).toBe(true);
+    const back = r.people?.find((p) => p.id === person.id);
+    expect(back?.name).toBe("Carmen Ruiz");
+    expect(back?.notes).toBe("Le gustan los tulipanes");
+  }, 120_000);
+});

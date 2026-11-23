@@ -4,7 +4,7 @@
  * See LICENSE file for details.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   parseToolCalls,
   stripToolBlocks,
@@ -20,6 +20,24 @@ import {
   type AgentEngine,
   type AgentLoopResult,
 } from "./agentLoop.js";
+import i18n from "../../i18n/index.js";
+import { deviceDefaultLanguage } from "../../models/settings.js";
+
+/**
+ * Reconciliación I18N-2 (con su causa): los dos casos P2.2 de
+ * «runAgentLoop» cobran las respuestas enlatadas en español y
+ * nunca fijaban el idioma. Pasaban porque getUiLocale() caía
+ * por el require perezoso muerto a null y la detección servía
+ * en español; con el módulo i18n del núcleo vivo, getUiLocale()
+ * lee el idioma del módulo, que en el banco nace en el del
+ * dispositivo, y las enlatadas salen en ese idioma. Los dos
+ * casos fijan ahora el idioma del módulo en «es» (la vía que
+ * getUiLocale lee), y este afterEach lo devuelve a su
+ * nacimiento tras cada caso, como en cannedResponses.test.ts.
+ */
+afterEach(() => {
+  i18n.changeLanguage(deviceDefaultLanguage());
+});
 
 describe("prompt y directivas en portugués (F1 M-5 = F9-02)", () => {
   it("buildSystemPrompt en pt presenta a NIDO en portugués", () => {
@@ -168,6 +186,7 @@ describe("runAgentLoop", () => {
   });
 
   it("P2.2: saludo puro se sirve determinístico sin llamar al modelo", async () => {
+    i18n.changeLanguage("es");
     const engine = fakeEngine(["NO DEBERÍA USARSE"]);
     const result = await runAgentLoop("hola", {
       engine,
@@ -180,6 +199,7 @@ describe("runAgentLoop", () => {
   });
 
   it("P2.2: pregunta de identidad se sirve determinística", async () => {
+    i18n.changeLanguage("es");
     const engine = fakeEngine(["NO DEBERÍA USARSE"]);
     const result = await runAgentLoop("¿quién eres?", {
       engine,

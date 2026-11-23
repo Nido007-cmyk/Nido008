@@ -15,14 +15,16 @@
  * abrir, y ese es el texto que su caso afirma. El calendario ya
  * no es de esa clase: desde E7 paso 2 es el calendario real de
  * NIDO sobre la base cifrada, y su sección corre contra una
- * base temporal con su DEK de prueba. El banco es el
- * registro en memoria de DET-11 (memoryStore y el mensajero
- * compartido); cada caso dispone su propio estado con nombres
+ * base temporal con su DEK de prueba. El banco era el
+ * registro en memoria de DET-11; desde la cura H-01 el
+ * memoryStore es el almacén persistente y cada sección con
+ * estado corre sobre su base temporal con su DEK (el mensajero
+ * sigue compartido); cada caso dispone su propio estado con nombres
  * únicos y cobra los ids y las fechas del propio banco, así que
  * ningún caso depende del orden salvo list_notes, que abre la
  * batería con el almacén de notas vacío por construcción.
  */
-import { describe, it, expect, afterEach, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, afterAll, afterEach, beforeAll, beforeEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,6 +58,27 @@ afterEach(() => {
 // ---------------------------------------------------------------- notas
 
 describe("paridad de salidas · notas", () => {
+  // Desde la cura H-01 el almacén de notas es el persistente:
+  // la sección corre sobre una base temporal con su DEK de
+  // prueba, como las de memoria y calendario. El arnés es por
+  // bloque (no por caso) porque los casos de notas comparten
+  // escena entre idiomas: el caso español siembra lo que los
+  // demás leen y borran.
+  let notesDir: string;
+  const NOTES_KEY = randomBytes(32);
+  beforeAll(async () => {
+    await closeDatabase();
+    notesDir = mkdtempSync(join(tmpdir(), "nido-paridad-notas-"));
+    setAppStoreDir(notesDir);
+    setAppStoreDekProvider(() => Buffer.from(NOTES_KEY));
+  });
+  afterAll(async () => {
+    await closeDatabase();
+    setAppStoreDekProvider(null);
+    setAppStoreDir(null);
+    rmSync(notesDir, { recursive: true, force: true });
+  });
+
   const EMPTY: Tri = {
     es: "No hay notas guardadas todavía.",
     en: "There are no saved notes yet.",
@@ -357,25 +380,7 @@ describe("paridad de salidas · memoria y personas", () => {
 
 // ------------------------------------------------------------- Fase B y D
 
-describe("paridad de salidas · abrir, calcular, convertir", () => {
-  const OPEN_FAIL: Record<RouterLang, (u: string) => string> = {
-    es: (u) => `No pude abrir ${u} desde NIDO.`,
-    en: (u) => `I couldn't open ${u} from NIDO.`,
-    pt: (u) => `Não consegui abrir ${u} do NIDO.`,
-  };
-
-  for (const lang of LANGS) {
-    it(`open_app · ${lang}`, async () => {
-      setHandlerLangForTest(lang);
-      const h = H();
-      // Sin react-native en esta casa, el handler sirve su texto de
-      // fallo al abrir: es la acción que el banco puede ejercitar.
-      expect(await h["open_app"]({ link: "https://example.com" })).toBe(
-        OPEN_FAIL[lang]("https://example.com"),
-      );
-    });
-  }
-
+describe("paridad de salidas · calcular, convertir", () => {
   const CALC_NO_EXPR: Tri = {
     es: "Error: falta la expresión a calcular.",
     en: "Error: the expression to calculate is missing.",
@@ -499,21 +504,21 @@ describe("paridad de salidas · calendario, contactos, teléfono, archivo", () =
     });
   }
 
-  const FILE_PREFIX: Tri = {
-    es: "No pude leer el archivo: ",
-    en: "I couldn't read the file: ",
-    pt: "Não consegui ler o arquivo: ",
+  // Cura H-02: el handler ya no muere en el import del módulo
+  // de selección: responde su texto sellado de no disponible,
+  // entero y exacto, sin mensaje interno detrás.
+  const FILE_UNAVAILABLE: Tri = {
+    es: "En esta computadora todavía no puedo abrir el selector de archivos. Importa el documento desde la Biblioteca de NIDO y pídeme que lo use, o pega su texto aquí.",
+    en: "On this computer I can't open the file picker yet. Import the document from NIDO's Library and ask me to use it, or paste its text here.",
+    pt: "Neste computador ainda não consigo abrir o seletor de arquivos. Importe o documento pela Biblioteca do NIDO e peça para eu usá-lo, ou cole o texto dele aqui.",
   };
 
   for (const lang of LANGS) {
     it(`read_picked_file · ${lang}`, async () => {
       setHandlerLangForTest(lang);
       const h = H();
-      // Sin el módulo de selección, el handler sirve su prefijo de
-      // error con el mensaje interno de la importación.
       const out = await h["read_picked_file"]({});
-      expect(out.startsWith(FILE_PREFIX[lang])).toBe(true);
-      expect(out.length).toBeGreaterThan(FILE_PREFIX[lang].length);
+      expect(out).toBe(FILE_UNAVAILABLE[lang]);
     });
   }
 });

@@ -5,7 +5,7 @@
  */
 
 /**
- * T-11 (0.1.99) · P-09 + P-10(a) — superficie honesta de herramientas.
+ * T-11 (0.1.99) · P-09 — superficie honesta de herramientas.
  *
  * - P-09: había handlers registrados que el modelo no podía invocar
  *   (save_person y propose_negotiation no estaban en el manifiesto).
@@ -15,9 +15,6 @@
  *   retira. Y el escritor de skills aprendidas (saveLearnedSkill) no
  *   tiene llamadores en producción: dormancia declarada y fijada aquí
  *   como estado conocido.
- * - P-10(a): el hint del parámetro `link` de open_app decía
- *   «Solo https/http/tel/sms/mailto» y la descripción (y el clasificador)
- *   rechazan http. Quien manda es el clasificador: el hint se corrige.
  */
 import { describe, it, expect, vi } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -96,15 +93,5 @@ describe("P-09: handlers y manifiesto dicen la misma verdad", () => {
     };
     walk(srcRoot);
     expect(callers).toEqual([]);
-  });
-});
-
-describe("P-10(a): el hint de open_app no promete http", () => {
-  it("la descripción del parámetro link no lista http como permitido", () => {
-    const openApp = LOCAL_TOOLS.find((t) => t.name === "open_app")!;
-    const hint = openApp.parameters.link.description;
-    expect(hint).not.toMatch(/https\/http/);
-    expect(hint).toContain("https");
-    expect(openApp.description).toContain("http se rechaza");
   });
 });

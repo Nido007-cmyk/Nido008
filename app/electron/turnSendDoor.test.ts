@@ -56,6 +56,20 @@
  * en memoria del proceso principal y se sella al siguiente
  * desbloqueo), y el borrado de la DEK no se retrasa.
  *
+ * A-U6 cobra el texto de ese par: la letra de la forma (c)
+ * incluye «el texto parcial generado hasta el aborto», y la
+ * punta lo perdía entero en la fachada (la vía sin plantilla
+ * devolvía la cadena vacía por construcción y la de con
+ * plantilla extraía del historial de la sesión, que nunca
+ * contiene la respuesta en vuelo). El arnés registra desde
+ * esta tanda el texto de los chunks por conversación, con
+ * una marca por turno, y las aserciones de los dos casos
+ * vivos de la forma (c) cobran el texto del par retenido
+ * contra lo emitido; un caso nuevo, en su propio bloque,
+ * cobra la parada con el botón, sin bloqueo, asentada en la
+ * misma sesión, con su marca `stopped` leída de la
+ * conversación servida.
+ *
  * Los testigos de la batería son de estado, no de primer
  * token (re-fundación del paso 0 de la pieza del turno
  * perdido al bloquear, sobre el DIAGNOSTICO-TURNSENDDOOR):
@@ -107,6 +121,7 @@ const harness = vi.hoisted(() => ({
   tokens: [] as string[],
   tokenAt: [] as number[],
   tokenCount: 0,
+  chunks: [] as { conversationId: string; chunk: string }[],
   events: [] as string[],
 }));
 
@@ -156,7 +171,7 @@ const CORTA = "¿Cuál es la capital de Francia? Contesta en una frase.";
 
 const event = {
   sender: {
-    send: (channel: string, payload: { conversationId?: string; id?: string }) => {
+    send: (channel: string, payload: { conversationId?: string; id?: string; chunk?: string }) => {
       harness.events.push(
         `${new Date().toISOString()} ${channel}${payload?.conversationId ? `:${payload.conversationId}` : ""}`,
       );
@@ -165,6 +180,13 @@ const event = {
         harness.tokens.push(payload.conversationId);
         harness.tokenAt.push(Date.now());
         harness.tokenCount += 1;
+        // A-U6: el texto de los chunks viaja en el propio
+        // evento; el arnés lo guarda por conversación y en
+        // orden para poder cobrar el texto parcial de un
+        // turno parado contra lo que de verdad se emitió.
+        if (typeof payload.chunk === "string") {
+          harness.chunks.push({ conversationId: payload.conversationId, chunk: payload.chunk });
+        }
       }
       // Sin renderizador no hay quien responda a una petición
       // de confirmación y el turno quedaría colgado antes de
@@ -226,6 +248,39 @@ async function waitFor(cond: () => boolean | Promise<boolean>, timeoutMs: number
 
 const tokensDe = (conversationId: string) =>
   harness.tokens.reduce((n, t) => (t === conversationId ? n + 1 : n), 0);
+
+/** A-U6: la marca de inicio de un turno en el registro de
+ * chunks: se toma justo antes de abrir el turno y corta la
+ * concatenación de ESE turno, para no cobrar como suyo el
+ * texto de una respuesta anterior de la misma conversación. */
+const marcaChunks = () => harness.chunks.length;
+
+/** A-U6: el texto emitido para una conversación desde una
+ * marca: la concatenación, en orden, de los chunks que el
+ * arnés registró para ella desde que el turno empezó. */
+const textoEmitido = (conversationId: string, desde: number) =>
+  harness.chunks
+    .slice(desde)
+    .filter((c) => c.conversationId === conversationId)
+    .map((c) => c.chunk)
+    .join("");
+
+/** A-U6: el cobro del texto parcial de un turno parado. El
+ * texto sellado es el parcial emitido hasta la parada: no
+ * vacío, y prefijo al carácter de lo registrado para ese
+ * turno. Prefijo y no igualdad, por dos medidas de la casa:
+ * la fachada acumula cada chunk ANTES de reenviarlo (todo lo
+ * registrado fue antes acumulado, así que lo sellado no
+ * puede pasar de lo registrado), y una generación abandonada
+ * puede seguir emitiendo tras el asentamiento (la cola
+ * zombi extiende lo registrado más allá de lo sellado). La
+ * igualdad es el caso sin cola. */
+function cobrarParcial(sellado: string | undefined, emitido: string): void {
+  expect(emitido.length).toBeGreaterThan(0);
+  expect(sellado).toBeDefined();
+  expect((sellado as string).length).toBeGreaterThan(0);
+  expect(emitido.startsWith(sellado as string)).toBe(true);
+}
 
 /** La carrera que sustituye a la espera de primer token:
  * sondea en el mismo ciclo el primer token NUEVO de la
@@ -514,6 +569,10 @@ describe("La pieza del turno perdido al bloquear: el par retenido se sella al de
       const previaConv = b0.conversations.find((x) => x.id === "fui10-bloqueo");
       expect(previaConv?.turns.map((t) => t.role)).toEqual(["user", "assistant"]);
       // El turno que queda en vuelo sobre esa conversación.
+      // La marca de A-U6 se toma justo antes de abrirlo: la
+      // concatenación que se cobra es la de este turno, no
+      // la de la respuesta previa de la misma conversación.
+      const marca = marcaChunks();
       const vuelo = abrirTurno({ conversationId: "fui10-bloqueo", text: ENSAYO });
       registroPrevio = vuelo.registro;
       const rama = await esperarGeneracion(vuelo.promise, "fui10-bloqueo", 300_000);
@@ -545,6 +604,10 @@ describe("La pieza del turno perdido al bloquear: el par retenido se sella al de
       expect(conv?.turns.map((t) => t.role)).toEqual(["user", "assistant", "user", "assistant"]);
       expect(conv?.turns[0]?.text).toBe(CORTA);
       expect(conv?.turns[2]?.text).toBe(ENSAYO);
+      // A-U6: el texto del par retenido es el parcial emitido
+      // hasta la parada, no la cadena vacía: la letra de la
+      // forma (c) lo incluye en el resultado parado.
+      cobrarParcial(conv?.turns[3]?.text, textoEmitido("fui10-bloqueo", marca));
     } finally {
       await asentarTurnosAbiertos();
     }
@@ -552,6 +615,7 @@ describe("La pieza del turno perdido al bloquear: el par retenido se sella al de
 
   it("el par sobrevive al bloqueo: la conversación nueva existe en la lista con su par y su título", async () => {
     await esperarQuieto(registroPrevio!.promise, 300_000);
+    const marca = marcaChunks();
     const vuelo = abrirTurno({ conversationId: "fui10-bloqueo-nueva", text: ENSAYO });
     registroPrevio = vuelo.registro;
     try {
@@ -575,6 +639,9 @@ describe("La pieza del turno perdido al bloquear: el par retenido se sella al de
       expect(conv?.title).toBe(ENSAYO.slice(0, 60));
       expect(conv?.turns.map((t) => t.role)).toEqual(["user", "assistant"]);
       expect(conv?.turns[0]?.text).toBe(ENSAYO);
+      // A-U6: también en la conversación nacida con el turno,
+      // el texto sellado del par es el parcial emitido.
+      cobrarParcial(conv?.turns[1]?.text, textoEmitido("fui10-bloqueo-nueva", marca));
     } finally {
       await asentarTurnosAbiertos();
     }
@@ -626,6 +693,53 @@ describe("La pieza del turno perdido al bloquear: el par retenido se sella al de
       expect(bad.ok).toBe(false);
       const un = await call("nido:vault-unlock", { password: PASSWORD });
       expect(un.ok).toBe(true);
+    } finally {
+      await asentarTurnosAbiertos();
+    }
+  }, 900_000);
+});
+
+// ---------------------------------------------------------------------
+// A-U6: la parada con el botón, sin bloqueo. La vía del
+// bloqueo no es la única que perdía el texto: la fachada
+// resolvía la cadena vacía ante cualquier aborto, así que
+// también el gesto corriente de parar una respuesta a mitad
+// dejaba la burbuja en 0 caracteres al asentarse. Este caso
+// cobra esa vía en la misma sesión, sin tocar la bóveda: el
+// par se asienta por la vía normal y su turno de asistente
+// guarda el texto parcial emitido, con su marca `stopped`
+// (la del cierre del ejecutor, que la deriva de la señal en
+// su última consulta: un plan sin paso tras el interrumpido
+// la trae igual).
+// ---------------------------------------------------------------------
+
+describe("A-U6: el texto parcial de un turno parado con el botón se asienta con su marca", () => {
+  it("la parada sin bloqueo: el par asentado en la misma sesión trae el texto emitido y su marca stopped", async () => {
+    await esperarQuieto(registroPrevio!.promise, 300_000);
+    const marca = marcaChunks();
+    const vuelo = abrirTurno({ conversationId: "au6-boton", text: ENSAYO });
+    registroPrevio = vuelo.registro;
+    try {
+      const rama = await esperarGeneracion(vuelo.promise, "au6-boton", 300_000);
+      if (rama === "asentado") {
+        throw new Error("el turno en vuelo se asentó sin generar: la escena no ocurrió");
+      }
+      await call("nido:turn-stop");
+      const rv = await vuelo.promise;
+      expect(rv.ok).toBe(true);
+      const emitido = textoEmitido("au6-boton", marca);
+      // La respuesta del turno ya trae el parcial: es el
+      // producto directo de la fachada, antes de todo
+      // asentamiento.
+      cobrarParcial(rv.result?.text, emitido);
+      const b = await bootstrap();
+      const conv = b.conversations.find((x) => x.id === "au6-boton");
+      expect(conv?.turns.map((t) => t.role)).toEqual(["user", "assistant"]);
+      expect(conv?.turns[0]?.text).toBe(ENSAYO);
+      // El par guardado es la respuesta del turno, carácter a
+      // carácter, y su marca de parada viaja con él.
+      expect(conv?.turns[1]?.text).toBe(rv.result?.text);
+      expect(conv?.turns[1]?.stopped).toBe(true);
     } finally {
       await asentarTurnosAbiertos();
     }
@@ -904,8 +1018,11 @@ describe("Cableado, pieza 2 (campos de memoria): el umbral, la poda y los títul
       // que enseñan la conversación en lista (Recientes y la
       // paleta) ya enseñan la cadena de pcSurface cuando el
       // título está vacío.
+      // Re-firmado en E11 (paso 8): el menú de dividir es un
+      // tercer sitio de lista y enseña el mismo respaldo;
+      // el censo pasa a tres sin tocar la conducta.
       const appTsx = readFileSync(path.join(process.cwd(), "app/src/App/App.tsx"), "utf8");
-      expect(appTsx.split('c.title || P("untitledChat")').length - 1).toBe(2);
+      expect(appTsx.split('c.title || P("untitledChat")').length - 1).toBe(3);
     } finally {
       await setMemorySettings({ autoGenerateTitles: true });
       await asentarTurnosAbiertos();

@@ -625,13 +625,18 @@ async function expectRoute(decl: Decl, lessonId: string, lang: Lang, text: strin
     case "tool":
       expect(r.route, where).toBe("agent-loop");
       // Las herramientas se ejecutan por dos caminos reales del
-      // bucle: `save_note` y `list_notes` pasan por el registro de
-      // handlers (y el espía las ve), mientras `create_reminder` y
-      // `remember_fact` escriben por la vía rápida determinista,
-      // directa al almacén. Para las primeras se cobra la llamada;
-      // para todas, el estado guardado, que es lo que la lección
-      // promete.
-      if (decl.tool === "save_note" || decl.tool === "list_notes") {
+      // bucle: `save_note` pasa por el registro de handlers (y el
+      // espía la ve), mientras `create_reminder` y `remember_fact`
+      // escriben por la vía rápida determinista, directa al
+      // almacén. Para la primera se cobra la llamada; para todas,
+      // el estado guardado, que es lo que la lección promete.
+      // `list_notes` iba con `save_note` hasta CABLE-1: sin el
+      // proveedor de notas, el enrutador caía al handler. Con el
+      // proveedor cableado en los deps de producción (la forma
+      // del móvil), el listado se sirve por la vía rápida desde
+      // el proveedor y ningún handler se despacha: su testigo es
+      // el texto servido, que se cobra abajo, no la llamada.
+      if (decl.tool === "save_note") {
         expect(toolCalls, `${where} · la herramienta ejecutada no es la declarada`).toContain(decl.tool);
       }
       if (decl.tool === "create_reminder") expect(mem.reminders.length, where).toBeGreaterThan(0);

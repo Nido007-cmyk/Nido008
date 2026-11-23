@@ -17,13 +17,6 @@
  * Ninguna declaración aquí promete una capacidad real.
  */
 
-declare module "react-native" {
-  export const Linking: {
-    openURL(url: string): Promise<void>;
-  };
-  export const Platform: { OS: string };
-}
-
 declare module "expo-calendar" {
   export function getCalendarPermissions(): Promise<{ granted: boolean; status: string }>;
   export function requestCalendarPermissions(): Promise<{ granted: boolean; status: string }>;

@@ -5,18 +5,51 @@
  */
 
 /**
- * Batería de la costura en memoria completada en el cierre R4 (alineación
- * al móvil): saveReminder con la firma y la regla del 0.1.108 (el ritmo
- * solo con fecha, y la deduplicación de pendientes), y la firma de
- * scheduleReminderNotification con su ritmo, que en esta tanda no
- * programa nada.
+ * Batería nacida como la de la costura en memoria del cierre R4
+ * (alineación al móvil): saveReminder con la firma y la regla
+ * del 0.1.108 (el ritmo solo con fecha, y la deduplicación de
+ * pendientes), y la firma de scheduleReminderNotification con
+ * su ritmo, que no programa nada.
+ *
+ * Adaptación de la cura H-01 (cadena de curas, acto 5, Δ 0): el
+ * almacén ya es el persistente portado del móvil, así que los
+ * dos casos de recordatorios corren sobre el arnés de base
+ * real de la casa (directorio temporal y DEK de prueba, como
+ * contactsReal): cobran la misma regla, ahora sobre la base
+ * cifrada. El caso de la firma de notificaciones no cambia.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { setAppStoreDekProvider, setAppStoreDir } from "../../security/appStore.js";
+import { closeDatabase } from "../../security/databaseManager.js";
 import { listReminders, saveReminder } from "./memoryStore.js";
 import { scheduleReminderNotification } from "../../notify/notifications.js";
 
+let dir: string;
+const KEY = randomBytes(32);
+
 describe("memoryStore · recordatorios con la firma del 0.1.108", () => {
+  // El arnés de base real cuelga solo de este describe: el caso
+  // de la firma de notificaciones corre en su entorno original,
+  // sin base configurada, que es donde cobra que no programa.
+  beforeEach(async () => {
+    await closeDatabase();
+    dir = mkdtempSync(join(tmpdir(), "nido-h01-costura-"));
+    setAppStoreDir(dir);
+    setAppStoreDekProvider(() => Buffer.from(KEY));
+  });
+
+  afterEach(async () => {
+    await closeDatabase();
+    setAppStoreDekProvider(null);
+    setAppStoreDir(null);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("guarda el ritmo solo si es válido y hay fecha", async () => {
     const a = await saveReminder({ text: "regar", dueAt: "2026-12-01T09:00:00.000Z", repeat: "week" });
     expect(a.repeat).toBe("week");

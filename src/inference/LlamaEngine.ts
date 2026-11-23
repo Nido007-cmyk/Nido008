@@ -264,6 +264,21 @@ class LlamaEngineFacade {
       args.messages !== undefined
         ? JSON.stringify(args.messages)
         : (args.prompt ?? null);
+    // A-U6 (F-1): el parcial de ESTA generación, acumulado chunk
+    // a chunk antes de reenviarlo, en la forma del móvil (su
+    // fachada acumula `streamed` en su callback de tokens y el
+    // texto asentado de una generación interrumpida es ese
+    // parcial). Vive en una local de la llamada, nunca en
+    // estado de la instancia: dos generaciones encoladas no
+    // comparten parcial, y una generación que completa sigue
+    // devolviendo el texto de la librería, no esta
+    // concatenación. Sin él, la fachada perdía el parcial en
+    // sus dos vías y un turno parado asentaba 0 caracteres.
+    let streamed = "";
+    const onToken = (chunk: string) => {
+      streamed += chunk;
+      args.onToken?.(chunk);
+    };
     try {
       const grammar = await this.grammarFor(args.responseFormat);
       const sequence = this.context.getSequence();
@@ -275,6 +290,8 @@ class LlamaEngineFacade {
             seed,
             grammar,
             signal: controller.signal,
+            onToken,
+            streamed: () => streamed,
           });
         }
         if (args.prompt !== undefined) {
@@ -284,6 +301,8 @@ class LlamaEngineFacade {
             seed,
             grammar,
             signal: controller.signal,
+            onToken,
+            streamed: () => streamed,
           });
         }
         throw new Error("LlamaEngine: generate necesita messages o prompt");
@@ -291,12 +310,13 @@ class LlamaEngineFacade {
         await sequence.dispose().catch(() => undefined);
       }
     } catch (err) {
-      // Parada o plazo: las vías de abajo ya resuelven con el texto
-      // parcial cuando el aborto las alcanza; un error de aborto
-      // que se escape hasta aquí se traduce a texto vacío, nunca a
-      // un turno caído por una parada pedida.
+      // Parada o plazo (F-4): las vías de abajo ya resuelven con
+      // el texto parcial cuando el aborto las alcanza; un error
+      // de aborto que se escape hasta aquí resuelve con el
+      // mismo parcial acumulado, nunca a un turno caído por una
+      // parada pedida ni a una burbuja en 0 caracteres.
       if (controller.signal.aborted && (timedOut || args.signal?.aborted)) {
-        return "";
+        return streamed;
       }
       throw err;
     } finally {
@@ -329,6 +349,8 @@ class LlamaEngineFacade {
       seed?: number;
       grammar?: LlamaGrammar;
       signal: AbortSignal;
+      onToken: (chunk: string) => void;
+      streamed: () => string;
     },
   ): Promise<string> {
     const messages = args.messages ?? [];
@@ -361,10 +383,17 @@ class LlamaEngineFacade {
         seed: opts.seed,
         grammar: opts.grammar,
         signal: opts.signal,
-        onTextChunk: (chunk) => args.onToken?.(chunk),
+        onTextChunk: opts.onToken,
       });
     } catch (err) {
-      if (opts.signal.aborted) return extractModelText(session);
+      // A-U6 (F-2): al abortar manda el parcial acumulado. El
+      // historial de la sesión nunca contiene la respuesta en
+      // vuelo (la librería solo lo asigna al completar, y el
+      // aborto lanza antes), así que extraer de él devolvía la
+      // cadena vacía o, con historial, la respuesta ANTERIOR;
+      // la extracción queda como red para cualquier vía en que
+      // la librería sí la hubiera asentado.
+      if (opts.signal.aborted) return opts.streamed() || extractModelText(session);
       throw err;
     }
   }
@@ -378,6 +407,8 @@ class LlamaEngineFacade {
       seed?: number;
       grammar?: LlamaGrammar;
       signal: AbortSignal;
+      onToken: (chunk: string) => void;
+      streamed: () => string;
     },
   ): Promise<string> {
     const completion = new LlamaCompletion({ contextSequence: sequence });
@@ -389,10 +420,13 @@ class LlamaEngineFacade {
         seed: opts.seed,
         grammar: opts.grammar,
         signal: opts.signal,
-        onTextChunk: (chunk) => args.onToken?.(chunk),
+        onTextChunk: opts.onToken,
       });
     } catch (err) {
-      if (opts.signal.aborted) return "";
+      // A-U6 (F-3): la vía sin plantilla devolvía la cadena
+      // vacía por construcción ante cualquier aborto; resuelve
+      // con el parcial acumulado, como la de con plantilla.
+      if (opts.signal.aborted) return opts.streamed();
       throw err;
     }
   }

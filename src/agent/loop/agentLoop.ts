@@ -1208,7 +1208,8 @@ async function runAgentLoopCore(
           : pendingChoice.action === "noteDelete"
             ? { kind: "noteDelete", target: { type: "one", query: c.match, directId: c.id }, lang: pendingChoice.lang }
             : { kind: "reminderDelete", target: { type: "one", query: c.match, directId: c.id }, lang: pendingChoice.lang };
-      if (!options.restrictFastPathsToHandlers || toolForAction(synth) in handlers) {
+      const synthTool = toolForAction(synth);
+      if (!options.restrictFastPathsToHandlers || synthTool === null || synthTool in handlers) {
         const outcome = await runToolAction(synth, toolDeps);
         return { response: outcome.response, intent, toolUses: outcome.toolUses, deterministic: true };
       }
@@ -1240,7 +1241,8 @@ async function runAgentLoopCore(
   // idioma del usuario, que está desactivada y dónde activarla (en vez de
   // mandar el turno al modelo). En tareas programadas solo si la
   // herramienta está entre las permitidas para la tarea.
-  if (toolAction && !fillWithRepeat && !starterFill && (!options.restrictFastPathsToHandlers || toolForAction(toolAction) in handlers)) {
+  const actionTool = toolAction ? toolForAction(toolAction) : null;
+  if (toolAction && !fillWithRepeat && !starterFill && (!options.restrictFastPathsToHandlers || actionTool === null || actionTool in handlers)) {
     const outcome = await runToolAction(toolAction, toolDeps);
     return { response: outcome.response, intent, toolUses: outcome.toolUses, deterministic: true };
   }

@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { setAppStoreDekProvider, setAppStoreDir } from "../../security/appStore.js";
 import { closeDatabase } from "../../security/databaseManager.js";
-import { buildToolHandlers } from "../tools/handlers.js";
+import { buildToolHandlers, setHandlerLangForTest } from "../tools/handlers.js";
 import { runContactAction, type ContactSearchResult } from "../loop/contactRouter.js";
 import { answerMemoryQuery } from "../loop/memoryQuery.js";
 import { getPeople } from "./memoryStore.js";
@@ -61,6 +61,8 @@ afterEach(async () => {
   await closeDatabase();
   setAppStoreDekProvider(null);
   setAppStoreDir(null);
+  // I18N-2: la fijación de idioma de los handlers no sale del caso que la puso.
+  setHandlerLangForTest(null);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -164,6 +166,15 @@ describe("E7 paso 4 · agenda de contactos", () => {
   });
 
   it("borrar sin confirmación no borra", async () => {
+    // Reconciliación I18N-2 (con su causa): el caso cobra el
+    // error servido por L() en español («no se borró nada») y
+    // nunca fijaba el idioma de los handlers. Pasaba porque
+    // uiLang() caía por el require perezoso muerto a su defecto
+    // duro «es»; con el módulo i18n del núcleo vivo, uiLang()
+    // lee el idioma del módulo, que en el banco nace en el del
+    // dispositivo. El caso fija ahora setHandlerLangForTest("es"),
+    // la forma de la extensión dirimida para confirm.test.ts.
+    setHandlerLangForTest("es");
     const ficha = await createContact({
       name: "Carmen Ruiz",
       relation: "hermana",

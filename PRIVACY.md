@@ -44,10 +44,13 @@ published hash before anything is used:
    project's releases, under the same rule: a plain download, a
    hash check, nothing about you attached.
 
-Updates work the same way: the app never checks for updates on
-its own. When you ask it to look, it reads the releases of this
-repository; when you install an update, it comes from here and
-can be verified like the first install.
+There are no releases or updates yet: NIDO PC is still in
+development and there is nothing to download. When the first
+alpha is published, updates will follow the same rule as
+everything else in this app: the app will never check for
+updates on its own. When you ask it to look, it will read the
+releases of this repository, and any update you install will
+come from here and be verifiable like the first install.
 
 ## What the app never does
 

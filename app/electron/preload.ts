@@ -25,6 +25,9 @@ contextBridge.exposeInMainWorld("nido", {
     researchPlan: (args: unknown) => ipcRenderer.invoke("nido:research-plan", args),
     researchReportExport: (args: unknown) =>
       ipcRenderer.invoke("nido:research-report-export", args),
+    exportSaveDialog: (args: unknown) => ipcRenderer.invoke("nido:export-save-dialog", args),
+    exportWrite: (args: unknown) => ipcRenderer.invoke("nido:export-write", args),
+    exportDragStart: (args: unknown) => ipcRenderer.invoke("nido:export-drag-start", args),
     researchSessions: () => ipcRenderer.invoke("nido:research-sessions"),
     researchSessionDelete: (args: unknown) =>
       ipcRenderer.invoke("nido:research-session-delete", args),
@@ -63,10 +66,18 @@ contextBridge.exposeInMainWorld("nido", {
     agendaEventDelete: (id: string) => ipcRenderer.invoke("nido:agenda-event-delete", {id}),
     agendaContactSave: (args: unknown) => ipcRenderer.invoke("nido:agenda-contact-save", args),
     agendaContactDelete: (id: string) => ipcRenderer.invoke("nido:agenda-contact-delete", {id}),
+    agendaImportPreview: (kind: string, path: string) =>
+        ipcRenderer.invoke("nido:agenda-import-preview", {kind, path}),
+    agendaImportCommit: (kind: string, token: string) =>
+        ipcRenderer.invoke("nido:agenda-import-commit", {kind, token}),
+    agendaExport: (kind: string) => ipcRenderer.invoke("nido:agenda-export", {kind}),
     noticeAct: (args: unknown) => ipcRenderer.invoke("nido:notice-act", args),
     tasksList: () => ipcRenderer.invoke("nido:tasks-list"),
     tasksSave: (args: unknown) => ipcRenderer.invoke("nido:tasks-save", args),
     tasksDelete: (args: unknown) => ipcRenderer.invoke("nido:tasks-delete", args),
+    actionLogList: () => ipcRenderer.invoke("nido:action-log-list"),
+    actionLogUndo: (id: number) => ipcRenderer.invoke("nido:action-log-undo", {id}),
+    actionLogClear: () => ipcRenderer.invoke("nido:action-log-clear"),
     copyText: (text: string) => ipcRenderer.invoke("nido:copy", {text}),
     openExternal: (url: string) => ipcRenderer.invoke("nido:open-external", {url}),
     confirmResponse: (id: string, approved: boolean) => {
@@ -98,6 +109,19 @@ contextBridge.exposeInMainWorld("nido", {
         ipcRenderer.on("nido:vault-locked", listener as never);
         return () => {
             ipcRenderer.removeListener("nido:vault-locked", listener as never);
+        };
+    },
+    linkPending: (args: unknown) => ipcRenderer.invoke("nido:link-pending", args),
+    conversationSearch: (args: unknown) =>
+      ipcRenderer.invoke("nido:conversation-search", args),
+    backupExport: (args: unknown) => ipcRenderer.invoke("nido:backup-export", args),
+    vaultRotateRequest: (args: unknown) =>
+      ipcRenderer.invoke("nido:vault-rotate-request", args),
+    onLink: (cb: (payload: {seq?: number}) => void) => {
+        const listener = (_event: unknown, payload: {seq?: number}) => cb(payload ?? {});
+        ipcRenderer.on("nido:link", listener as never);
+        return () => {
+            ipcRenderer.removeListener("nido:link", listener as never);
         };
     },
     onNoticesShow: (cb: (payload: {target?: string}) => void) => {

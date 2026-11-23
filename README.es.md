@@ -11,6 +11,7 @@ Un asistente de IA privado para escritorio que funciona 100 % fuera de línea en
 
 <p align="center">
   <a href="LICENSE"><img alt="Licencia: MIT" src="https://img.shields.io/badge/licencia-MIT-green"></a>
+  <a href="https://github.com/Nido007-cmyk/Nido008/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Nido007-cmyk/Nido008/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Plataforma: Windows" src="https://img.shields.io/badge/plataforma-Windows-3A563F">
 </p>
 
@@ -60,6 +61,10 @@ largos y el catálogo completo de herramientas siempre presente.
 - **Memoria, calendario y recordatorios en tu máquina.** Lo que
   NIDO recuerda por ti, tu calendario y tus contactos viven dentro
   de la app, cifrados, y no se sincronizan con ningún sitio.
+- **El calendario y los contactos se mueven contigo.** Importa y
+  exporta tu calendario y tus contactos como ficheros estándar
+  .ics y .vcf, con una vista previa de lo que va a cambiar antes
+  de que se escriba nada.
 - **Tareas programadas.** Creas tareas que corren más tarde o con
   un horario, dentro de la app, y lees sus resultados al volver.
 - **Una guía integrada.** La sección Aprende, dentro de la
@@ -115,16 +120,17 @@ fuente, como sigue.
 
 NIDO PC está en desarrollo activo, versión 0.1.0. El código de este
 repositorio es una foto de la rama de desarrollo tomada el
-2026-11-22. Hoy funciona: el chat, el catálogo de modelos con sus
+2026-11-23. Hoy funciona: el chat, el catálogo de modelos con sus
 descargas verificadas, la memoria cifrada, el calendario, los
-contactos y los recordatorios, las tareas programadas, la
+contactos y los recordatorios, la importación y exportación de
+calendario y contactos en .ics y .vcf, las tareas programadas, la
 biblioteca de documentos, la voz en el dispositivo (dictado y
 lectura en voz alta), la investigación profunda con sus informes
 guardados y la guía integrada. En desarrollo ahora mismo: la
 última etapa de la primera versión, camino de la primera alfa.
 
-En el último hito verificado, la batería de pruebas corrió 7.162
-pruebas: 7.149 en verde, 13 fallos esperados y ningún fallo
+En el último hito verificado, la batería de pruebas corrió 7.365
+pruebas: 7.352 en verde, 13 fallos esperados y ningún fallo
 inesperado.
 
 NIDO PC es software en alfa temprana. Puede fallar, y va a
@@ -136,7 +142,7 @@ mejoró.
 
 NIDO también vive en Android, con la misma promesa: todo fuera de
 línea, privado, sin cuentas. Consigue la release actual de Android,
-[v0.1.109-alpha](https://github.com/Nido007-cmyk/Nido/releases/tag/v0.1.109-alpha),
+[v0.1.112-alpha](https://github.com/Nido007-cmyk/Nido/releases/tag/v0.1.112-alpha),
 en el repositorio móvil.
 
 ## Compilar desde la fuente
@@ -193,9 +199,10 @@ problema» de la app abre la misma puerta. Para código, lee antes
 NIDO PC es código original, escrito desde cero para el escritorio,
 bajo la licencia MIT propia de NIDO. La historia y las
 atribuciones de la línea móvil viven en el repositorio móvil. Los
-componentes de terceros conservan sus propias licencias, listadas
-en el fichero de avisos de cada release; los modelos de IA que
-descargas también conservan las suyas, y la app nunca redistribuye
+componentes de terceros conservan sus propias licencias, que se
+listarán en el fichero de avisos de cada release cuando las
+releases empiecen; los modelos de IA que descargas también
+conservan las suyas, y la app nunca redistribuye
 pesos de modelos: cada modelo lo descargas de su publicador.
 
 MIT. Ver [LICENSE](LICENSE).

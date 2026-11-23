@@ -11,6 +11,7 @@ A private AI assistant for desktop that runs 100% offline on your own machine.</
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green"></a>
+  <a href="https://github.com/Nido007-cmyk/Nido008/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Nido007-cmyk/Nido008/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-3A563F">
 </p>
 
@@ -56,6 +57,9 @@ full tool catalog always present.
 - **Memory, calendar and reminders on your machine.** What NIDO
   remembers for you, your calendar and your contacts live inside
   the app, encrypted, and never sync anywhere.
+- **Calendar and contacts move with you.** Import and export
+  your calendar and contacts as standard .ics and .vcf files,
+  with a preview of what will change before anything is written.
 - **Scheduled tasks.** Create tasks that run later or on a schedule,
   inside the app, and read their results when you come back.
 - **A built-in guide.** The Learn section inside the Library
@@ -109,15 +113,16 @@ below.
 
 NIDO PC is in active development, version 0.1.0. The code in this
 repository is a snapshot of the development branch taken on
-2026-11-22. Working today: the chat, the model catalog with its
+2026-11-23. Working today: the chat, the model catalog with its
 verified downloads, the encrypted memory, the calendar, contacts
-and reminders, scheduled tasks, the document library, on-device
+and reminders, calendar and contact import and export in .ics
+and .vcf, scheduled tasks, the document library, on-device
 voice (dictation and read-aloud), deep research with its saved
 reports and the built-in guide. In development right now: the
 last stage of the first version, on the way to the first alpha.
 
-At the last verified milestone, the test battery ran 7,162 tests:
-7,149 passing, 13 expected failures and no unexpected failures.
+At the last verified milestone, the test battery ran 7,365 tests:
+7,352 passing, 13 expected failures and no unexpected failures.
 
 NIDO PC is early alpha software. It can fail, and it will change.
 What every version promises is fewer failures than the one before
@@ -127,7 +132,7 @@ it, and release notes that say plainly what got better.
 
 NIDO also lives on Android, with the same promise: fully offline,
 private, no accounts. Get the current Android release,
-[v0.1.109-alpha](https://github.com/Nido007-cmyk/Nido/releases/tag/v0.1.109-alpha),
+[v0.1.112-alpha](https://github.com/Nido007-cmyk/Nido/releases/tag/v0.1.112-alpha),
 from the mobile repository.
 
 ## Build from source
@@ -181,10 +186,10 @@ the same door. For code, read [CONTRIBUTING.md](CONTRIBUTING.md) and the
 NIDO PC is original code, written from scratch for the desktop,
 under NIDO's own MIT license. The mobile line's history and
 attributions live in the mobile repository. Third-party components
-keep their own licenses, listed in each release's notices file;
-the AI models you download keep their own licenses too, and the
-app never redistributes model weights: you download each model
-from its publisher.
+keep their own licenses, which will be listed in each release's
+notices file once releases begin; the AI models you download
+keep their own licenses too, and the app never redistributes
+model weights: you download each model from its publisher.
 
 MIT. See [LICENSE](LICENSE).
 

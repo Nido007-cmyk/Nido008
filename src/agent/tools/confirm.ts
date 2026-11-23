@@ -20,19 +20,18 @@
  *   cara a cara); sin confirmación explícita, el agente podría emparejar
  *   un QR suministrado por un atacante y "verificarlo" sin que el usuario
  *   lo haya visto nunca.
- * - open_app (P-F1): entrega un enlace al SO (navegador, marcador,
- *   mensajería, correo) y cambia al usuario de app; solo esquemas
- *   explícitamente permitidos (https, tel, sms, mailto; http se
- *   rechaza por inseguro desde la auditoría F2-11), todo lo
- *   demás falla cerrado antes de cualquier acción externa.
  * - nido_approve_task / nido_reject_task (M-6): decidir sobre una tarea
  *   remota encolada convierte trabajo pendiente en trabajo decidido; es
  *   una decisión del usuario, no del agente.
- * read_picked_file pide el archivo con el picker del sistema.
+ * read_picked_file no está en la lista: en la fuente el propio selector es el
+ * consentimiento, y en PC no lee nada (responde su texto
+ * de no disponible, cura H-02).
  *
  * Para añadir una futura herramienta sensible: añádela a SENSITIVE_TOOLS y
  * envuelve su handler con `withConfirmation`.
  */
+
+import i18n from "../../i18n/index.js";
 
 export interface ConfirmRequest {
   /** Nombre de la herramienta (p. ej. "create_calendar_event"). */
@@ -78,19 +77,17 @@ const EN_CONFIRM_CORE_FALLBACK: Record<string, string> = {
     "Blocked for security: the payload of “{{tool}}” changed after confirmation. The action was NOT executed.",
 };
 function confirmCoreT(): CoreT {
-  try {
-    const i18n = require("../../i18n.js").default as {
-      t(k: string, o?: unknown): string;
-    };
-    return (key, opts) => i18n.t(key, opts);
-  } catch {
-    return (key, opts) => {
-      let s = EN_CONFIRM_CORE_FALLBACK[key] ?? key;
-      for (const [k, v] of Object.entries(opts ?? {}))
-        s = s.split(`{{${k}}}`).join(v);
-      return s;
-    };
-  }
+  return (key, opts) => {
+    const served = i18n.t(key, opts);
+    if (served !== key) return served;
+    // Caída honesta (I18N-2): la clave no está en ningún locale y
+    // el módulo devolvió la propia clave; la tabla de reserva en
+    // inglés sirve su texto antes que enseñar la clave cruda.
+    let s = EN_CONFIRM_CORE_FALLBACK[key] ?? key;
+    for (const [k, v] of Object.entries(opts ?? {}))
+      s = s.split(`{{${k}}}`).join(v);
+    return s;
+  };
 }
 
 export function confirmBlockedMessage(tool: string): string {
@@ -103,6 +100,16 @@ export function confirmBlockedMessage(tool: string): string {
  */
 export function confirmPayloadChangedMessage(tool: string): string {
   return confirmCoreT()("agentConfirm.confirmPayloadChanged", { tool });
+}
+
+/**
+ * CONF-2: el mensaje que `withConfirmation` devuelve cuando la
+ * persona rechaza en la puerta del handler. Exportado para que
+ * quien asienta el resultado (el despachador) pueda reconocerlo
+ * y asentarlo como cancelación, no como ejecución.
+ */
+export function confirmCancelledMessage(): string {
+  return confirmCoreT()("agentConfirm.confirmCancelled");
 }
 
 /**
@@ -132,8 +139,6 @@ export const SENSITIVE_TOOLS: ReadonlySet<string> = new Set([
   "create_calendar_event",
   "nido_send_message",
   "nido_pair",
-  // P-F1: abrir un enlace externo cambia de app; requiere confirmación.
-  "open_app",
   // M-6: decidir sobre una tarea remota encolada es una acción sensible.
   "nido_approve_task",
   "nido_reject_task",

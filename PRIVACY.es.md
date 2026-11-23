@@ -48,10 +48,13 @@ contra una huella publicada antes de usar nada:
    descarga llana, una comprobación de huella y nada tuyo pegado
    a ella.
 
-Las actualizaciones funcionan igual: la app nunca busca
-actualizaciones por su cuenta. Cuando tú le pides que mire, lee
-las releases de este repositorio; cuando instalas una
-actualización, viene de aquí y se puede verificar como la primera
+Todavía no hay releases ni actualizaciones: NIDO PC sigue en
+desarrollo y no hay nada que descargar. Cuando se publique la
+primera alfa, las actualizaciones seguirán la misma regla que
+todo lo demás en esta app: la app nunca buscará actualizaciones
+por su cuenta. Cuando tú le pidas que mire, leerá las releases
+de este repositorio, y cualquier actualización que instales
+vendrá de aquí y se podrá verificar como la primera
 instalación.
 
 ## Lo que la app no hace nunca

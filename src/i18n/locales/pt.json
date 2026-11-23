@@ -970,8 +970,6 @@
     "rejectTaskTitle": "Rejeitar tarefa do NIDO",
     "rejectTaskMessage": "Rejeitar esta tarefa de “{{sender}}”?\n\n{{action}}",
     "taskNotFound": "Não há nenhuma tarefa pendente com esse id (ela pode já ter sido decidida).",
-    "scopeOpenApp": "Alcance: apenas este destino: {{target}}",
-    "scopeOpenAppRejected": "Alcance: nada será aberto.",
     "scopeCreateEvent": "Alcance: apenas este evento: «{{title}}» ({{start}})",
     "scopeSendMessage": "Alcance: apenas esta mensagem, apenas para {{to}}",
     "scopePair": "Alcance: apenas esta pessoa: {{name}} ({{fingerprint}})",
@@ -981,16 +979,6 @@
     "confirmBlocked": "Bloqueado por segurança: “{{tool}}” requer confirmação explícita do usuário, mas o canal de confirmação não está disponível. A ação NÃO foi executada.",
     "confirmCancelled": "Entendido, não fiz nada.",
     "confirmPayloadChanged": "Bloqueado por segurança: o conteúdo de “{{tool}}” mudou após a sua confirmação. A ação NÃO foi executada.",
-    "openAppTitle": "Abrir link externo",
-    "openAppMessage": "Abrir este link fora do NIDO?\n\n{{target}}",
-    "openAppRejected": "O NIDO não pode abrir este link ({{reason}}). Esquemas permitidos: https, tel, sms, mailto.",
-    "openAppReason": {
-      "empty": "está vazio",
-      "no-scheme": "não começa com um esquema válido",
-      "scheme-not-allowed": "seu esquema não é permitido",
-      "unsafe-chars": "contém caracteres inseguros",
-      "insecure-http": "é um link http sem criptografia; a que se deve abrir é a versão https"
-    },
     "pairDisambiguationTitle": "Esclarecer emparelhamento",
     "pairAmbiguousAsk": "Este código é de “{{name}}” (impressão digital {{fingerprint}}), mas você já tem {{count}} contato(s) ativo(s) com esse nome sob uma identidade DIFERENTE: {{candidates}}. Um nome não é uma identidade: não posso presumir que é a mesma pessoa.\n\nDiga explicitamente (no chat):\n• “replace” — a mesma pessoa com um dispositivo novo: retira a identidade anterior da sua lista de contatos (destrutivo);\n• “different person” — outra pessoa: dê um nome único para o novo contato;\n• “cancel” — não fazer nada.\n\nSe você não escolher, eu cancelo. Nada foi emparelhado ainda.",
     "pairReplaceConfirmMessage": "SUBSTITUIR a identidade de “{{name}}”?\nImpressão digital: {{fingerprint}}\n\nIsso retira a identidade anterior da sua lista de contatos desta sessão. As mensagens que você tinha na fila de saída para este nome continuam na fila com o mesmo nome. Não pode ser desfeito. Confirme apenas se você verificou este código pessoalmente.",
@@ -1333,6 +1321,7 @@
   "agentPermissions": {
     "historyTitle": "O que o agente fez",
     "historyEmpty": "Ainda não há ações.",
+    "historyBody": "Cada ferramenta que o agente usou ou tentou usar. Só ficam o nome da ferramenta e o resultado, nunca o conteúdo. Fica criptografado neste computador e você pode apagar.",
     "confirmed": "você confirmou",
     "toolsTitle": "Permissões do agente",
     "toolsBody": "Desligue qualquer ferramenta que você não queira que o agente use. Ações que mudam algo continuam perguntando antes; isso não pode ser desligado.",
@@ -1341,6 +1330,7 @@
       "executed": "Feito",
       "blocked": "Bloqueado pela política de segurança",
       "disabled": "Desligada por você",
+      "denied": "Negada pela política do turno",
       "cancelled": "Não confirmado",
       "invalid": "Pedido inválido",
       "failed": "Falhou"
@@ -1549,7 +1539,8 @@
               "Peça um evento no chat, com o dia e a hora: o NIDO salva no seu calendário.",
               "Abra a seção Agenda: em Calendário você vê o mês e seus eventos, e pode criar ou corrigir um à mão.",
               "Em Contatos você salva suas pessoas com o aniversário delas: o NIDO prepara o aviso de cada ano.",
-              "Quando você procura alguém no chat, o NIDO responde a partir dessas fichas. Neste PC ele não consegue ligar nem enviar mensagens: ele mostra o número salvo para você discar do seu telefone."
+              "Quando você procura alguém no chat, o NIDO responde a partir dessas fichas. Neste PC ele não consegue ligar nem enviar mensagens: ele mostra o número salvo para você discar do seu telefone.",
+              "Você também pode trazer seu calendário ou seus contatos de um arquivo: em Calendário, toque em Importar .ics, e em Contatos, Importar .vcf. Antes de guardar qualquer coisa, o NIDO mostra o resumo do que entra e do que não entra, e só guarda quando você toca em Guardar. Com Exportar, você tira o arquivo inteiro, para levar a outro programa ou guardar como cópia."
             ],
             "examples": [
               "marca reunião amanhã das 14 às 16",
@@ -1605,11 +1596,12 @@
           {
             "id": "memoria-cifrada-y-su-puerta",
             "title": "A memória cifrada e a sua porta",
-            "what": "Tudo o que o NIDO guarda para você (as suas conversas, as suas notas, os seus lembretes e os seus ajustes) fica guardado cifrado no seu computador, dentro de um cofre que só se abre com a sua senha. Sem essa senha, a app não entrega nada: nem as suas coisas, nem uma pista do que há dentro.",
+            "what": "Tudo o que o NIDO guarda para você (as suas conversas, as suas notas, os seus lembretes e os seus ajustes) fica guardado cifrado no seu computador, dentro de um cofre que só se abre com a sua senha. Sem essa senha, a app não entrega nada: nem as suas coisas, nem uma pista do que há dentro. Em Ajustes, em Segurança, você pode salvar uma cópia das suas bases cifradas em um arquivo .nidbackup fechado com a senha dele, e trocar a chave do cofre: a troca pede a sua senha outra vez, reinicia o app e acontece no desbloqueio, antes de abrir qualquer coisa.",
             "steps": [
               "Fecha a app e volta a abri-la.",
               "A porta lhe pede a senha antes de mostrar qualquer coisa.",
-              "Escreva-a e entre: as suas conversas e as suas coisas estão íntegras, tal como você as deixou."
+              "Escreva-a e entre: as suas conversas e as suas coisas estão íntegras, tal como você as deixou.",
+              "Em Ajustes, em Segurança, exporte a sua cópia e guarde ela fora do computador; sem a senha dela, esse arquivo não pode ser restaurado."
             ],
             "examples": [],
             "tip": "Se você esquecer a senha, não há forma de recuperar o que está guardado: a porta não guarda cópia da sua chave e o que está guardado se perde com ela. Guarde a sua senha em um lugar seguro, fora do computador se você puder."
@@ -1726,6 +1718,36 @@
               "por que se formam as nuvens?"
             ],
             "tip": "O tom manda só nas respostas que o modelo escreve. As saudações e as respostas exatas do app, como a hora ou um cálculo, não mudam com o tom, porque não é o modelo que as escreve: saem do próprio app, sempre iguais."
+          },
+          {
+            "id": "paleta-de-comandos",
+            "title": "A paleta de comandos",
+            "what": "Com Ctrl+K você abre a paleta: uma busca de tudo o que você pode fazer sem percorrer os menus. Você escreve algumas letras e aparecem as ações com o atalho delas, as seções, as suas conversas, os ajustes, as lições deste guia e os pacotes. Tudo é buscado no seu computador, na hora, sem sair para rede nenhuma.",
+            "steps": [
+              "Aperte Ctrl+K onde você estiver no app.",
+              "Escreva o que você procura; com acento ou sem, ele encontra do mesmo jeito.",
+              "Mova-se com as setas e entre com Enter, ou clique no resultado.",
+              "Com Esc você fecha a paleta sem fazer nada.",
+              "O campo convida você com «Buscar chats, seções e ajustes»; se nada combina, a paleta diz isso e não inventa resultados: «Sem resultados neste dispositivo.»"
+            ],
+            "examples": [
+              "como encontro uma conversa antiga?"
+            ],
+            "tip": "A paleta não guarda uma segunda lista escondida: ela oferece o mesmo que a barra, os ajustes e a folha de atalhos já oferecem, junto e buscável."
+          },
+          {
+            "id": "atajos-de-teclado",
+            "title": "Atalhos de teclado",
+            "what": "Quase tudo na janela dá para fazer sem soltar o teclado: nova conversa com Ctrl+N, buscar em todas as conversas com Ctrl+Shift+F, buscar no chat aberto com Ctrl+F, ir ao fim com End, trocar de seção com Ctrl+1 a Ctrl+8 e aumentar ou diminuir o texto com Ctrl++ e Ctrl+−. Nenhum atalho é global: eles só funcionam enquanto a janela do NIDO está na frente.",
+            "steps": [
+              "Aperte Ctrl+/ para abrir a folha com todos os atalhos.",
+              "Em Ajustes, em Aparência, você escolhe se o Enter envia a mensagem ou faz uma quebra de linha; a folha sempre mostra a posição que você deixou.",
+              "Com Ctrl+0 o texto volta ao tamanho normal."
+            ],
+            "examples": [
+              "que atalhos de teclado eu posso usar?"
+            ],
+            "tip": "Se há uma resposta a caminho, o Esc para ela antes de tudo; se não há, o Esc fecha o que estiver aberto."
           }
         ]
       }
@@ -1963,6 +1985,71 @@
     "fitYellow": "Cabe justo neste computador",
     "fontSize": "Tamanho da letra",
     "goToEnd": "Ir para o final",
+    "shortcutsTitle": "Atalhos de teclado",
+    "shortcutNewChat": "Nova conversa",
+    "shortcutGlobalSearch": "Buscar em todas as conversas",
+    "shortcutSearchInChat": "Buscar nesta conversa",
+    "shortcutGoEnd": "Ir ao fim da conversa",
+    "shortcutStopOrClose": "Parar a resposta, ou fechar o que estiver aberto",
+    "shortcutSection": "Trocar de seção",
+    "shortcutModelManager": "Abrir o gestor de modelos",
+    "shortcutSend": "Enviar a mensagem",
+    "shortcutEmergencySend": "Parar e enviar a emergência agora",
+    "shortcutOpenSheet": "Ver esta folha de atalhos",
+    "shortcutZoomIn": "Aumentar o texto",
+    "shortcutZoomOut": "Diminuir o texto",
+    "shortcutZoomReset": "Voltar ao tamanho normal do texto",
+    "findPlaceholder": "Buscar nesta conversa",
+    "findPrevious": "Anterior",
+    "findNext": "Seguinte",
+    "findClose": "Fechar",
+    "sendWithEnter": "Enviar com Enter",
+    "sendWithEnterHint": "Ligado: Enter envia e Ctrl+Enter faz uma quebra de linha. Desligado: Enter faz a quebra e Ctrl+Enter envia.",
+    "attachmentRemove": "Remover anexo",
+    "dropReasonArchive": "arquivo comprimido não aceito; solte ele descompactado",
+    "dropReasonSpreadsheet": "é uma planilha; exporte para CSV e solte de novo",
+    "dropReasonOldOffice": "é um documento do Office antigo; salve no formato novo",
+    "dropReasonUnknown": "formato não reconhecido",
+    "attachedMaterial": "Material anexo",
+    "attachedNoText": "sem texto extraível",
+    "attachedTruncated": "recortado",
+    "exportConversation": "Exportar",
+    "exportAsMarkdown": "Salvar como Markdown",
+    "exportAsText": "Salvar como texto",
+    "exportYou": "Você",
+    "exportedTo": "Salvo em {{path}}",
+    "panelContext": "Contexto",
+    "panelMemory": "Memória do app",
+    "fontStepSmall": "Pequeno",
+    "fontStepCompact": "Compacto",
+    "fontStepStandard": "Normal",
+    "fontStepLarge": "Grande",
+    "fontStepExtraLarge": "Muito grande",
+    "linkMalformed": "Esse link não é do NIDO ou não foi entendido; nada foi aberto.",
+    "linkChatMissing": "Essa conversa não está mais neste aparelho.",
+    "linkGuideMissing": "Esse guia não está neste aparelho.",
+    "linkGuideNotInstalled": "Esse guia é de um pacote que não está instalado; este é o lugar dele na biblioteca, sem instalar nada.",
+    "splitOpen": "Dividir",
+    "splitReadBeside": "Leitura ao lado",
+    "searchPlaceholder": "Busque em todas as suas conversas",
+    "searchNoResults": "Sem resultados para essa busca.",
+    "searchLocked": "A busca precisa do cofre aberto.",
+    "vaultBackupTitle": "Cópia de segurança do cofre",
+    "vaultBackupBody": "Salve suas bases cifradas em um único arquivo .nidbackup, fechado com uma senha própria. Esse arquivo é a chave da sua cópia: sem a senha dele não dá para restaurar, e ela não é a mesma do cofre.",
+    "vaultBackupPassword": "Senha da cópia (mínimo de 8 caracteres)",
+    "vaultBackupPasswordShort": "A senha da cópia precisa de pelo menos 8 caracteres.",
+    "vaultBackupExport": "Exportar a cópia",
+    "vaultBackupDone": "Cópia salva em {{path}}",
+    "vaultBackupFailed": "Não foi possível criar a cópia.",
+    "vaultRotateTitle": "Trocar a chave do cofre",
+    "vaultRotateBody": "A troca substitui a chave que cifra suas bases por uma nova: pede sua senha outra vez e o app reinicia. Quando você abrir de novo, a troca acontece antes de abrir qualquer coisa, e tudo continua abrindo com a sua mesma senha.",
+    "vaultRotatePassword": "Sua senha do cofre, outra vez",
+    "vaultRotateConfirm": "Entendo que o app vai reiniciar para trocar a chave",
+    "vaultRotateButton": "Trocar a chave e reiniciar",
+    "vaultRotateDone": "A chave foi trocada no último desbloqueio: tudo abre com a chave nova.",
+    "vaultRotateRecovered": "Uma troca que ficou pela metade foi concluída no desbloqueio: está tudo em ordem.",
+    "vaultRotateFailed": "A troca não pôde ser feita no último desbloqueio; sua chave de sempre continua valendo. O problema ficou registrado.",
+    "vaultRotateReauthFailed": "Essa senha não abre o cofre: nenhuma troca foi pedida.",
     "goToWrite": "Ir para escrever",
     "judgeFull": "verificação completa",
     "judgeLexical": "verificação por palavras",
@@ -2262,7 +2349,36 @@
       "wd6": "Sá",
       "wd7": "Do"
     },
-    "birthdayLeapNote": "Só vai tocar em anos bissextos"
+    "birthdayLeapNote": "Só vai tocar em anos bissextos",
+    "importEvents": "Importar .ics",
+    "importContacts": "Importar .vcf",
+    "exportFile": "Exportar",
+    "importTitleEvents": "Importar eventos",
+    "importTitleContacts": "Importar contatos",
+    "importCountsEvents": "Entram {{enter}} de {{total}} eventos; {{already}} já estavam no seu calendário.",
+    "importCountsContacts": "Entram {{enter}} de {{total}} fichas; {{already}} já estavam nos seus contatos.",
+    "importRecurring": "{{n}} se repetem conforme a regra deles.",
+    "importNamedExdate": "Datas soltas retiradas da série: {{names}}",
+    "importNamedValarm": "Com aviso dentro do próprio evento: {{names}}",
+    "importNamedUnbounded": "Repetem sem data de fim; aqui o aviso toca durante um ano: {{names}}",
+    "importNamedTzid": "Trazem o próprio fuso horário e ficam guardados no seu: {{names}}",
+    "importWithoutUid": "{{n}} sem identificador: se você importar o mesmo arquivo de novo, eles entram outra vez.",
+    "importTruncated": "{{n}} campos vieram longos demais e ficam guardados cortados.",
+    "importDiscardProperty": "A propriedade {{prop}} de «{{name}}» passa do tamanho guardado e não entra.",
+    "importDiscardNoStart": "«{{name}}» não traz hora de início e não entra.",
+    "importDiscardBadStart": "A hora de início de «{{name}}» não dá para ler e ele não entra.",
+    "importDiscardTooManyOccurrences": "«{{name}}» se repete vezes demais e não entra.",
+    "importDiscardRecurrence": "«{{name}}» entra uma única vez: o jeito dele de se repetir não fica guardado.",
+    "importDiscardPhoto": "A foto de «{{name}}» não fica guardada: as fichas do NIDO não guardam fotos.",
+    "importDiscardNoName": "Uma ficha sem nome não entra.",
+    "importRejectedTooLarge": "O arquivo passa de 25 MB: nada foi importado. Divida em arquivos menores e tente de novo.",
+    "importRejectedLineTooLong": "O arquivo traz uma linha longa demais: nada foi importado. Costuma acontecer quando o arquivo está danificado ou não é de calendário nem de contatos.",
+    "importRejectedTooMany": "O arquivo traz mais de 20.000 eventos ou fichas: nada foi importado. Divida em arquivos menores e tente de novo.",
+    "importUnreadable": "Esse arquivo não pôde ser lido.",
+    "importSave": "Guardar",
+    "importCancel": "Cancelar",
+    "importDone": "Guardado: {{n}} novos na sua agenda.",
+    "exportDone": "Exportado para {{path}}."
   },
   "noticesSettings": {
     "title": "Avisos",

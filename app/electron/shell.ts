@@ -318,6 +318,18 @@ export interface ShellHooks {
     // producción la pide; el banco lanza cuantas instancias
     // necesite su arnés sin pelearse con esta cerradura.
     singleInstance?: boolean;
+    // E11 (paso 7): la segunda instancia entrega sus
+    // argumentos a la primera (el enlace nido:// viaja en
+    // ellos); la primera ya despertó y enfocó su ventana
+    // en el manejador de abajo. Sin este gancho, la
+    // llegada en caliente perdería el enlace.
+    onSecondInstanceArgv?: (argv: string[]) => void;
+    // E11 (paso 7): la llegada por open-url de macOS. Se
+    // registra siempre; en Windows y Linux el sistema
+    // entrega el enlace por los argumentos y este camino
+    // no se ejecuta (su prueba es de la plataforma, con
+    // sede en E12).
+    onOpenUrl?: (url: string) => void;
     // E8 (paso 6): el residente en bandeja, consultado al
     // cerrar la ventana y en window-all-closed. Con residente,
     // cerrar oculta la ventana y el proceso sigue (es el mismo
@@ -499,14 +511,38 @@ export function bootShell(hooks: ShellHooks = {}) {
             app.quit();
             return;
         }
-        app.on("second-instance", () => {
+        app.on("second-instance", (_event, argv) => {
             if (win) {
                 if (win.isMinimized())
                     win.restore();
                 win.focus();
             }
+            // E11 (paso 7): el enlace de la segunda
+            // instancia se entrega a la primera por el
+            // gancho; la instancia que sale no resuelve
+            // nada por su cuenta.
+            hooks.onSecondInstanceArgv?.(argv);
         });
     }
+
+    // E11 (paso 7): el cliente de protocolo declarado del
+    // esquema nido. La app se anuncia al sistema como la
+    // que abre los enlaces nido:// (su registro en el
+    // sistema instalado es la partida de E12; aquí vive la
+    // declaración y el manejo). La llegada es por los
+    // argumentos (instancia única) en Windows y Linux, y
+    // por open-url en macOS.
+    if (process.defaultApp) {
+        app.setAsDefaultProtocolClient("nido", process.execPath, [
+            path.resolve(process.argv[1]),
+        ]);
+    } else {
+        app.setAsDefaultProtocolClient("nido");
+    }
+    app.on("open-url", (event, url) => {
+        event.preventDefault();
+        hooks.onOpenUrl?.(url);
+    });
 
     // Arranque sin red silenciosa (CARCASA-RED-ARRANQUE): la
     // actualización de componentes de Chromium, desactivada por

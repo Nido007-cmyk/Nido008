@@ -4,7 +4,7 @@
  * See LICENSE file for details.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 
 // __DEV__ es un global de React Native: se define para el entorno de test.
 vi.hoisted(() => {
@@ -25,7 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { SENSITIVE_TOOLS, confirmBlockedMessage, withConfirmation } from "./confirm.js";
-import { buildToolHandlers } from "./handlers.js";
+import { buildToolHandlers, setHandlerLangForTest } from "./handlers.js";
 import { setAppStoreDekProvider, setAppStoreDir } from "../../security/appStore.js";
 import { closeDatabase } from "../../security/databaseManager.js";
 import { listEvents } from "../memory/calendarStore.js";
@@ -40,8 +40,9 @@ describe("confirm: puerta de confirmación", () => {
     // M-6: decidir sobre una tarea remota encolada es una acción sensible.
     expect(SENSITIVE_TOOLS.has("nido_approve_task")).toBe(true);
     expect(SENSITIVE_TOOLS.has("nido_reject_task")).toBe(true);
-    // P-F1: abrir un enlace externo cambia de app; requiere confirmación.
-    expect(SENSITIVE_TOOLS.has("open_app")).toBe(true);
+    // Forma A del catálogo (cura O-1): open_app salió del catálogo
+    // de PC entero; ya no es sensible porque ya no es herramienta.
+    expect(SENSITIVE_TOOLS.has("open_app")).toBe(false);
     expect(SENSITIVE_TOOLS.has("nido_review_tasks")).toBe(false); // solo lectura
     // Forma A del catálogo (bloque de piezas sueltas): place_call y
     // send_sms salieron del catálogo de PC enteros; ya no son
@@ -151,6 +152,22 @@ describe("confirm: puerta de confirmación", () => {
 });
 
 describe("confirm: integración con handlers", () => {
+  // Reconciliación I18N-2 (extensión dirimida por el coordinador,
+  // con su causa): cuatro casos de este describe cobran textos
+  // servidos por L() en español («Evento creado», «Recordatorio
+  // guardado», «Mensaje para «Beto» guardado…», «Indica el nombre
+  // de la skill…») y nunca fijaban el idioma de los handlers.
+  // Pasaban porque uiLang() caía por el require perezoso muerto a
+  // su defecto duro «es»; con el módulo i18n del núcleo vivo
+  // (I18N-2), uiLang() lee el idioma del módulo, que en el banco
+  // nace en el del dispositivo, y los textos salen en ese idioma.
+  // Los cuatro fijan ahora setHandlerLangForTest("es") por caso,
+  // con la misma forma de las reconciliaciones de handlersFaseE,
+  // y este afterEach restaura la fijación tras cada caso.
+  afterEach(() => {
+    setHandlerLangForTest(null);
+  });
+
   it("create_calendar_event cancelado no toca el calendario", async () => {
     const h = buildToolHandlers({ requestConfirm: async () => false });
     const out = await h["create_calendar_event"]({ title: "X", start: "2026-09-28T10:00:00" });
@@ -161,6 +178,10 @@ describe("confirm: integración con handlers", () => {
     // E7 paso 2: el handler es el calendario real de NIDO. Con la
     // puerta aprobada y una base cifrada temporal, llegar al
     // handler = el evento queda creado en la base.
+    // I18N-2: el caso cobra «Evento creado» (L() en español);
+    // fija el idioma expresamente (causa en la cabecera del
+    // describe).
+    setHandlerLangForTest("es");
     const dir = mkdtempSync(join(tmpdir(), "nido-confirm-cal-"));
     setAppStoreDir(dir);
     setAppStoreDekProvider(() => Buffer.from(randomBytes(32)));
@@ -204,12 +225,30 @@ describe("confirm: integración con handlers", () => {
   // segundo y el tercer expect. La fecha es calculada (+24 h): el
   // handler rechaza fechas pasadas y una fecha literal pudriría el caso.
   it("create_reminder con fecha futura y la costura real: el aviso es el de memoria, nunca el del sistema", async () => {
-    const h = buildToolHandlers({ requestConfirm: async () => true });
-    const at = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
-    const out = await h["create_reminder"]({ text: "pagar la luz", at });
-    expect(out).toContain("Recordatorio guardado");
-    expect(out).toContain("Te avisaré al abrir NIDO cuando llegue la hora.");
-    expect(out).not.toContain("Te llegará un aviso del sistema");
+    // Desde la cura H-01 el almacén es el persistente: el caso
+    // monta su base temporal con su DEK, como el de calendario
+    // de arriba. Sin residente en el banco, osNoticeWillFire es
+    // falso y la letra sigue siendo la de memoria.
+    // I18N-2: el caso cobra «Recordatorio guardado» y el aviso en
+    // español (L()); fija el idioma expresamente (causa en la
+    // cabecera del describe).
+    setHandlerLangForTest("es");
+    const dir = mkdtempSync(join(tmpdir(), "nido-confirm-rem-"));
+    setAppStoreDir(dir);
+    setAppStoreDekProvider(() => Buffer.from(randomBytes(32)));
+    try {
+      const h = buildToolHandlers({ requestConfirm: async () => true });
+      const at = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+      const out = await h["create_reminder"]({ text: "pagar la luz", at });
+      expect(out).toContain("Recordatorio guardado");
+      expect(out).toContain("Te avisaré al abrir NIDO cuando llegue la hora.");
+      expect(out).not.toContain("Te llegará un aviso del sistema");
+    } finally {
+      await closeDatabase();
+      setAppStoreDekProvider(null);
+      setAppStoreDir(null);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("nido_send_message cancelado no envía nada", async () => {
@@ -228,6 +267,10 @@ describe("confirm: integración con handlers", () => {
   // handler curado ya no acepta destinatarios sin emparejar, y
   // afirma el texto verdadero de la cola; la planta no cambia.
   it("nido_send_message confirmado con el mensajero real: queda en la cola de salida, nunca «enviado»", async () => {
+    // I18N-2: el caso cobra el texto de la cola en español (L());
+    // fija el idioma expresamente (causa en la cabecera del
+    // describe).
+    setHandlerLangForTest("es");
     const { generateIdentity } = await import("../../p2p/crypto.js");
     const { encodePairingPayload } = await import("../../p2p/pairing.js");
     const h = buildToolHandlers({ requestConfirm: async () => true });
@@ -321,7 +364,6 @@ describe("confirm: integración con handlers", () => {
       "nido_pair",
       "nido_approve_task",
       "nido_reject_task",
-      "open_app",
     ]) {
       const out = await h[tool](args);
       // El texto es EXACTAMENTE el bloqueo M-3: ningún handler produjo su
@@ -336,6 +378,10 @@ describe("confirm: integración con handlers", () => {
   // Planta P-SKILL: listSkills añade una skill «Fantasma» → caen las
   // dos aserciones.
   it("use_skill sin nombre lista exactamente las built-in, por nombre (ninguna skill fingida)", async () => {
+    // I18N-2: el caso cobra «Indica el nombre de la skill…» (L()
+    // en español); fija el idioma expresamente (causa en la
+    // cabecera del describe).
+    setHandlerLangForTest("es");
     const { listSkills } = await import("../skills/registry.js");
     expect(listSkills().map((s) => s.name)).toEqual([
       "analiza-datos",

@@ -970,8 +970,6 @@
     "rejectTaskTitle": "Reject NIDO task",
     "rejectTaskMessage": "Reject this task from “{{sender}}”?\n\n{{action}}",
     "taskNotFound": "There is no pending task with that id (it may already have been decided).",
-    "scopeOpenApp": "Scope: only this destination: {{target}}",
-    "scopeOpenAppRejected": "Scope: nothing will be opened.",
     "scopeCreateEvent": "Scope: only this event: “{{title}}” ({{start}})",
     "scopeSendMessage": "Scope: only this message, only to {{to}}",
     "scopePair": "Scope: only this person: {{name}} ({{fingerprint}})",
@@ -981,16 +979,6 @@
     "confirmBlocked": "Blocked for security: “{{tool}}” requires explicit user confirmation, but the confirmation channel is not available. The action was NOT executed.",
     "confirmCancelled": "Understood, I did nothing.",
     "confirmPayloadChanged": "Blocked for security: the payload of “{{tool}}” changed after confirmation. The action was NOT executed.",
-    "openAppTitle": "Open external link",
-    "openAppMessage": "Open this link outside NIDO?\n\n{{target}}",
-    "openAppRejected": "NIDO can't open this link ({{reason}}). Allowed schemes: https, tel, sms, mailto.",
-    "openAppReason": {
-      "empty": "it's empty",
-      "no-scheme": "it doesn't start with a valid scheme",
-      "scheme-not-allowed": "its scheme isn't allowed",
-      "unsafe-chars": "it contains unsafe characters",
-      "insecure-http": "it is an unencrypted http link; the https version is the one to open"
-    },
     "pairDisambiguationTitle": "Disambiguate pairing",
     "pairAmbiguousAsk": "This code is for “{{name}}” (fingerprint {{fingerprint}}), but you already have {{count}} live contact(s) with that name under a DIFFERENT identity: {{candidates}}. A name is not an identity — I cannot assume this is the same person.\n\nTell me explicitly (in chat):\n• “replace” — the same person with a new device: removes the old identity from your contact list (destructive);\n• “different person” — a different person: give me a unique name for the new contact;\n• “cancel” — do nothing.\n\nIf you don't choose, I cancel. Nothing has been paired yet.",
     "pairReplaceConfirmMessage": "REPLACE the identity of “{{name}}”?\nFingerprint: {{fingerprint}}\n\nThis removes the old identity from this session's contact list. Any messages you had in the outbox for this name stay in the outbox under the same name. This cannot be undone. Confirm only if you verified this code in person.",
@@ -1333,6 +1321,7 @@
   "agentPermissions": {
     "historyTitle": "What the agent did",
     "historyEmpty": "No actions yet.",
+    "historyBody": "Every tool the agent used or tried to use. Only the tool name and the result are kept, never the content. It is stored encrypted on this computer and you can delete it.",
     "confirmed": "you confirmed",
     "toolsTitle": "Agent permissions",
     "toolsBody": "Turn off any tool you do not want the agent to use. Actions that change something keep asking you first; that cannot be turned off.",
@@ -1341,6 +1330,7 @@
       "executed": "Done",
       "blocked": "Blocked by security policy",
       "disabled": "Turned off by you",
+      "denied": "Denied by the turn policy",
       "cancelled": "Not confirmed",
       "invalid": "Invalid request",
       "failed": "Failed"
@@ -1549,7 +1539,8 @@
               "Ask for an event in chat, with the day and the time: NIDO saves it to your calendar.",
               "Open the Agenda section: under Calendar you see the month and your events, and you can create or fix one by hand.",
               "Under Contacts you save your people with their birthday: NIDO prepares the reminder every year.",
-              "When you look someone up in chat, NIDO answers from these contacts. On this PC it cannot call or text: it shows you the saved number so you can dial from your phone."
+              "When you look someone up in chat, NIDO answers from these contacts. On this PC it cannot call or text: it shows you the saved number so you can dial from your phone.",
+              "You can also bring your calendar or your contacts from a file: under Calendar, tap Import .ics, and under Contacts, Import .vcf. Before saving anything, NIDO shows you a summary of what will be added and what will not, and nothing is saved until you tap Save. With Export you get the whole file, to take to another program or keep as a copy."
             ],
             "examples": [
               "schedule dentist on Friday at 10",
@@ -1605,11 +1596,12 @@
           {
             "id": "memoria-cifrada-y-su-puerta",
             "title": "The encrypted memory and its gate",
-            "what": "Everything NIDO keeps for you (your conversations, your notes, your reminders and your settings) is stored encrypted on your computer, inside a vault that only opens with your password. Without that password, the app hands over nothing: not your things, not even a hint of what is inside.",
+            "what": "Everything NIDO keeps for you (your conversations, your notes, your reminders and your settings) is stored encrypted on your computer, inside a vault that only opens with your password. Without that password, the app hands over nothing: not your things, not even a hint of what is inside. From Settings, under Security, you can save a backup of your encrypted databases in a .nidbackup file locked with its own password, and rotate the vault key: rotation asks for your password again, restarts the app, and runs at unlock, before anything opens.",
             "steps": [
               "Close the app and open it again.",
               "The gate asks for your password before showing anything.",
-              "Type it and come in: your conversations and your things are intact, just as you left them."
+              "Type it and come in: your conversations and your things are intact, just as you left them.",
+              "In Settings, under Security, export your backup and keep it off the computer; without its password, that file cannot be restored."
             ],
             "examples": [],
             "tip": "If you forget the password, there is no way to recover what is stored: the gate keeps no copy of your key, and what is stored is lost with it. Keep your password somewhere safe, off the computer if you can."
@@ -1726,6 +1718,36 @@
               "why do clouds form?"
             ],
             "tip": "The tone governs only the answers the model writes. Greetings and the app's exact answers, like the time or a calculation, do not change with the tone, because the model does not write them: they come from the app itself, always the same."
+          },
+          {
+            "id": "paleta-de-comandos",
+            "title": "The command palette",
+            "what": "Ctrl+K opens the palette: a search over everything you can do without walking the menus. Type a few letters and up come the actions with their shortcut, the sections, your conversations, the settings, this guide's lessons and the packs. Everything is searched on your computer, on the spot, with no network involved.",
+            "steps": [
+              "Press Ctrl+K wherever you are in the app.",
+              "Type what you are looking for; accents or no accents, it finds it the same.",
+              "Move with the arrow keys and enter with Enter, or click the result.",
+              "Escape closes the palette without doing anything.",
+              "The field invites you with “Search chats, sections and settings”; if nothing matches, the palette says so and invents nothing: “No results on this device.”"
+            ],
+            "examples": [
+              "how do I find an old conversation?"
+            ],
+            "tip": "The palette keeps no second hidden list: it offers the same things the bar, the settings and the shortcut sheet already offer, together and searchable."
+          },
+          {
+            "id": "atajos-de-teclado",
+            "title": "Keyboard shortcuts",
+            "what": "Almost everything in the window can be done without leaving the keyboard: a new conversation with Ctrl+N, search across all conversations with Ctrl+Shift+F, search in the open chat with Ctrl+F, go to the end with End, switch section with Ctrl+1 to Ctrl+8, and make the text bigger or smaller with Ctrl++ and Ctrl+−. No shortcut is global: they only work while the NIDO window is in front.",
+            "steps": [
+              "Press Ctrl+/ to open the sheet with every shortcut.",
+              "In Settings, under Appearance, you choose whether Enter sends the message or starts a new line; the sheet always shows the position you have set.",
+              "Ctrl+0 brings the text back to its normal size."
+            ],
+            "examples": [
+              "what keyboard shortcuts can I use?"
+            ],
+            "tip": "If a reply is on its way, Escape stops it before anything else; if there is none, Escape closes whatever is open."
           }
         ]
       }
@@ -1963,6 +1985,71 @@
     "fitYellow": "It barely fits this computer",
     "fontSize": "Text size",
     "goToEnd": "Go to the end",
+    "shortcutsTitle": "Keyboard shortcuts",
+    "shortcutNewChat": "New conversation",
+    "shortcutGlobalSearch": "Search all conversations",
+    "shortcutSearchInChat": "Search this conversation",
+    "shortcutGoEnd": "Go to the end of the conversation",
+    "shortcutStopOrClose": "Stop the reply, or close what is open",
+    "shortcutSection": "Switch section",
+    "shortcutModelManager": "Open the model manager",
+    "shortcutSend": "Send the message",
+    "shortcutEmergencySend": "Stop and send the emergency now",
+    "shortcutOpenSheet": "Show this shortcut sheet",
+    "shortcutZoomIn": "Make the text bigger",
+    "shortcutZoomOut": "Make the text smaller",
+    "shortcutZoomReset": "Back to the normal text size",
+    "findPlaceholder": "Search this conversation",
+    "findPrevious": "Previous",
+    "findNext": "Next",
+    "findClose": "Close",
+    "sendWithEnter": "Send with Enter",
+    "sendWithEnterHint": "On: Enter sends and Ctrl+Enter starts a new line. Off: Enter starts a new line and Ctrl+Enter sends.",
+    "attachmentRemove": "Remove attachment",
+    "dropReasonArchive": "compressed archive not accepted; drop it uncompressed",
+    "dropReasonSpreadsheet": "it is a spreadsheet; export it to CSV and drop it again",
+    "dropReasonOldOffice": "it is an old Office document; save it in the new format",
+    "dropReasonUnknown": "unrecognized format",
+    "attachedMaterial": "Attached material",
+    "attachedNoText": "no extractable text",
+    "attachedTruncated": "trimmed",
+    "exportConversation": "Export",
+    "exportAsMarkdown": "Save as Markdown",
+    "exportAsText": "Save as plain text",
+    "exportYou": "You",
+    "exportedTo": "Saved to {{path}}",
+    "panelContext": "Context",
+    "panelMemory": "App memory",
+    "fontStepSmall": "Small",
+    "fontStepCompact": "Compact",
+    "fontStepStandard": "Normal",
+    "fontStepLarge": "Large",
+    "fontStepExtraLarge": "Extra large",
+    "linkMalformed": "That link is not a NIDO link or cannot be understood; nothing was opened.",
+    "linkChatMissing": "That conversation is no longer on this device.",
+    "linkGuideMissing": "That guide is not on this device.",
+    "linkGuideNotInstalled": "That guide belongs to a pack that is not installed; this is its place in the library, installing nothing.",
+    "splitOpen": "Split",
+    "splitReadBeside": "Reading beside",
+    "searchPlaceholder": "Search all your conversations",
+    "searchNoResults": "No results for that search.",
+    "searchLocked": "Search needs the vault open.",
+    "vaultBackupTitle": "Vault backup",
+    "vaultBackupBody": "Save your encrypted databases in a single .nidbackup file, locked with its own password. That file is the key to your backup: it cannot be restored without its password, and it is not the same as your vault password.",
+    "vaultBackupPassword": "Backup password (at least 8 characters)",
+    "vaultBackupPasswordShort": "The backup password needs at least 8 characters.",
+    "vaultBackupExport": "Export the backup",
+    "vaultBackupDone": "Backup saved to {{path}}",
+    "vaultBackupFailed": "The backup could not be created.",
+    "vaultRotateTitle": "Rotate the vault key",
+    "vaultRotateBody": "Rotation replaces the key that encrypts your databases with a new one: it asks for your password again and the app restarts. When you open it again, the rotation runs before anything opens, and everything keeps opening with your same password.",
+    "vaultRotatePassword": "Your vault password, once more",
+    "vaultRotateConfirm": "I understand the app will restart to rotate the key",
+    "vaultRotateButton": "Rotate the key and restart",
+    "vaultRotateDone": "The key was rotated at the last unlock: everything opens with the new key.",
+    "vaultRotateRecovered": "A rotation that was left unfinished was completed at unlock: everything is in order.",
+    "vaultRotateFailed": "The rotation could not run at the last unlock; your usual key still rules. The problem was recorded.",
+    "vaultRotateReauthFailed": "That password does not open the vault: no rotation was requested.",
     "goToWrite": "Go to writing",
     "judgeFull": "full check",
     "judgeLexical": "word check",
@@ -2262,7 +2349,36 @@
       "wd6": "Sa",
       "wd7": "Su"
     },
-    "birthdayLeapNote": "It will only sound in leap years"
+    "birthdayLeapNote": "It will only sound in leap years",
+    "importEvents": "Import .ics",
+    "importContacts": "Import .vcf",
+    "exportFile": "Export",
+    "importTitleEvents": "Import events",
+    "importTitleContacts": "Import contacts",
+    "importCountsEvents": "{{enter}} of {{total}} events will be added; {{already}} were already in your calendar.",
+    "importCountsContacts": "{{enter}} of {{total}} cards will be added; {{already}} were already in your contacts.",
+    "importRecurring": "{{n}} repeat by their rule.",
+    "importNamedExdate": "Single dates removed from their series: {{names}}",
+    "importNamedValarm": "With a reminder inside the event itself: {{names}}",
+    "importNamedUnbounded": "They repeat with no end date; here their reminder sounds for one year: {{names}}",
+    "importNamedTzid": "They carry their own time zone and are kept in yours: {{names}}",
+    "importWithoutUid": "{{n}} have no identifier: if you import the same file again, they will be added again.",
+    "importTruncated": "{{n}} fields arrived too long and are kept trimmed.",
+    "importDiscardProperty": "The {{prop}} property of “{{name}}” is over the size that is kept and will not be added.",
+    "importDiscardNoStart": "“{{name}}” has no start time and will not be added.",
+    "importDiscardBadStart": "The start time of “{{name}}” cannot be read and it will not be added.",
+    "importDiscardTooManyOccurrences": "“{{name}}” repeats too many times and will not be added.",
+    "importDiscardRecurrence": "“{{name}}” is added once only: its way of repeating is not kept.",
+    "importDiscardPhoto": "The photo of “{{name}}” is not kept: NIDO cards do not keep photos.",
+    "importDiscardNoName": "A card with no name is not added.",
+    "importRejectedTooLarge": "The file is over 25 MB: nothing was imported. Split it into smaller files and try again.",
+    "importRejectedLineTooLong": "The file has a line that is too long: nothing was imported. This usually means the file is damaged or is not a calendar or contacts file.",
+    "importRejectedTooMany": "The file has more than 20,000 events or cards: nothing was imported. Split it into smaller files and try again.",
+    "importUnreadable": "That file could not be read.",
+    "importSave": "Save",
+    "importCancel": "Cancel",
+    "importDone": "Saved: {{n}} new entries in your agenda.",
+    "exportDone": "Exported to {{path}}."
   },
   "noticesSettings": {
     "title": "Notices",

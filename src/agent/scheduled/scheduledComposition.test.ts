@@ -21,8 +21,10 @@
  * memoria; el runner, el programador y el loop son los reales.
  *
  * Porte de PC (E8, paso 8): los dobles se adaptan a las costuras
- * de PC — la memoria se compone de getFacts/getPeople (sin
- * snapshot) y notifyNow toma la carga entera. Los casos llevan
+ * de PC — la memoria era la composición de getFacts/getPeople
+ * de la costura; con la cura H-01 el doble trae el `snapshot`
+ * del almacén persistente, como la fuente. notifyNow toma la
+ * carga entera. Los casos llevan
  * 60 s de plazo: en esta VM compartida la transformación del
  * grafo del bucle tarda ~15 s por fichero (medido), contra el
  * CI rápido del móvil; el plazo no cambia ninguna aserción.
@@ -44,6 +46,7 @@ const state = vi.hoisted(() => ({
 vi.mock("../memory/memoryStore.js", () => ({
   getFacts: vi.fn(async () => []),
   getPeople: vi.fn(async () => []),
+  snapshot: vi.fn(async () => ({ facts: [], preferences: [], people: [], recentLog: [] })),
   listNotes: vi.fn(async () => NOTES.map((n) => ({ ...n }))),
   listReminders: vi.fn(async () => []),
   saveFact: vi.fn(async (f: unknown) => f),

@@ -10,16 +10,23 @@
  * handlers de la casa, más la lectura de las descripciones del
  * manifiesto desde su módulo.
  *
- * Ejecución declarada de los diálogos en esta casa: el módulo
- * i18n de la app no se resuelve en el banco, así que
- * agentConfirmT sirve siempre la tabla de reserva en inglés (su
- * cuarto asiento). Los casos de diálogo cobran por tanto los
- * cuatro asientos así: los tres locales se leen de sus JSON con
- * la interpolación aplicada, y el asiento en inglés se cobra
- * además servido por el handler a través del canal de
- * confirmación capturado. Es la advertencia de la preparación
- * cobrada en su forma real, y se declara aquí para que nadie lo
- * lea como omisión.
+ * Ejecución declarada de los diálogos en esta casa:
+ * reconciliación I18N-2 (con su causa). Esta cabecera declaraba
+ * que el módulo i18n no se resolvía en el banco y que
+ * agentConfirmT servía siempre la tabla de reserva en inglés;
+ * esa era la forma del hueco, no el diseño. Con el módulo del
+ * núcleo creado y resuelto por import estático (I18N-2), los
+ * casos de diálogo fijan el idioma del módulo expresamente
+ * (changeLanguage) y el asiento en inglés se cobra servido por
+ * el handler a través del canal de confirmación capturado, por
+ * el módulo vivo y no por la reserva. Los casos cobran por
+ * tanto los cuatro asientos así: los tres locales se leen de
+ * sus JSON con la interpolación aplicada, y el asiento en
+ * inglés se cobra además servido. Los dos controles que cobran
+ * textos por L() sin fijar idioma (nido_read_inbox,
+ * nido_my_code) salían en español del defecto «es» de la
+ * cadena muerta en uiLang; ahora fijan el idioma de los
+ * handlers expresamente, como el resto de la batería.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { buildToolHandlers, setHandlerLangForTest } from "./handlers.js";
@@ -30,6 +37,8 @@ import { encodePairingPayload } from "../../p2p/pairing.js";
 import esJson from "../../i18n/locales/es.json" with { type: "json" };
 import enJson from "../../i18n/locales/en.json" with { type: "json" };
 import ptJson from "../../i18n/locales/pt.json" with { type: "json" };
+import i18n from "../../i18n/index.js";
+import { deviceDefaultLanguage } from "../../models/settings.js";
 
 type Req = { title: string; message: string };
 
@@ -43,6 +52,7 @@ const H = (capture?: Req[], confirm = true) =>
 
 afterEach(() => {
   setHandlerLangForTest(null);
+  i18n.changeLanguage(deviceDefaultLanguage());
 });
 
 function codeFor(name: string): { code: string; fp: string } {
@@ -120,10 +130,11 @@ describe("F-PC68 · el texto del envío y sus asientos", () => {
     );
   });
 
-  it("el diálogo, en inglés: la forma curada en el locale y servida por el handler (la reserva)", async () => {
+  it("el diálogo, en inglés: la forma curada en el locale y servida por el handler (el módulo fijado en inglés)", async () => {
     expect(seat(enJson, "sendMessageMessage", { to: "Beto", text: "hola Beto" })).toBe(
       "Save a message for “Beto” in this session's outbox (unencrypted)?\n\n“hola Beto”",
     );
+    i18n.changeLanguage("en");
     const capture: Req[] = [];
     const h = H(capture);
     await h["nido_send_message"]({ to: "Beto", text: "hola Beto" });
@@ -182,12 +193,13 @@ describe("F-PC72 · los textos del emparejamiento", () => {
     );
   });
 
-  it("el diálogo, en inglés: la forma curada en el locale y servida por el handler (la reserva)", async () => {
+  it("el diálogo, en inglés: la forma curada en el locale y servida por el handler (el módulo fijado en inglés)", async () => {
     const cured =
       "REPLACE the identity of “Beto”?\nFingerprint: " +
       FP +
       "\n\nThis removes the old identity from this session's contact list. Any messages you had in the outbox for this name stay in the outbox under the same name. This cannot be undone. Confirm only if you verified this code in person.";
     expect(seat(enJson, "pairReplaceConfirmMessage", { name: "Beto", fingerprint: FP })).toBe(cured);
+    i18n.changeLanguage("en");
     const h = H();
     await pairOk(h, "Cambio F72");
     const capture: Req[] = [];
@@ -221,7 +233,7 @@ describe("F-PC72 · los textos del emparejamiento", () => {
     expect(s).not.toContain("en todas partes");
   });
 
-  it("la viñeta, en inglés: «from your contact list», en el locale y servida por el handler (la reserva)", async () => {
+  it("la viñeta, en inglés: «from your contact list», en el locale y servida por el handler (el módulo fijado en inglés)", async () => {
     const s = seat(enJson, "pairAmbiguousAsk", {
       name: "Beto",
       fingerprint: FP,
@@ -230,6 +242,7 @@ describe("F-PC72 · los textos del emparejamiento", () => {
     });
     expect(s).toContain("removes the old identity from your contact list (destructive)");
     expect(s).not.toContain("everywhere");
+    i18n.changeLanguage("en");
     const h = H();
     await pairOk(h, "Duda F72");
     const capture: Req[] = [];
@@ -277,12 +290,19 @@ describe("F-PC69 · la superficie del agente", () => {
 
 describe("controles", () => {
   it("nido_read_inbox sin mensajes: su verdad de hoy", async () => {
+    // I18N-2: el idioma se fija expresamente; antes salía en
+    // español del defecto «es» de la cadena muerta en uiLang.
+    setHandlerLangForTest("es");
     const h = H();
     const out = await h["nido_read_inbox"]({});
     expect(out).toBe("No tienes mensajes NIDO sin leer.");
   });
 
   it("nido_pair cancelado por el usuario: el texto de cancelación, sin efectos", async () => {
+    // I18N-2: el texto de cancelación lo sirve el núcleo de
+    // confirmación en el idioma del módulo, fijado expresamente;
+    // antes lo servía la tabla de reserva por la cadena muerta.
+    i18n.changeLanguage("en");
     const h = H(undefined, false);
     const { code } = codeFor("Cancelada F72");
     const out = await h["nido_pair"]({ code });
@@ -292,6 +312,9 @@ describe("controles", () => {
   });
 
   it("nido_my_code: la cabecera y la huella, sin promesa añadida", async () => {
+    // I18N-2: el idioma se fija expresamente; antes salía en
+    // español del defecto «es» de la cadena muerta en uiLang.
+    setHandlerLangForTest("es");
     const h = H();
     const out = await h["nido_my_code"]({});
     expect(out).toContain("Tu código de emparejamiento NIDO");

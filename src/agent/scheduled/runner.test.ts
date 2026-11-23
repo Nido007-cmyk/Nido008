@@ -162,7 +162,7 @@ describe("schedules", () => {
   });
 
   it("a task cannot be created with a tool that needs a person present", () => {
-    for (const tool of ["open_app", "create_calendar_event", "read_picked_file", "nido_send_message"]) {
+    for (const tool of ["create_calendar_event", "read_picked_file", "nido_send_message"]) {
       const { task: t, errors } = createTask({
         name: "x",
         schedule: "0 7 * * *",

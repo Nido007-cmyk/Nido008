@@ -26,7 +26,7 @@ import {
   type LabeledContent,
   type PolicyDecision,
 } from "../policy/policyEngine.js";
-import { SENSITIVE_TOOLS } from "./confirm.js";
+import { SENSITIVE_TOOLS, confirmCancelledMessage } from "./confirm.js";
 import {
   composeToolPolicy,
   type ToolPolicyTable,
@@ -413,7 +413,15 @@ export async function dispatchToolCallDetailed(
     actionLog.record(validated.tool.name, "failed", false, undefined, decision.injectionOrigin);
     return { status: "failed", text: `Error ejecutando "${validated.tool.name}": ${e?.message ?? String(outcome.error)}` };
   }
-  actionLog.record(validated.tool.name, "executed", decision.requiresConfirmation, undefined, decision.injectionOrigin);
+  // CONF-2: si el handler envuelto devolvió el mensaje de
+  // cancelación de withConfirmation (la persona rechazó en su
+  // puerta), nada se ejecutó: la entrada del registro dice
+  // «cancelled». El resultado que el despacho devuelve (estado
+  // y texto) no cambia, como el acto 0 de la pieza asentó: lo
+  // que mentía era solo la entrada del registro.
+  const rechazadaEnSuPuerta =
+    typeof outcome.result === "string" && outcome.result === confirmCancelledMessage();
+  actionLog.record(validated.tool.name, rechazadaEnSuPuerta ? "cancelled" : "executed", decision.requiresConfirmation, undefined, decision.injectionOrigin);
   return { status: "executed", text: typeof outcome.result === "string" ? outcome.result : JSON.stringify(outcome.result) };
 }
 
@@ -511,7 +519,6 @@ const TOOLS_BY_INTENT: Record<"recordar" | "actuar" | "conversar", string[]> = {
   actuar: [
     "create_reminder",
     "device_time",
-    "open_app",
     "calculate",
     "convert_units",
     "create_calendar_event",

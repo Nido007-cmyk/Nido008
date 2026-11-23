@@ -43,8 +43,10 @@
  * artefactos nombrados: términos con frontera de palabra
  * (así «microphone» no caza «phone») y las siglas SMS/SIM
  * solo en mayúsculas (así el «Sim» portugués, sí, no caza, y
- * la lista de esquemas «https, tel, sms, mailto» de
- * agentConfirm.openAppRejected, en minúsculas, tampoco).
+ * la lista de esquemas «https, tel, sms, mailto», en
+ * minúsculas, tampoco; el ejemplo que fijó esta calibración
+ * fue agentConfirm.openAppRejected, clave retirada por la
+ * cura O-1 al salir open_app del catálogo de PC).
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";

@@ -99,7 +99,7 @@ en sí.
 
 ## La cadena de confianza de descargas y paquetes
 
-Las releases se publican con un fichero `.sha256` para que
+Las releases se publicarán con un fichero `.sha256` para que
 compruebes el instalador antes de correrlo. Los paquetes de
 conocimiento se verifican igual dentro de la app, y un paquete
 cuya huella o cuya firma no coincide se rechaza, nunca se abre.

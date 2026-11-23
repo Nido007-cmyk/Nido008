@@ -17,7 +17,6 @@ import { LOCAL_TOOLS } from "../tools/manifest.js";
 
 /** Efecto fuera de la app (o irreversible): siempre con confirmación. */
 const EXTERNAL = [
-  "open_app",
   "create_calendar_event",
   "nido_send_message",
   "nido_pair",

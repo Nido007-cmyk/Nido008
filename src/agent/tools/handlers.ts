@@ -14,20 +14,22 @@
  * sobre la base cifrada de E2; el aviso del evento se
  * materializa en la cola única por noticeStore) y los
  * recordatorios materializan su aviso en `notices` desde este
- * paso. Notas, hechos y personas siguen sobre la costura en
- * memoria (../memory/memoryStore) hasta su tanda, declarado:
- * nada de lo que sigue volátil se da por persistente.
+ * paso. Notas, hechos y personas vivían sobre la costura en
+ * memoria (../memory/memoryStore) hasta la cura H-01 de la
+ * cadena, que portó el almacén persistente del móvil: desde
+ * entonces viven en la misma base cifrada y sobreviven al
+ * reinicio del proceso.
  *
  * Recrea la superficie y las conductas de los handlers de la fuente
  * 0.1.108 sobre las piezas de la capa (confirm, contactSearch,
- * externalLink, calc, convert, analyze). Las conductas
+ * calc, convert, analyze). Las conductas
  * que la puerta ejercita son las de la fuente: confirmación con el
  * payload completo y paridad N2 vía withConfirmation, el bucle M-3
  * fail-closed sin canal, y la honestidad de PC en lo que esta
- * plataforma aún no tiene (contactos del teléfono,
- * selector de archivos: el módulo nativo no existe y el handler
- * devuelve el texto de no disponible de la fuente, jamás un éxito
- * fingido).
+ * plataforma aún no tiene (contactos del teléfono —la agenda
+ * propia desde E7— y selector de archivos: en PC la
+ * herramienta responde su texto de no disponible y remite a
+ * la Biblioteca, cura H-02; jamás un éxito fingido).
  *
  * La nota de «la identidad volvió» del diálogo de emparejamiento lee
  * en la fuente el almacén P2P (findContactRowAny); la costura del
@@ -49,10 +51,6 @@ import { LOCAL_TOOLS } from "./manifest.js";
 import type { ToolHandler } from "./dispatcher.js";
 import { withConfirmation, type RequestConfirm } from "./confirm.js";
 import { actionLog } from "../actionLog.js";
-import {
-  classifyOpenAppTarget,
-  type OpenAppRejectReason,
-} from "./externalLink.js";
 import { evaluateExpression, formatNumber, isApproximate } from "./calc.js";
 import { convertUnits, ConvertError, validUnits } from "./convert.js";
 import { loadSkill, listSkills } from "../skills/registry.js";
@@ -69,9 +67,9 @@ import { decodePairingPayload } from "../../p2p/pairing.js";
 import { normalizeContactName } from "../../p2p/contactName.js";
 import { pairingBindingWarning, findPairingCollision } from "../../p2p/pairingCeremony.js";
 import { fingerprint, fromHex } from "../../p2p/crypto.js";
-import { withPermissionRequest } from "../../p2p/permissionGuard.js";
 import type { ContactSearchResult } from "../loop/contactRouter.js";
 import { formatDay, formatTime, type RouterLang } from "../loop/toolRouter.js";
+import i18n from "../../i18n/index.js";
 import {
   listPendingAgentTasks,
   getPendingAgentTask,
@@ -140,20 +138,7 @@ const EN_CONFIRM_FALLBACK: Record<string, string> = {
   "agentTasks.decideNotFound":
     "There is no pending task with id “{{id}}” (it may already have been decided).",
   "agentTasks.unknownSender": "Unknown NIDO contact",
-  // P-F1: confirmación y rechazo explícito para open_app.
-  "agentConfirm.openAppTitle": "Open external link",
-  "agentConfirm.openAppMessage": "Open this link outside NIDO?\n\n{{target}}",
-  "agentConfirm.openAppRejected":
-    "NIDO can't open this link ({{reason}}). Allowed schemes: https, tel, sms, mailto.",
-  "agentConfirm.openAppReason.empty": "it's empty",
-  "agentConfirm.openAppReason.no-scheme": "it doesn't start with a valid scheme",
-  "agentConfirm.openAppReason.scheme-not-allowed": "its scheme isn't allowed",
-  "agentConfirm.openAppReason.unsafe-chars": "it contains unsafe characters",
-  "agentConfirm.openAppReason.insecure-http":
-    "it is an unencrypted http link; the https version is the one to open",
   // P-3 (tanda 14): las frases de alcance de la tarjeta de aprobación.
-  "agentConfirm.scopeOpenApp": "Scope: only this destination: {{target}}",
-  "agentConfirm.scopeOpenAppRejected": "Scope: nothing will be opened.",
   "agentConfirm.scopeCreateEvent": "Scope: only this event: “{{title}}” ({{start}})",
   "agentConfirm.scopePlaceCall": "Scope: only this number: {{phone}}",
   "agentConfirm.scopeSendSms": "Scope: only this message, only to {{phone}}",
@@ -166,11 +151,8 @@ const EN_CONFIRM_FALLBACK: Record<string, string> = {
 
 /** Idioma vigente de la UI para formatear fechas en los diálogos. */
 function confirmLang(): RouterLang {
-  try {
-    const i18n = require("../../i18n").default as { language?: string };
-    const l = (i18n.language ?? "").slice(0, 2);
-    if (l === "es" || l === "en" || l === "pt") return l;
-  } catch { /* sin i18n: se cae al idioma de los textos de reserva */ }
+  const l = (i18n.language ?? "").slice(0, 2);
+  if (l === "es" || l === "en" || l === "pt") return l;
   return "en";
 }
 
@@ -188,19 +170,17 @@ function fmtDialogWhen(iso: string): string {
 }
 
 function agentConfirmT(): ConfirmT {
-  try {
-    const i18n = require("../../i18n").default as {
-      t(k: string, o?: unknown): string;
-    };
-    return (key, opts) => i18n.t(key, opts);
-  } catch {
-    return (key, opts) => {
-      let s = EN_CONFIRM_FALLBACK[key] ?? key;
-      for (const [k, v] of Object.entries(opts ?? {}))
-        s = s.split(`{{${k}}}`).join(v);
-      return s;
-    };
-  }
+  return (key, opts) => {
+    const served = i18n.t(key, opts);
+    if (served !== key) return served;
+    // Caída honesta (I18N-2): la clave no está en ningún locale y
+    // el módulo devolvió la propia clave; la tabla de reserva en
+    // inglés sirve su texto antes que enseñar la clave cruda.
+    let s = EN_CONFIRM_FALLBACK[key] ?? key;
+    for (const [k, v] of Object.entries(opts ?? {}))
+      s = s.split(`{{${k}}}`).join(v);
+    return s;
+  };
 }
 
 let langOverrideForTest: RouterLang | null = null;
@@ -211,11 +191,8 @@ export function setHandlerLangForTest(lang: RouterLang | null): void {
 
 function uiLang(): RouterLang {
   if (langOverrideForTest) return langOverrideForTest;
-  try {
-    const i18n = require("../../i18n").default as { language?: string };
-    const l = (i18n.language ?? "").slice(0, 2);
-    if (l === "es" || l === "en" || l === "pt") return l;
-  } catch { /* sin i18n */ }
+  const l = (i18n.language ?? "").slice(0, 2);
+  if (l === "es" || l === "en" || l === "pt") return l;
   return "es";
 }
 const L = (es: string, en: string, pt: string): string => {
@@ -558,30 +535,6 @@ const savePersonHandler: ToolHandler = async (args) => {
   return result;
 };
 
-const openAppHandler: ToolHandler = async (args) => {
-  // P-F1: se vuelve a clasificar aquí aunque el diálogo ya lo haya
-  // hecho; nunca se confía en el path.
-  const c = classifyOpenAppTarget(args.link);
-  if (!c.ok) {
-    const t = agentConfirmT();
-    return t("agentConfirm.openAppRejected", {
-      reason: t(`agentConfirm.openAppReason.${c.reason}`),
-    });
-  }
-  try {
-    const { Linking } = await import("react-native");
-    await Linking.openURL(c.normalized);
-    return L(`Abriendo ${c.normalized}…`, `Opening ${c.normalized}…`, `Abrindo ${c.normalized}…`);
-  } catch {
-    return L(`No pude abrir ${c.normalized} desde NIDO.`, `I couldn't open ${c.normalized} from NIDO.`, `Não consegui abrir ${c.normalized} do NIDO.`);
-  }
-};
-
-/** Clave i18n del motivo de rechazo de open_app según la clasificación. */
-function openAppRejectReasonKey(reason: OpenAppRejectReason): string {
-  return `agentConfirm.openAppReason.${reason}`;
-}
-
 // ---------------------------------------------------------------- Fase B
 // Calendario, contactos, archivos, calculadora, llamadas/SMS.
 // Los módulos nativos se importan de forma diferida: solo se cargan
@@ -725,47 +678,27 @@ const findContactHandler: ToolHandler = async (args) => {
   );
 };
 
-const MAX_PICKED_FILE_BYTES = 200 * 1024;
-
-const readPickedFileHandler: ToolHandler = async () => {
-  try {
-    const DocumentPicker = await import("expo-document-picker");
-    const picked = await withPermissionRequest(() =>
-      DocumentPicker.getDocumentAsync({
-        type: "*/*",
-        copyToCacheDirectory: true,
-      }),
-    );
-    if (picked.canceled || !picked.assets?.length) {
-      return L("No elegiste ningún archivo.", "You didn't choose any file.", "Você não escolheu nenhum arquivo.");
-    }
-    const asset = picked.assets[0];
-    const fallbackName = asset.name ?? L("archivo", "file", "arquivo");
-    if (asset.size != null && asset.size > MAX_PICKED_FILE_BYTES) {
-      return L(
-        `«${fallbackName}» pesa más de 200 KB; elige un archivo de texto más pequeño.`,
-        `“${fallbackName}” is over 200 KB; choose a smaller text file.`,
-        `«${fallbackName}» pesa mais de 200 KB; escolha um arquivo de texto menor.`,
-      );
-    }
-    const FS = await import("expo-file-system");
-    const buf = await new FS.File(asset.uri).arrayBuffer();
-    if (buf.byteLength > MAX_PICKED_FILE_BYTES) {
-      return L(
-        `«${fallbackName}» es demasiado grande para leerlo aquí (máx. 200 KB).`,
-        `“${fallbackName}” is too large to read here (max. 200 KB).`,
-        `«${fallbackName}» é grande demais para ler aqui (máx. 200 KB).`,
-      );
-    }
-    const text = new TextDecoder("utf-8", { fatal: false }).decode(buf);
-    if (!text.trim()) return L(`«${fallbackName}» está vacío o no es texto legible.`, `“${fallbackName}” is empty or isn't readable text.`, `«${fallbackName}» está vazio ou não é texto legível.`);
-    const shown = text.slice(0, 8000);
-    const shownName = asset.name ?? L("sin nombre", "unnamed", "sem nome");
-    return `${L(`Archivo «${shownName}»`, `File “${shownName}”`, `Arquivo «${shownName}»`)} (${Math.round(buf.byteLength / 1024)} KB):\n${shown}${text.length > shown.length ? L("\n…(recortado)", "\n…(trimmed)", "\n…(cortado)") : ""}`;
-  } catch (e) {
-    return `${L("No pude leer el archivo: ", "I couldn't read the file: ", "Não consegui ler o arquivo: ")}${e instanceof Error ? e.message : String(e)}`;
-  }
-};
+/**
+ * read_picked_file en PC (cura H-02, degradación
+ * honesta): el selector de archivos nativo no existe en
+ * esta plataforma todavía (los imports de la fuente,
+ * expo-document-picker y expo-file-system, son externos
+ * sin empaquetar y no son dependencias: el handler
+ * moría en el import y servía el error genérico con el
+ * mensaje interno del módulo). La herramienta se queda
+ * en el catálogo diciendo la verdad, en la forma de la
+ * familia NIDO: responde su texto de no disponible y
+ * remite a la vía que sí funciona (importar desde la
+ * Biblioteca o pegar el texto). La reapertura con
+ * ejecutor exige una costura de selección nueva en la
+ * carcasa: pieza con sede propia, no esta cura.
+ */
+const readPickedFileHandler: ToolHandler = async () =>
+  L(
+    "En esta computadora todavía no puedo abrir el selector de archivos. Importa el documento desde la Biblioteca de NIDO y pídeme que lo use, o pega su texto aquí.",
+    "On this computer I can't open the file picker yet. Import the document from NIDO's Library and ask me to use it, or paste its text here.",
+    "Neste computador ainda não consigo abrir o seletor de arquivos. Importe o documento pela Biblioteca do NIDO e peça para eu usá-lo, ou cole o texto dele aqui.",
+  );
 
 // ---------------------------------------------------------------- Fase D
 // Skills reutilizables e intérprete de datos.
@@ -1049,31 +982,6 @@ export function buildToolHandlers(opts?: {
     save_person: savePersonHandler,
     // propose_negotiation NO se registra (P-09 de la fuente): nunca
     // estuvo en el manifiesto y la negociación es territorio P2P.
-    open_app: withConfirmation(
-      "open_app",
-      openAppHandler,
-      opts?.requestConfirm,
-      (args) => {
-        const t = agentConfirmT();
-        const c = classifyOpenAppTarget(args.link);
-        if (!c.ok) {
-          return {
-            tool: "open_app",
-            title: t("agentConfirm.openAppTitle"),
-            message: t("agentConfirm.openAppRejected", {
-              reason: t(openAppRejectReasonKey(c.reason)),
-            }),
-            scope: t("agentConfirm.scopeOpenAppRejected"),
-          };
-        }
-        return {
-          tool: "open_app",
-          title: t("agentConfirm.openAppTitle"),
-          message: t("agentConfirm.openAppMessage", { target: c.normalized }),
-          scope: t("agentConfirm.scopeOpenApp", { target: c.normalized }),
-        };
-      },
-    ),
     // Fase B
     calculate: calculateHandler,
     convert_units: convertUnitsHandler,
@@ -1098,7 +1006,7 @@ export function buildToolHandlers(opts?: {
     ),
     list_calendar_events: listCalendarEventsHandler,
     find_contact: findContactHandler,
-    read_picked_file: readPickedFileHandler, // el picker del sistema confirma
+    read_picked_file: readPickedFileHandler, // en PC responde no disponible (cura H-02); el picker será el consentimiento cuando exista
     // Fase D
     use_skill: useSkillHandler,
     analyze_table: analyzeTableHandler,

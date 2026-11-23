@@ -15,7 +15,14 @@ import {
 } from "../security/formatVersion.js";
 /** Tier 2 (frozen 2026-09-27): only Daylight and Night Garden remain. */
 export type ThemeId = "daylight" | "nightgarden";
-export type FontScale = "compact" | "standard" | "large";
+/**
+ * E11 (paso 6, D-3): el tamaño del texto en cinco
+ * escalones nombrados: los tres heredados en su sitio y
+ * los dos extremos acuñados por el paso. La tabla
+ * escalón→factor vive en src/desktop/zoom.ts y es una
+ * sola para el selector, las teclas y la superficie.
+ */
+export type FontScale = "small" | "compact" | "standard" | "large" | "extra-large";
 export type LanguageId = "en" | "pt" | "es";
 
 interface Settings {
@@ -55,6 +62,13 @@ interface Settings {
   maxSavedSessions?: number;
   autoGenerateTitles?: boolean;
   deepResearchMode?: boolean;
+  /**
+   * E11 (paso 1): el envío como ajuste propio, con la
+   * posición sellada por defecto (Intro envía, Ctrl+Intro
+   * es salto de línea); invertido, Intro es salto y
+   * Ctrl+Intro envía. Ausente = la posición por defecto.
+   */
+  sendOnEnter?: boolean;
   themeId?: ThemeId;
   fontScale?: FontScale;
   languageId?: LanguageId;
@@ -584,6 +598,23 @@ export async function getDeepResearchMode(): Promise<boolean> {
 export async function setDeepResearchMode(enabled: boolean): Promise<void> {
   return mutateSettings((s) => {
     s.deepResearchMode = enabled;
+  });
+}
+
+/**
+ * E11 (paso 1): la posición del ajuste de envío. Por
+ * defecto Intro envía (true), como quedó sellado en la
+ * apertura de la etapa; el ajuste lo invierte la persona
+ * en Ajustes y persiste entre arranques en este almacén.
+ */
+export async function getSendOnEnter(): Promise<boolean> {
+  const s = await readSettings();
+  return s.sendOnEnter ?? true;
+}
+
+export async function setSendOnEnter(enabled: boolean): Promise<void> {
+  return mutateSettings((s) => {
+    s.sendOnEnter = enabled;
   });
 }
 

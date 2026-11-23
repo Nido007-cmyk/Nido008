@@ -11,14 +11,15 @@
  * Lo llama el chat cuando el modelo está listo y no hay una respuesta en
  * curso. Todo es local.
  *
- * Porte de PC (E8, paso 8): la única línea adaptada es la memoria —
- * el almacén de PC no tiene `snapshot`, así que `loadMemory` compone
- * desde `getFacts`/`getPeople` con `preferences` y `recentLog` como
- * colecciones vacías (esas dos piezas no existen en el almacén de
- * PC). El aviso de fin de tarea viaja por el `notifyNow` de la
- * costura de PC, que toma la carga entera.
+ * Porte de PC (E8, paso 8): la línea adaptada era la memoria —
+ * la costura en memoria no tenía `snapshot` y `loadMemory` componía
+ * a mano. Con la cura H-01 el almacén es el persistente del móvil
+ * y el `loadMemory` es su `snapshot`, como en la fuente. El aviso
+ * de fin de tarea viaja por el `notifyNow` de la costura de PC,
+ * que toma la carga entera.
  */
 
+import i18n from "../../i18n/index.js";
 import { runDueTasks, type TaskToolHandler } from "./runner.js";
 import type { ScheduledTask, TaskRunResult } from "./scheduledTasks.js";
 import { getDueTasks, recordTaskRun, updateTaskAfterRun } from "./taskStore.js";
@@ -57,7 +58,12 @@ export async function scheduleTaskReminder(
 }
 
 export async function runScheduledTasksNow(ctx: ScheduledRunContext): Promise<TaskRunResult[]> {
-  const [{ runAgentLoop }, { buildToolHandlers }, { getFacts, getPeople, listNotes, listReminders }, { notifyNow }] = await Promise.all([
+  // I18N-2: la vía programada fija el módulo i18n del núcleo con
+  // el idioma del contexto (el prefs.lang de la carcasa), igual
+  // que runTurn lo fija en la vía del chat: los textos del bucle
+  // y de los handlers de la tarea se sirven en ese idioma.
+  i18n.changeLanguage(ctx.lang);
+  const [{ runAgentLoop }, { buildToolHandlers }, { snapshot, listNotes, listReminders }, { notifyNow }] = await Promise.all([
     import("../loop/agentLoop.js"),
     import("../tools/handlers.js"),
     import("../memory/memoryStore.js"),
@@ -78,19 +84,11 @@ export async function runScheduledTasksNow(ctx: ScheduledRunContext): Promise<Ta
         engine: ctx.engine,
         handlers,
         restrictFastPathsToHandlers: true,
-        // La línea adaptada del porte: sin `snapshot` en PC, la
-        // memoria se compone de hechos y personas del almacén;
-        // preferencias y registro reciente no existen aquí y
-        // viajan como colecciones vacías.
-        loadMemory: async () => {
-          const [facts, people] = await Promise.all([getFacts(50), getPeople()]);
-          return {
-            facts: facts.map((f) => ({ content: f.content, category: f.category })),
-            preferences: [],
-            people: people.map((p) => ({ name: p.name, relationship: p.relationship, notes: p.notes })),
-            recentLog: [],
-          };
-        },
+        // La memoria del turno programado es el snapshot entero
+        // del almacén, como en el móvil (la composición a mano
+        // con preferencias y diario vacíos era de la costura en
+        // memoria; la cura H-01 la retira).
+        loadMemory: () => snapshot().catch(() => null),
         // 0.1.24 (H-9): proveedores de SOLO LECTURA de notas y
         // recordatorios, los mismos que construye ChatScreen para el
         // chat. Sin ellos, una instrucción «busca en mis notas» caía

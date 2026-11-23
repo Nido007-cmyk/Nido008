@@ -25,6 +25,8 @@
  * Pure, no dependencies, fully unit-tested.
  */
 
+import i18n from "../../i18n/index.js";
+
 export type CannedKind = "greeting" | "identity" | "help" | "privacy";
 export type CannedLang = "es" | "en" | "pt";
 
@@ -95,24 +97,19 @@ const TEMPLATES: Record<CannedKind, Record<CannedLang, string>> = {
 
 /**
  * Lee el idioma vigente de la UI, fresco en cada llamada (nunca cacheado).
- * Lazy require: la cadena i18n/settings trae módulos nativos que los
- * unit tests no pueden cargar. Exportada para tests.
+ * Import estático (I18N-2): el módulo i18n del núcleo solo importa
+ * los JSON y `deviceDefaultLanguage`, sin nativos, así que la
+ * pereza heredada del móvil ya no protege de nada en PC — y su
+ * `require` no resolvía ni en el banco ni en el paquete.
+ * Exportada para tests.
  */
 export function getUiLocale(): CannedLang | null {
-  try {
-    const i18n = require("../../i18n.js").default as {
-      resolvedLanguage?: string;
-      language?: string;
-    };
-    const tag = (i18n.resolvedLanguage ?? i18n.language ?? "").toLowerCase();
-    if (tag.startsWith("es")) return "es";
-    if (tag.startsWith("en")) return "en";
-    // FIX 2026-10-09 (I3): PT es opción de primera clase en el picker.
-    if (tag.startsWith("pt")) return "pt";
-    return null;
-  } catch {
-    return null;
-  }
+  const tag = (i18n.resolvedLanguage ?? i18n.language ?? "").toLowerCase();
+  if (tag.startsWith("es")) return "es";
+  if (tag.startsWith("en")) return "en";
+  // FIX 2026-10-09 (I3): PT es opción de primera clase en el picker.
+  if (tag.startsWith("pt")) return "pt";
+  return null;
 }
 
 /**

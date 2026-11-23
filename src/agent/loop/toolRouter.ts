@@ -160,8 +160,13 @@ export function settleSharedLang<T extends { lang: RouterLang }>(action: T, text
   return action;
 }
 
-/** Herramienta del manifiesto que ejecuta cada acción (para interruptores y tareas programadas). */
-export function toolForAction(a: ToolAction): string {
+/**
+ * Herramienta del manifiesto que ejecuta cada acción (para
+ * interruptores y tareas programadas). null = la acción la responde
+ * el propio enrutador, sin herramienta: hoy solo openLink, cuya
+ * herramienta (open_app) salió del catálogo de PC por la cura O-1.
+ */
+export function toolForAction(a: ToolAction): string | null {
   switch (a.kind) {
     case "time":
     case "weekday":
@@ -191,7 +196,9 @@ export function toolForAction(a: ToolAction): string {
     case "nidoTasks":
       return "nido_review_tasks";
     case "openLink":
-      return "open_app";
+      // O-1: open_app salió del catálogo de PC; la ruta responde
+      // honesto desde el enrutador (caso openLink de runToolAction).
+      return null;
     case "pickFile":
       return "read_picked_file";
     // No separate tool: listing belongs to the reminders switch.
@@ -1413,7 +1420,7 @@ type Key =
   | "noteStarterAsk"
   | "reminderStarterAsk"
   | "messageStarterAsk"
-  | "opened"
+  | "linkUnavailable"
   | "disabled"
   | "cancelled"
   | "failed"
@@ -1687,7 +1694,11 @@ const MSG: Record<Key, Record<RouterLang, string>> = {
     en: "Who do you want to send a message to?",
     pt: "Para quem você quer enviar uma mensagem?",
   },
-  opened: { es: "Abriendo {{url}}…", en: "Opening {{url}}…", pt: "Abrindo {{url}}…" },
+  linkUnavailable: {
+    es: "Desde la computadora no puedo abrir enlaces. La dirección es {{url}}: ábrela en tu navegador.",
+    en: "I can't open links from this computer. The address is {{url}}: open it in your browser.",
+    pt: "Deste computador não consigo abrir links. O endereço é {{url}}: abra no seu navegador.",
+  },
   disabled: {
     es: "La herramienta «{{tool}}» está desactivada. Puedes activarla en Acerca de → Permisos del agente.",
     en: "The “{{tool}}” tool is turned off. You can turn it on in About → Agent permissions.",
@@ -2098,7 +2109,7 @@ export async function runToolAction(action: ToolAction, deps: ToolRouterDeps): P
   const uses: ToolRouterOutcome["toolUses"] = [];
   const say = (response: string) => ({ response, toolUses: uses });
 
-  if (deps.isDisabled(tool)) return say(routerMessage("disabled", lang, { tool }));
+  if (tool !== null && deps.isDisabled(tool)) return say(routerMessage("disabled", lang, { tool }));
 
   const run = async (name: string, args: Record<string, unknown>) => {
     const out = await deps.dispatch(name, args);
@@ -2114,7 +2125,7 @@ export async function runToolAction(action: ToolAction, deps: ToolRouterDeps): P
   };
   const failure = (out: { status: DispatchStatus; text: string }) => {
     if (out.status === "cancelled") return say(routerMessage("cancelled", lang));
-    if (out.status === "disabled") return say(routerMessage("disabled", lang, { tool }));
+    if (out.status === "disabled" && tool !== null) return say(routerMessage("disabled", lang, { tool }));
     return say(routerMessage("failed", lang, { reason: out.text }));
   };
 
@@ -2534,17 +2545,24 @@ export async function runToolAction(action: ToolAction, deps: ToolRouterDeps): P
       case "nidoInbox":
       case "nidoCode":
       case "nidoTasks": {
+        // toolForAction nunca devuelve null en estas tres clases:
+        // el null de la cura O-1 es solo de openLink, cuyo caso
+        // responde sin despachar. La guarda deja el tipo cerrado
+        // sin cambiar ninguna conducta alcanzable.
+        if (!tool) return say(routerMessage("failed", lang, { reason: "?" }));
         const out = await run(tool, {});
         return out.status === "executed" ? say(localizeHandlerText(out.text, lang)) : failure(out);
       }
 
-      case "openLink": {
-        const out = await run("open_app", { link: action.url });
-        if (out.status !== "executed") return failure(out);
-        if (/^Abriendo /.test(out.text)) return say(routerMessage("opened", lang, { url: action.url }));
-        if (/no hice nada|did nothing/i.test(out.text)) return say(routerMessage("cancelled", lang));
-        return say(out.text);
-      }
+      case "openLink":
+        // Cura O-1: open_app salió del catálogo de PC (forma A, como
+        // place_call y send_sms). La detección se queda —«abre <url>»
+        // sigue siendo una ruta—, pero en esta plataforma no hay
+        // ejecutor: la respuesta honesta es la dirección escrita para
+        // abrirla en el navegador, sin despachar herramienta alguna
+        // (ningún uso se registra: atribuirle uno sería atribuirle un
+        // efecto que no tuvo).
+        return say(routerMessage("linkUnavailable", lang, { url: action.url }));
 
       case "pickFile": {
         const out = await run("read_picked_file", {});

@@ -20,11 +20,11 @@
  */
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { appendFile, copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { freemem, hostname, release as osRelease, totalmem, type as osType } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, clipboard, ipcMain, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from "electron";
 import { isAppUrl } from "./shell.ts";
 import {
   dispatchTextsFromStrings,
@@ -46,6 +46,7 @@ import { voiceHostFactory, VoiceProcessManager } from "./voiceProcess.ts";
 import {
   initializeVault,
   PasswordCustodyProvider,
+  unlockVaultWith,
   vaultBlobPath,
   VaultBlobError,
 } from "../../src/security/keyVault.js";
@@ -78,6 +79,32 @@ import {
 } from "../../src/services/documentImporter.js";
 import { listLibraryCollections } from "../../src/services/libraryDocs.js";
 import { setOcrDataDir } from "../../src/services/ocrEngine.js";
+import { extractPdfPages } from "../../src/services/pdfText.js";
+import { isOcrAvailable, recognizeImageText, type OcrLang } from "../../src/services/ocr.js";
+import { MAX_IMPORT_PDF_PAGES } from "../../src/services/attachmentPolicy.js";
+import { migrateNumericFontScale } from "../../src/desktop/zoom.js";
+import {
+  extractLinkFromArgv,
+  parseLink,
+  resolveLink,
+  type LinkResolution,
+} from "../../src/desktop/enlaces.js";
+import { lessons as GUIDE_LESSONS } from "../../src/guide/catalog.js";
+import {
+  openSecureDatabase,
+  type SecureDb,
+} from "../../src/security/secureDatabase.js";
+import {
+  conversationIndexCounts,
+  dropConversationFromIndex,
+  indexConversationMessages,
+  searchConversationIndex,
+} from "../../src/services/conversationSearch.js";
+import {
+  exportVaultBackup,
+  rotateVaultKeys,
+} from "../../src/security/backupCaller.js";
+import { recoverPendingRotation } from "../../src/security/keyRotation.js";
 import { embeddingEngine, setEmbeddingModelsDir } from "../../src/rag/embed.js";
 import { activeEmbeddingModel } from "../../src/rag/embeddingSwitch.js";
 import { llamaEngine, setLlamaModelsDir } from "../../src/inference/LlamaEngine.js";
@@ -93,14 +120,17 @@ import {
   listNotes,
   listReminders,
 } from "../../src/agent/memory/memoryStore.js";
+import { startActionLogPersistence } from "../../src/agent/actionLogStore.js";
 import { reminderWhen } from "../../src/agent/loop/toolRouter.js";
 import {
+  buildPolicyConfirmText,
   planTurn,
   productionTurnDeps,
   runTurn,
   type TurnInput,
   type TurnResult,
 } from "../../src/turn/turnPipeline.js";
+import type { PolicyDecision } from "../../src/agent/policy/policyEngine.js";
 import type { ResearchStyle } from "../../src/services/orchestrator.js";
 import {
   deleteResearchSession,
@@ -141,10 +171,13 @@ import {
   getNoticesPermissionAsked,
   getNoticesResident,
   getNoticesShowText,
+  getFontScale,
   getReadAloudEnabled,
+  getSendOnEnter,
   getVoiceInputEnabled,
   getVoiceSystemReserveEnabled,
   markGuideVisited,
+  setActiveModelId,
   setCustomSystemPrompt,
   setDeepResearchMode,
   setDisabledToolNames,
@@ -155,7 +188,9 @@ import {
   setNoticesResident,
   setNoticesShowText,
   setPersonalityId,
+  setFontScale,
   setReadAloudEnabled,
+  setSendOnEnter,
   setVoiceInputEnabled,
   setVoiceSystemReserveEnabled,
 } from "../../src/models/settings.js";
@@ -185,9 +220,10 @@ type Lang = "es" | "en" | "pt";
 interface Prefs {
   theme: "daylight" | "night";
   lang: Lang;
-  fontScale: number;
   sidebarWidth: number;
   sidebarCollapsed: boolean;
+  /** E11 (O-1·E11): la rotación pedida y confirmada, a ejecutar en el próximo desbloqueo antes de abrir ninguna base. */
+  pendingRotation?: boolean;
 }
 
 interface StoredTurn {
@@ -205,6 +241,11 @@ interface StoredTurn {
   research?: unknown;
   researchReportId?: string;
   stopped?: boolean;
+  /** N1: el turno de asistente que asienta un fallo de la
+   * generación (texto vacío, la marca en su sitio): el
+   * mensaje de la persona queda en la conversación con su
+   * error al lado en vez de perderse con la respuesta. */
+  failed?: boolean;
   contextNote?: "filling" | "dropping";
   at: string;
 }
@@ -225,10 +266,19 @@ let session: VaultSession | null = null;
 let prefs: Prefs = {
   theme: "daylight",
   lang: "es",
-  fontScale: 1,
   sidebarWidth: 280,
   sidebarCollapsed: false,
 };
+
+/**
+ * E11 (paso 6, D-3): el número de la escala retirada,
+ * capturado tal cual del fichero de prefs al cargarlas
+ * (sin grampa: la migración lo cobra entero como el
+ * escalón más cercano). Se consume en el primer
+ * desbloqueo de la etapa y el fichero queda sin él al
+ * reescribirse las prefs, que ya no lo conocen.
+ */
+let legacyFontScale: number | null = null;
 let conversations: Conversation[] = [];
 let currentAbort: AbortController | null = null;
 let lastError: { reason: string; at: string } | null = null;
@@ -275,8 +325,21 @@ let loadEpoch = 0;
 // desde Ajustes es pieza de una superficie posterior.
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 let lastGenRate: number | null = null;
+/** E11 (paso 5): la fracción de contexto usada en el último turno medido, la fuente viva de la cifra de contexto del panel. */
+let lastContextFraction: number | null = null;
 const pendingConfirms = new Map<string, (approved: boolean) => void>();
 let confirmSeq = 0;
+
+// Puerta .ics/.vcf: la vista previa de una importación
+// retiene el texto leído en un hueco por clase, con su
+// testigo de un solo uso, hasta que la persona confirma
+// o el hueco se sustituye por otra vista previa de la
+// misma clase: el commit guarda exactamente lo que el
+// resumen anunció, aunque el fichero cambie entre tanto.
+const pendingAgendaImports = new Map<
+  "ics" | "vcf",
+  { token: string; text: string }
+>();
 export const ipcRejectedAttempts: { channel: string; at: string }[] = [];
 
 function dirs() {
@@ -305,13 +368,15 @@ async function loadPrefs(): Promise<void> {
   }
   try {
     const parsed = JSON.parse(raw) as Partial<Prefs>;
+    // E11 (paso 6): la escala numérica se retira de las
+    // prefs; su último valor se captura para la migración
+    // del primer desbloqueo, y ningún camino lo reescribe.
+    const legacy = (parsed as Record<string, unknown>).fontScale;
+    legacyFontScale = typeof legacy === "number" ? legacy : null;
     prefs = {
       theme: parsed.theme === "night" ? "night" : "daylight",
       lang: parsed.lang === "en" || parsed.lang === "pt" ? parsed.lang : "es",
-      fontScale:
-        typeof parsed.fontScale === "number" && parsed.fontScale >= 1 && parsed.fontScale <= 1.4
-          ? parsed.fontScale
-          : 1,
+      pendingRotation: parsed.pendingRotation === true,
       sidebarWidth:
         typeof parsed.sidebarWidth === "number"
           ? Math.min(360, Math.max(240, parsed.sidebarWidth))
@@ -424,6 +489,19 @@ async function onUnlocked(sess: VaultSession): Promise<void> {
   // vacío: la dirección segura de este ajuste en su forma de
   // arranque, la misma del bootstrap.
   setDisabledTools(await getDisabledToolNames().catch(() => []));
+  // E11 (paso 6, D-3): la migración de la escala numérica
+  // retirada, una sola vez: el número capturado al cargar
+  // las prefs se cobra como el escalón más cercano en el
+  // almacén, la captura se consume y el fichero de prefs
+  // se reescribe sin el número (las prefs ya no lo
+  // conocen). Sin número capturado no hay nada que migrar
+  // y el almacén manda con su standard por defecto.
+  if (legacyFontScale != null) {
+    const captured = legacyFontScale;
+    legacyFontScale = null;
+    await setFontScale(migrateNumericFontScale(captured)).catch(() => undefined);
+    await savePrefs().catch(() => undefined);
+  }
   // E3.7 (la fijación que la cabecera de dataDir.ts declaraba
   // pendiente de esta etapa): el directorio de paquetes y el de
   // embeddings también se fijan a los datos de la app. Sin estas
@@ -493,6 +571,29 @@ async function onUnlocked(sess: VaultSession): Promise<void> {
     void onLocked();
   });
   await loadConversations();
+  // E11 (paso 9): la base del índice se abre con la sesión
+  // y su mantenimiento inicial cobra lo ya guardado (una
+  // escritura por mensaje la primera vez; después, solo
+  // los nuevos al guardar). Si la base no abre, la
+  // búsqueda se niega con su razón y el hecho queda aquí.
+  try {
+    // El mango anterior (de una sesión previa, quizá con
+    // la clave anterior a una rotación) se cierra aquí,
+    // al renovarlo: nunca conviven dos sobre la misma base.
+    try {
+      searchDb?.close();
+    } catch {
+      /* ya cerrado */
+    }
+    searchDb = openSecureDatabase(path.join(d.store, "nido_search.db"), sess.dek);
+    searchCounts = conversationIndexCounts(searchDb);
+    maintainSearchIndex();
+  } catch (err) {
+    searchDb = null;
+    console.error(
+      `NIDO-BUSCADOR: la base del índice no abrió: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   // La aplicación del hueco (la forma (c) de la pieza del
   // turno perdido al bloquear): si un par quedó retenido por
   // un bloqueo en vuelo, se aplica sobre la lista recargada
@@ -500,7 +601,10 @@ async function onUnlocked(sess: VaultSession): Promise<void> {
   // con la identidad guardada) y se guarda por la vía normal,
   // con la DEK viva. Idempotente por identidad del par (sus
   // textos y sus marcas de tiempo): si ya estuviera, no se
-  // duplica. Si el guardado de la aplicación falla, el hueco
+  // duplica; y desde N1 el par puede venir medio sellado (el
+  // empuje previo ya selló el turno de la persona), así que
+  // la aplicación también completa el par al que solo le
+  // falta el asistente, sin duplicar su primera mitad. Si el guardado de la aplicación falla, el hueco
   // se conserva y el hecho queda en lastError, como la
   // cuarentena de blobs: nunca se pierde en silencio. El
   // registro guarda el hecho, jamás el texto del par.
@@ -530,7 +634,28 @@ async function onUnlocked(sess: VaultSession): Promise<void> {
           target.turns[i + 1].at === slot.pair[1].at,
       );
       if (!alreadyApplied) {
-        target.turns.push(slot.pair[0], slot.pair[1]);
+        // N1: el empuje previo del turno sella el mensaje
+        // de la persona ANTES de generar, así que si la
+        // bóveda se bloqueó a mitad de ese turno, el blob
+        // ya trae su mitad del par retenido: si el último
+        // turno de la conversación ES ese turno, por la
+        // misma identidad (texto y marca de tiempo), se
+        // empuja solo el asistente que falta; empujar el
+        // par entero duplicaría el mensaje. El par es
+        // siempre la cola de su conversación: con la
+        // bóveda bloqueada ningún otro turno pudo correr
+        // entre el asentamiento y este desbloqueo.
+        const last = target.turns[target.turns.length - 1];
+        const userAlreadySealed =
+          last !== undefined &&
+          last.role === "user" &&
+          last.text === slot.pair[0].text &&
+          last.at === slot.pair[0].at;
+        if (userAlreadySealed) {
+          target.turns.push(slot.pair[1]);
+        } else {
+          target.turns.push(slot.pair[0], slot.pair[1]);
+        }
         target.updatedAt = slot.updatedAt;
       }
       await saveConversations();
@@ -589,6 +714,14 @@ async function onLocked(): Promise<void> {
   if (inFlightTurn) await inFlightTurn.catch(() => undefined);
   session = null;
   conversations = [];
+  // E11 (paso 9): la base del índice sigue la forma de
+  // las demás bases de la casa al bloquear: su mango no
+  // se cierra aquí (los proveedores de clave se anulan y
+  // la búsqueda se niega sin sesión, que es el corte);
+  // cerrarla borraría sus ficheros laterales y el censo
+  // del almacén durante el bloqueo cambiaría, que es lo
+  // que la regresión del sello de la puerta cobra. El
+  // mango se renueva en el siguiente desbloqueo.
   setKnowledgeDbDekProvider(null);
   setAppStoreDekProvider(null);
   // La forma de las baterías al cerrar: los directorios también se
@@ -621,6 +754,209 @@ async function onLocked(): Promise<void> {
   await llamaEngine.unload().catch(() => undefined);
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send("nido:vault-locked");
+  }
+}
+
+// ---------------------------------------------------------------------
+// E11 (paso 7) · Los enlaces nido:// que llegan de fuera
+// ---------------------------------------------------------------------
+
+/**
+ * El enlace retenido: una sola ranura (el último manda) y
+ * su número de llegada. La resolución se hace al
+ * entregarlo, contra el mundo de ese momento: bloqueada
+ * la bóveda, la resolución es la retención misma y el
+ * enlace sigue retenido para tras el desbloqueo.
+ */
+let pendingLink: { raw: string; seq: number } | null = null;
+let linkSeq = 0;
+
+/** El mundo contra el que la pieza resuelve: la sesión, las conversaciones y la guía integrada (instalada con la app). */
+function linkWorld() {
+  const guideIds = GUIDE_LESSONS.map((l) => l.id);
+  return {
+    vaultUnlocked: session != null,
+    conversationIds: conversations.map((c) => c.id),
+    installedGuideIds: guideIds,
+    guideCatalogIds: guideIds,
+  };
+}
+
+function resolvePendingLink(): { seq: number; resolution: LinkResolution } | null {
+  if (!pendingLink) return null;
+  const resolution = resolveLink(parseLink(pendingLink.raw), linkWorld());
+  // La ruta resuelta queda en el registro del principal:
+  // es la línea que las sondas de la etapa leen para
+  // cobrar que cada ruta cayó en su destino.
+  console.log(
+    `NIDO-ENLACE seq=${pendingLink.seq} resolucion=${resolution.kind}` +
+      (resolution.kind !== "hold" ? `:${resolution.section}` : ""),
+  );
+  return { seq: pendingLink.seq, resolution };
+}
+
+/**
+ * La anotación de un enlace que llega de fuera (los
+ * argumentos de la segunda instancia, open-url, o el
+ * arranque en frío): se retiene y se avisa a la ventana
+ * para que lo recoja; la ventana también lo recoge al
+ * arrancar y al desbloquear, por el mismo canal.
+ */
+export function noteExternalLink(raw: string): void {
+  if (typeof raw !== "string" || raw.length === 0) return;
+  linkSeq += 1;
+  pendingLink = { raw, seq: linkSeq };
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send("nido:link", { seq: linkSeq });
+  }
+}
+
+/** La llegada por argumentos (arranque en frío y segunda instancia comparten la extracción). */
+export function noteLinkFromArgv(argv: string[]): void {
+  const raw = extractLinkFromArgv(argv);
+  if (raw) noteExternalLink(raw);
+}
+
+// ---------------------------------------------------------------------
+// E11 (paso 9) · El índice del buscador global
+// ---------------------------------------------------------------------
+
+/**
+ * La base del índice (nido_search.db, con la DEK de la
+ * sesión, dentro del almacén) y su estado de
+ * mantenimiento: cuántos mensajes de cada conversación
+ * ya están indexados, reconstruido de la propia base al
+ * abrirla. Sin sesión no hay base: la búsqueda se niega
+ * con su razón y ningún texto vive fuera de la bóveda.
+ */
+let searchDb: SecureDb | null = null;
+let searchCounts = new Map<string, number>();
+
+/**
+ * El mantenimiento, llamado al guardar las
+ * conversaciones: una escritura de índice por mensaje
+ * nuevo (el coste declarado del paso), las conversaciones
+ * desaparecidas salen del índice y las que encogieron se
+ * rehacen dentro de la propia pieza. Un fallo del índice
+ * no tumba el guardado (el blob sellado es la verdad; el
+ * índice es derivado y se reconstruye), pero queda en el
+ * registro, nunca tragado.
+ */
+/**
+ * E11 (O-1·E11): las bases gestionadas que existen, con
+ * su nombre relativo al directorio de la bóveda (la
+ * pareja de E2 trabaja sobre un directorio y sus nombres;
+ * las bases de la app viven en store/ y knowledge/, y su
+ * nombre relativo es su dirección exacta desde la
+ * bóveda). Una base que aún no existe no está gestionada
+ * todavía: no se nombra (el pre-vuelo de la rotación y la
+ * lectura del respaldo exigen que exista).
+ */
+function managedDbNames(): string[] {
+  const d = dirs();
+  const candidates = [
+    path.join(d.store, "nido_memory.db"),
+    path.join(d.store, "nido_search.db"),
+    path.join(d.knowledge, "nido_knowledge.db"),
+  ];
+  return candidates
+    .filter((p) => existsSync(p))
+    .map((p) => path.relative(d.vault, p));
+}
+
+/** El desenlace de la rotación del último desbloqueo, para la superficie: done | recovered | failed | null. */
+let rotationOutcome: "done" | "recovered" | "failed" | null = null;
+
+/**
+ * El asiento de la rotación en el desbloqueo, ANTES de
+ * que onUnlocked abra ninguna base: primero la
+ * recuperación de E2 (una rotación cortada se completa o
+ * se revierte aquí, con la custodia mandando); después,
+ * si hay una rotación pedida y confirmada, se ejecuta
+ * por el llamante con la credencial recién introducida.
+ * Las conversaciones se cargan con la clave vieja antes
+ * de rotar y se re-sellan con la nueva al volver: el blob
+ * sellado no es una base de la pareja y su re-sello es
+ * deber de este asiento. Un fallo no encierra a la
+ * persona fuera de sus datos: la bóveda sigue con su
+ * clave de siempre, el hecho queda registrado y la
+ * superficie lo enseña.
+ */
+async function settlePendingRotation(
+  sess: VaultSession,
+  provider: PasswordCustodyProvider,
+): Promise<void> {
+  const d = dirs();
+  try {
+    const outcome = await recoverPendingRotation({
+      dir: d.vault,
+      providers: [provider],
+      session: sess,
+    });
+    if (outcome !== "none") {
+      rotationOutcome = "recovered";
+      if (prefs.pendingRotation) {
+        prefs.pendingRotation = false;
+        await savePrefs().catch(() => undefined);
+      }
+      return;
+    }
+  } catch (err) {
+    rotationOutcome = "failed";
+    lastError = {
+      reason: `rotation-recovery: ${err instanceof Error ? err.message : String(err)}`,
+      at: new Date().toISOString(),
+    };
+    return;
+  }
+  if (!prefs.pendingRotation) return;
+  prefs.pendingRotation = false;
+  await savePrefs().catch(() => undefined);
+  session = sess;
+  await loadConversations();
+  try {
+    await rotateVaultKeys({
+      dir: d.vault,
+      dbNames: managedDbNames(),
+      session: sess,
+      providers: [provider],
+    });
+    rotationOutcome = "done";
+    await saveConversations().catch(() => undefined);
+  } catch (err) {
+    rotationOutcome = "failed";
+    lastError = {
+      reason: `rotation: ${err instanceof Error ? err.message : String(err)}`,
+      at: new Date().toISOString(),
+    };
+  }
+}
+
+function maintainSearchIndex(): void {
+  if (!searchDb) return;
+  try {
+    const alive = new Set(conversations.map((c) => c.id));
+    for (const id of [...searchCounts.keys()]) {
+      if (!alive.has(id)) {
+        dropConversationFromIndex(searchDb, id);
+        searchCounts.delete(id);
+      }
+    }
+    for (const c of conversations) {
+      const writes = indexConversationMessages(
+        searchDb,
+        c.id,
+        c.turns,
+        searchCounts.get(c.id) ?? 0,
+      );
+      if (writes > 0 || (searchCounts.get(c.id) ?? 0) > c.turns.length) {
+        searchCounts.set(c.id, c.turns.length);
+      }
+    }
+  } catch (err) {
+    console.error(
+      `NIDO-BUSCADOR: el mantenimiento del índice falló: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 
@@ -667,6 +1003,48 @@ async function saveConversations(): Promise<void> {
   // anterior intacto; con writeFile llano dejaba el sellado
   // truncado y la siguiente apertura perdía el historial entero.
   writeFileDurable(path.join(d.store, "conversations.sealed"), sealed);
+  // E11 (paso 9): el índice se mantiene en el mismo
+  // guardado, con su coste declarado (una escritura por
+  // mensaje nuevo).
+  maintainSearchIndex();
+}
+
+/**
+ * El guardado de un par asentado, compartido por el
+ * asentamiento del éxito y por el del fallo (N1): los dos
+ * sellan el mismo blob con la misma disciplina, y la
+ * retención de la forma (c) es una sola implementación,
+ * no dos copias que puedan divergir.
+ *
+ * La poda del campo corre aquí, en su sitio (cableado,
+ * pieza 2): tras el asentamiento y antes del guardado,
+ * para que el blob que se sella ya sea el podado. Solo el
+ * VaultLockedError de ESTE guardado (el que sigue a
+ * empujar el par) deja el par en el hueco de módulo, para
+ * sellarlo al siguiente desbloqueo. El error sigue su
+ * camino (la respuesta del turno no cambia) y cualquier
+ * otro error sigue lanzando como hasta hoy, sin captura.
+ */
+async function saveSettledTurns(conv: Conversation, bornWithThisTurn: boolean): Promise<void> {
+  await pruneSavedSessions(conv.id);
+  try {
+    await saveConversations();
+  } catch (err) {
+    if (err instanceof VaultLockedError) {
+      retainedPair = {
+        conversationId: conv.id,
+        bornWithThisTurn,
+        createdAt: conv.createdAt,
+        title: conv.title,
+        updatedAt: conv.updatedAt,
+        pair: [
+          conv.turns[conv.turns.length - 2],
+          conv.turns[conv.turns.length - 1],
+        ],
+      };
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -675,6 +1053,92 @@ async function saveConversations(): Promise<void> {
 
 function stringsFor(lang: Lang): Record<string, unknown> {
   return LOCALES[lang] as Record<string, unknown>;
+}
+
+function surfaceString(lang: Lang, key: string): string {
+  const pc = (stringsFor(lang) as Record<string, unknown>).pcSurface as
+    | Record<string, unknown>
+    | undefined;
+  const v = pc?.[key];
+  return typeof v === "string" ? v : key;
+}
+
+/** El tope de materia por adjunto en un turno: lo que pasa de ahí se nombra recortado en el propio bloque, nunca se corta en silencio. */
+const ATTACHMENT_MATERIAL_CAP = 24_000;
+
+/**
+ * E11 (pasos 2 y 3): la materia adjunta del composer se
+ * compone en el texto del turno, en un bloque visible que
+ * nombra cada fichero: lo que la persona ve en su mensaje
+ * es lo que el modelo recibe. Nada se indexa en silencio
+ * (la Biblioteca tiene su confirmación de E6) y nada se
+ * esconde: la extracción es la de la casa (el texto se lee
+ * con su tope, el PDF pasa por el lector del importador,
+ * la imagen por el OCR si está disponible) y lo que no da
+ * texto lo dice el propio bloque. El título de la
+ * conversación y las consultas guardadas de las sesiones
+ * quedan con las palabras de la persona; la materia vive
+ * en el turno.
+ */
+async function composeTurnMaterial(
+  text: string,
+  attachments:
+    | { name: string; kind: string; path?: string; dataBase64?: string }[]
+    | undefined,
+  lang: Lang,
+): Promise<string> {
+  if (!attachments || attachments.length === 0) return text;
+  const blocks: string[] = [];
+  for (const att of attachments) {
+    let body = "";
+    let tmpPath: string | null = null;
+    try {
+      let filePath =
+        typeof att.path === "string" && att.path.length > 0 ? att.path : null;
+      if (!filePath && typeof att.dataBase64 === "string" && att.dataBase64.length > 0) {
+        const dir = path.join(app.getPath("userData"), "paste-tmp");
+        await mkdir(dir, { recursive: true });
+        tmpPath = path.join(
+          dir,
+          `pegado-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+        );
+        await writeFile(tmpPath, Buffer.from(att.dataBase64, "base64"));
+        filePath = tmpPath;
+      }
+      if (filePath) {
+        if (att.kind === "text") {
+          const buf = await readFile(filePath);
+          body = new TextDecoder().decode(buf.subarray(0, ATTACHMENT_MATERIAL_CAP * 4));
+        } else if (att.kind === "pdf") {
+          const pages = await extractPdfPages(
+            filePath,
+            MAX_IMPORT_PDF_PAGES,
+            ATTACHMENT_MATERIAL_CAP,
+          ).catch(() => []);
+          body = pages.map((p) => p.texto).join("\n");
+        } else if (att.kind === "image") {
+          if (await isOcrAvailable().catch(() => false)) {
+            body = await recognizeImageText(filePath, lang as OcrLang).catch(() => "");
+          }
+        }
+      }
+    } catch {
+      body = "";
+    } finally {
+      if (tmpPath) await unlink(tmpPath).catch(() => undefined);
+    }
+    let shown = body.trim();
+    let truncatedNote = "";
+    if (shown.length > ATTACHMENT_MATERIAL_CAP) {
+      shown = shown.slice(0, ATTACHMENT_MATERIAL_CAP);
+      truncatedNote = `\n[${surfaceString(lang, "attachedTruncated")}]`;
+    }
+    if (shown.length === 0) shown = surfaceString(lang, "attachedNoText");
+    blocks.push(
+      `[${surfaceString(lang, "attachedMaterial")}: ${att.name}]\n${shown}${truncatedNote}`,
+    );
+  }
+  return `${text}\n\n${blocks.join("\n\n")}`;
 }
 
 async function askConfirm(
@@ -701,6 +1165,32 @@ function drainPendingConfirms(): void {
   pendingConfirms.clear();
 }
 
+/**
+ * CONF-1: la carga de la tarjeta de política. El texto lo
+ * construye describePolicyConfirmation (vía
+ * buildPolicyConfirmText) desde la decisión y los args
+ * validados: la tarjeta nombra lo que se aprueba, en el
+ * idioma del turno, con el aviso de procedencia cuando la
+ * decisión lo trae. Antes de esta cura el cable mandaba el
+ * decision.reason crudo del motor, en inglés y sin el dato.
+ * El constructor nunca devuelve un título vacío: cada rama
+ * del constructor de textos fija el suyo.
+ */
+export function policyConfirmPayload(
+  decision: PolicyDecision,
+  action: { tool: string; args: Record<string, unknown> } | undefined,
+  lang: Lang,
+): Record<string, unknown> {
+  const dialog = buildPolicyConfirmText(decision, action, lang);
+  return {
+    kind: "policy",
+    tool: action?.tool ?? "",
+    scope: null,
+    title: dialog.title,
+    message: dialog.message,
+  };
+}
+
 async function runOneTurn(
   event: Electron.IpcMainInvokeEvent,
   args: {
@@ -711,6 +1201,8 @@ async function runOneTurn(
     researchPlan?: ResearchPlan;
     /** E10 (paso 6): la sesión que este turno reanuda, si la trae. */
     researchSessionId?: string;
+    /** E11 (pasos 2 y 3): la materia adjunta del composer (caída y pegado), por su ruta o por sus bytes si no la tiene. */
+    attachments?: { name: string; kind: string; path?: string; dataBase64?: string }[];
   },
 ): Promise<unknown> {
   if (!session) return { ok: false, reason: "locked" };
@@ -746,6 +1238,10 @@ async function runOneTurn(
       return created;
     })();
   const lang = prefs.lang;
+  // E11 (pasos 2 y 3): la materia adjunta se compone en el
+  // texto del turno antes de servirlo: la consulta y el
+  // turno guardado llevan el mismo texto compuesto.
+  const turnText = await composeTurnMaterial(args.text, args.attachments, lang);
   // A-4, su otra mitad: el tono elegido GOBIERNA el turno. La
   // composición es la del móvil: el prompt de sistema es el de la
   // personalidad elegida y su recordatorio de estilo viaja junto a
@@ -774,6 +1270,7 @@ async function runOneTurn(
         askConfirm(event, {
           kind: "tool",
           tool: req.tool,
+          title: req.title,
           scope: req.scope ?? null,
           message: req.message,
         }),
@@ -783,12 +1280,7 @@ async function runOneTurn(
       return { regions: all.regions, facts: all.facts };
     },
     onConfirmTool: (decision, action) =>
-      askConfirm(event, {
-        kind: "policy",
-        tool: action?.tool ?? "",
-        scope: null,
-        message: decision.reason,
-      }),
+      askConfirm(event, policyConfirmPayload(decision, action, lang)),
   });
   // L-4: un solo turno en vuelo. Sin esta guarda, un segundo
   // envío pisaba el AbortController del primero y el stop caía
@@ -841,20 +1333,47 @@ async function runOneTurn(
         }).catch(() => undefined),
     };
   }
+  // N1 (la integridad del turno, en la forma del móvil):
+  // el mensaje de la persona se empuja y se sella ANTES de
+  // generar, como el `persistMessage` de su pantalla, para
+  // que un fallo del motor no se lo lleve con la respuesta
+  // que no llegó. El historial del turno se compone aquí,
+  // con los turnos de antes del empuje (la pregunta entra
+  // una vez, como consulta, no dos) y fuera los asistentes
+  // marcados `failed` de turnos anteriores: el modelo oye
+  // lo que la persona dijo, no una respuesta fantasma
+  // vacía. El guardado previo no es el del asentamiento:
+  // un VaultLockedError no tumba el turno (la bóveda se
+  // está bloqueando; el drenaje lo abortará y su
+  // asentamiento retendrá el par por la forma (c), como
+  // hoy) y cualquier otro error sigue lanzando, con el
+  // turno ya en memoria.
+  const history = conv.turns
+    .slice(conv.summarizedTurns)
+    .filter((t) => !(t.role === "assistant" && t.failed))
+    .map((t) => ({
+      role: t.role,
+      content: t.text,
+    }));
+  const sentAt = new Date().toISOString();
+  conv.turns.push({ role: "user", text: turnText, at: sentAt });
+  conv.updatedAt = sentAt;
+  try {
+    await saveConversations();
+  } catch (err) {
+    if (!(err instanceof VaultLockedError)) throw err;
+  }
   let firstTokenSeen = false;
   let result: TurnResult;
   const turnStartedAt = Date.now();
   try {
     result = await runTurn(
       {
-        query: args.text,
+        query: turnText,
         lang,
         systemPrompt,
         styleReminder,
-        history: conv.turns.slice(conv.summarizedTurns).map((t) => ({
-          role: t.role,
-          content: t.text,
-        })),
+        history,
         summary: conv.summary,
         researchMode: args.researchMode === true,
         researchPlan: args.researchPlan,
@@ -877,6 +1396,29 @@ async function runOneTurn(
       },
       deps,
     );
+  } catch (err) {
+    // N1, el asentamiento del fallo: el turno de la
+    // persona ya está empujado y sellado (el empuje
+    // previo); al lado se asienta su asistente del fallo,
+    // vacío y marcado `failed`, el borrador interrumpido
+    // del móvil con los materiales de esta carcasa, y el
+    // par se sella por la misma vía del asentamiento del
+    // éxito. Un fallo de ESTE guardado no tapa el error
+    // original (la retención de la forma (c) ya ocurrió
+    // dentro si era de bóveda; si no lo era, el par queda
+    // en memoria y lo sella cualquier guardado posterior
+    // que viva, la conducta de hoy para los guardados que
+    // no son de bóveda). El resumen no corre: es mejora
+    // del éxito, no condición del turno. Y el error
+    // original sigue su camino de siempre: la respuesta
+    // del canal no cambia, y la conversación, al
+    // refrescar o reabrir, enseña el mensaje con su marca
+    // al lado en vez de no enseñar nada.
+    const failedAt = new Date().toISOString();
+    conv.turns.push({ role: "assistant", text: "", failed: true, at: failedAt });
+    conv.updatedAt = failedAt;
+    await saveSettledTurns(conv, bornWithThisTurn).catch(() => undefined);
+    throw err;
   } finally {
     if (currentAbort === abort) currentAbort = null;
   }
@@ -906,6 +1448,10 @@ async function runOneTurn(
     const tokens = llamaEngine.countTokens(result.text);
     if (tokens > 0) lastGenRate = Math.round((tokens / seconds) * 10) / 10;
   }
+  // E11 (paso 5): la fracción de contexto del turno, medida
+  // por el propio turno; sin dato no se toca (el panel
+  // enseña la anterior o su hueco, nunca una inventada).
+  if (result.contextNote) lastContextFraction = result.contextNote.fractionUsed;
   const now = new Date().toISOString();
   // E6 (paso 7): cada fuente guardada lleva su etiqueta desde
   // el metadato («Contrato · pág. 7») y, si es de un documento
@@ -954,8 +1500,10 @@ async function runOneTurn(
   const decided: { note: "filling" | "dropping" | null } = result.contextNote
     ? decideContextNote(noteState, result.contextNote)
     : { note: null };
+  // N1: el turno de la persona ya está empujado desde
+  // antes de generar (el empuje previo); el asentamiento
+  // empuja solo el asistente, y el par queda el mismo.
   conv.turns.push(
-    { role: "user", text: args.text, at: now },
     {
       role: "assistant",
       text: result.text,
@@ -986,34 +1534,10 @@ async function runOneTurn(
   );
   conv.updatedAt = now;
   if (autoTitles && conv.turns.length === 2) conv.title = args.text.slice(0, 60);
-  // La poda del campo, en su sitio (cableado, pieza 2): tras
-  // el asentamiento y antes de este guardado, para que el
-  // blob que se sella ya sea el podado.
-  await pruneSavedSessions(conv.id);
-  try {
-    await saveConversations();
-  } catch (err) {
-    // La captura de la forma (c): solo el VaultLockedError de
-    // ESTE guardado (el que sigue a empujar el par) deja el
-    // par en el hueco de módulo, para sellarlo al siguiente
-    // desbloqueo. El error sigue su camino de siempre (la
-    // respuesta del turno no cambia) y cualquier otro error
-    // sigue lanzando como hasta hoy, sin captura.
-    if (err instanceof VaultLockedError) {
-      retainedPair = {
-        conversationId: conv.id,
-        bornWithThisTurn,
-        createdAt: conv.createdAt,
-        title: conv.title,
-        updatedAt: conv.updatedAt,
-        pair: [
-          conv.turns[conv.turns.length - 2],
-          conv.turns[conv.turns.length - 1],
-        ],
-      };
-    }
-    throw err;
-  }
+  // El guardado del par asentado, con su poda y su
+  // retención de la forma (c), vive en el ayudante que el
+  // asentamiento del fallo comparte (saveSettledTurns).
+  await saveSettledTurns(conv, bornWithThisTurn);
   // El resumen guardado: al crecer la conversación, los turnos
   // viejos se condensan con el productor de resúmenes (la misma
   // fachada, E-6) y quedan en el almacén cifrado.
@@ -1459,16 +1983,161 @@ const EXTERNAL_ALLOWLIST = [
 // Instalación de los canales
 // ---------------------------------------------------------------------
 
+// Puerta .ics/.vcf: la forma común de los dos resúmenes
+// del núcleo, para viajar al renderizador como DTO con
+// códigos. El núcleo describe en español; la superficie
+// compone en el idioma de la persona, así que cada
+// descarte conocido se clasifica por su razón exacta y
+// solo el desconocido viaja con el texto del núcleo
+// como caída. Los conteos viajan como números y los
+// grupos nombrados como cuenta entera con los primeros
+// 50 nombres: el núcleo los trae como listas sin
+// cortar, y el corte vive en este DTO.
+interface AgendaImportRawSummary {
+  rejected: string | null;
+  total: number;
+  enterCount: number;
+  recurring: number;
+  alreadyPresent: number;
+  discarded: Array<{ what: string; reason: string }>;
+  named: {
+    exdate: string[];
+    valarm: string[];
+    unboundedRrule: string[];
+    tzid: string[];
+    withoutUid: number;
+    truncatedFields: number;
+  } | null;
+}
+
+function agendaDiscardedDto(what: string, reason: string): {
+  code: string;
+  label: string | null;
+  prop: string | null;
+  text: string;
+} {
+  const label = /«([^»]*)»/.exec(what)?.[1] ?? null;
+  let code = "other";
+  let prop: string | null = null;
+  if (reason === "sin DTSTART") code = "event-no-start";
+  else if (reason === "DTSTART fuera del subconjunto de v1") code = "event-start-out-of-subset";
+  else if (reason.startsWith("su recurrencia pasa de 2.000")) code = "event-too-many-occurrences";
+  else if (reason.startsWith("RRULE fuera del subconjunto")) code = "recurrence-out-of-subset";
+  else if (reason === "pasa de 64 KB desplegada") {
+    code = "property-too-large";
+    prop = /^la propiedad (\S+) de/.exec(what)?.[1] ?? null;
+  } else if (reason === "la ficha de NIDO no guarda fotos en v1") code = "photo-not-stored";
+  else if (reason === "sin FN") code = "card-no-name";
+  return { code, label, prop, text: `${what} — ${reason}` };
+}
+
+function agendaImportSummaryDto(raw: AgendaImportRawSummary): {
+  rejectedCode: string | null;
+  rejectedText: string | null;
+  total: number;
+  enter: number;
+  alreadyPresent: number;
+  recurring: number;
+  discarded: ReturnType<typeof agendaDiscardedDto>[];
+  named: {
+    exdate: { count: number; names: string[] };
+    valarm: { count: number; names: string[] };
+    unboundedRrule: { count: number; names: string[] };
+    tzid: { count: number; names: string[] };
+    withoutUid: number;
+    truncatedFields: number;
+  } | null;
+} {
+  let rejectedCode: string | null = null;
+  let rejectedText: string | null = null;
+  if (raw.rejected) {
+    if (raw.rejected.includes("25 MB")) rejectedCode = "too-large";
+    else if (raw.rejected.includes("línea física")) rejectedCode = "line-too-long";
+    else if (raw.rejected.includes("20.000")) rejectedCode = "too-many";
+    else rejectedText = raw.rejected;
+  }
+  const capGroup = (names: string[]) => ({ count: names.length, names: names.slice(0, 50) });
+  return {
+    rejectedCode,
+    rejectedText,
+    total: raw.total,
+    enter: raw.enterCount,
+    alreadyPresent: raw.alreadyPresent,
+    recurring: raw.recurring,
+    discarded: raw.discarded.map((d) => agendaDiscardedDto(d.what, d.reason)),
+    named: raw.named
+      ? {
+          exdate: capGroup(raw.named.exdate),
+          valarm: capGroup(raw.named.valarm),
+          unboundedRrule: capGroup(raw.named.unboundedRrule),
+          tzid: capGroup(raw.named.tzid),
+          withoutUid: raw.named.withoutUid,
+          truncatedFields: raw.named.truncatedFields,
+        }
+      : null,
+  };
+}
+
+// La vista previa y el commit comparten el motor: el
+// núcleo con `confirmed: false` no escribe nada (su
+// resumen R4), y con `confirmed: true` guarda y arma
+// los avisos en la misma transacción de cada almacén.
+async function runAgendaImport(
+  kind: "ics" | "vcf",
+  text: string,
+  confirmed: boolean,
+): Promise<{ raw: AgendaImportRawSummary; inserted: number }> {
+  if (kind === "ics") {
+    const { importIcs } = await import("../../src/agent/memory/calendarIcs.js");
+    const { summary, inserted } = await importIcs(text, { confirmed });
+    return {
+      inserted,
+      raw: {
+        rejected: summary.rejected,
+        total: summary.totalEvents,
+        enterCount: summary.enter.length,
+        recurring: summary.enter.filter((d) => d.rrule !== null).length,
+        alreadyPresent: summary.alreadyPresent,
+        discarded: summary.discarded,
+        named: summary.named,
+      },
+    };
+  }
+  const { importVcf } = await import("../../src/agent/memory/contactVcf.js");
+  const { summary, inserted } = await importVcf(text, { confirmed });
+  return {
+    inserted,
+    raw: {
+      rejected: summary.rejected,
+      total: summary.totalCards,
+      enterCount: summary.enter.length,
+      recurring: 0,
+      alreadyPresent: summary.alreadyPresent,
+      discarded: summary.discarded,
+      named: null,
+    },
+  };
+}
+
 export async function installServices(): Promise<void> {
   // El cierre de la ventana drena las confirmaciones pendientes
   // (H-1): ninguna promesa del loop queda colgada sin proceso.
   app.on("before-quit", () => drainPendingConfirms());
   app.on("window-all-closed", () => drainPendingConfirms());
+  // E11 (paso 7): la llegada en frío: si el arranque trae
+  // un enlace en sus argumentos, queda retenido antes de
+  // que exista ventana, para entregarlo tras el desbloqueo.
+  noteLinkFromArgv(process.argv);
   await mkdir(dirs().vault, { recursive: true });
   await mkdir(dirs().store, { recursive: true });
   await mkdir(dirs().knowledge, { recursive: true });
   await mkdir(dirs().models, { recursive: true });
   await loadPrefs();
+  // O-12: el historial de acciones persiste desde el arranque
+  // de los servicios: el sumidero del registro queda conectado
+  // y cada entrada se guarda en la base cifrada cuando la
+  // bóveda está abierta (sin base, queda solo en memoria).
+  startActionLogPersistence();
   // E8 (paso 3): el ejecutor de avisos arranca con los servicios:
   // su reloj corre desde la agenda de disparo también con la
   // bóveda bloqueada, que es su razón de ser. El paso 4 le da
@@ -1595,6 +2264,17 @@ export async function installServices(): Promise<void> {
     // su ajuste (apagado por defecto, como en el móvil): la
     // superficie lo enseña en su chip y lo honra en cada turno.
     deepResearchMode: session ? await getDeepResearchMode().catch(() => false) : false,
+    // E11 (paso 1): la posición del ajuste de envío, leída
+    // de su ajuste (Intro envía por defecto): el composer
+    // y la hoja de atajos la honran en la posición vigente.
+    sendOnEnter: session ? await getSendOnEnter().catch(() => true) : true,
+    // E11 (paso 6): el escalón de tamaño del texto, leído
+    // del almacén: la superficie aplica su factor a
+    // --font-scale y el selector lo enseña en su sitio.
+    fontScaleStep: session ? await getFontScale().catch(() => "standard" as const) : "standard",
+    // E11 (O-1·E11): el desenlace de la rotación del
+    // último desbloqueo, para que Seguridad lo enseñe.
+    rotationOutcome,
     personality: session ? await getPersonalityId().catch(() => null) : null,
     guideVisited: session ? await getGuideVisited().catch(() => []) : [],
     disabledTools: session ? await getDisabledToolNames().catch(() => []) : [],
@@ -1604,6 +2284,12 @@ export async function installServices(): Promise<void> {
       ramTotalBytes: totalmem(),
       ...(await diskStats()),
       lastGenRate,
+      // E11 (paso 5): las dos fuentes que el panel suma a
+      // las del pie: la fracción de contexto del último
+      // turno medido y la memoria de la propia app, leída
+      // en este principal al componer el bootstrap.
+      contextUsedFraction: lastContextFraction,
+      appMemoryBytes: process.memoryUsage().rss,
     },
   }));
 
@@ -1624,11 +2310,14 @@ export async function installServices(): Promise<void> {
   handle("nido:vault-unlock", async (_e, args: { password: string }) => {
     if (!vaultExists()) return { ok: false, reason: "no-vault" };
     try {
-      const sess = await VaultSession.unlock(
-        dirs().vault,
-        [new PasswordCustodyProvider(args.password)],
-        { idleTimeoutMs: IDLE_TIMEOUT_MS },
-      );
+      const provider = new PasswordCustodyProvider(args.password);
+      const sess = await VaultSession.unlock(dirs().vault, [provider], {
+        idleTimeoutMs: IDLE_TIMEOUT_MS,
+      });
+      // E11 (O-1·E11): la recuperación y la rotación
+      // pedida se asientan aquí, antes de que onUnlocked
+      // abra ninguna base con la sesión.
+      await settlePendingRotation(sess, provider);
       await onUnlocked(sess);
       return { ok: true };
     } catch (err) {
@@ -1652,9 +2341,6 @@ export async function installServices(): Promise<void> {
     if (patch.lang === "es" || patch.lang === "en" || patch.lang === "pt") {
       prefs.lang = patch.lang;
       if (session) await setLanguageId(patch.lang).catch(() => undefined);
-    }
-    if (typeof patch.fontScale === "number") {
-      prefs.fontScale = Math.min(1.4, Math.max(1, patch.fontScale));
     }
     if (typeof patch.sidebarWidth === "number") {
       prefs.sidebarWidth = Math.min(360, Math.max(240, patch.sidebarWidth));
@@ -1740,6 +2426,145 @@ export async function installServices(): Promise<void> {
     }
     await writeFile(path.join(downloads, filename), report.document, "utf8");
     return { ok: true, delivered: filename };
+  });
+
+  // E11 (paso 4): la exportación de la conversación, solo
+  // por acción expresa de la persona (R6). Tres gestos con
+  // su canal: el diálogo de guardar (la persona elige el
+  // destino; cancelar no escribe nada), la escritura en el
+  // destino elegido y el arrastre fuera (la carcasa
+  // necesita el fichero real en disco y su icono para
+  // empezar el arrastre del sistema). Nada se exporta
+  // solo, ni por temporizador ni como efecto de otro gesto.
+  // E11 (paso 7): la entrega del enlace retenido. La
+  // ventana dice el último número que ya aplicó; si el
+  // retenido es más nuevo, se resuelve contra el mundo de
+  // ahora y se devuelve con su número. Con la bóveda
+  // bloqueada la resolución es la retención misma: la
+  // ventana no lo marca aplicado y lo vuelve a pedir tras
+  // desbloquear, cuando el mundo ya puede dirimirlo.
+  // E11 (paso 9): la búsqueda global en las
+  // conversaciones, sobre el índice cifrado. Sin sesión
+  // (o sin su base) se niega con su razón: la superficie
+  // enseña el estado honesto, no una lista vacía fingida.
+  // E11 (O-1·E11): el respaldo de la bóveda, por gesto
+  // expreso en la sesión: el llamante de E2 cierra las
+  // bases gestionadas en un .nidbackup con su contraseña
+  // de respaldo (distinta de la de la bóveda; el destino
+  // lo eligió la persona en el diálogo de guardar).
+  handle("nido:backup-export", async (_e, args: { destPath: string; backupPassword: string }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    if (typeof args?.destPath !== "string" || args.destPath.length === 0) {
+      return { ok: false, reason: "no-dest" };
+    }
+    if (typeof args?.backupPassword !== "string" || args.backupPassword.length < 8) {
+      return { ok: false, reason: "backup-password-short" };
+    }
+    try {
+      const manifest = await exportVaultBackup({
+        dir: dirs().vault,
+        dbNames: managedDbNames(),
+        session,
+        destPath: args.destPath,
+        backupPassword: args.backupPassword,
+      });
+      return { ok: true, entries: manifest.entries.map((e) => e.path) };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: "backup-failed",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  // E11 (O-1·E11): pedir la rotación de la clave. El
+  // gesto re-autentica aquí mismo (la credencial debe
+  // desenvolver la DEK de la sesión: si no, no se pide
+  // nada), deja la intención guardada y reinicia la app:
+  // la rotación se ejecuta en el próximo desbloqueo,
+  // antes de que se abra ninguna base, que es la única
+  // posición en la que ningún mango vivo guarda la clave
+  // vieja. La respuesta no vuelve: el proceso sale.
+  handle("nido:vault-rotate-request", async (_e, args: { password: string }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    if (typeof args?.password !== "string" || args.password.length === 0) {
+      return { ok: false, reason: "no-password" };
+    }
+    try {
+      const { dek } = await unlockVaultWith(dirs().vault, [
+        new PasswordCustodyProvider(args.password),
+      ]);
+      if (!dek.equals(session.dek)) return { ok: false, reason: "reauth-failed" };
+    } catch {
+      return { ok: false, reason: "reauth-failed" };
+    }
+    prefs.pendingRotation = true;
+    await savePrefs().catch(() => undefined);
+    session.lock();
+    app.relaunch();
+    app.exit(0);
+    return { ok: true };
+  });
+
+  handle("nido:conversation-search", async (_e, args: { query: string }) => {
+    if (!session || !searchDb) return { ok: false, reason: "locked" };
+    const hits = searchConversationIndex(
+      searchDb,
+      typeof args?.query === "string" ? args.query : "",
+    );
+    return { ok: true, hits };
+  });
+
+  handle("nido:link-pending", async (_e, args: { afterSeq?: number }) => {
+    const after = typeof args?.afterSeq === "number" ? args.afterSeq : 0;
+    if (!pendingLink || pendingLink.seq <= after) {
+      return { ok: true, seq: linkSeq, resolution: null };
+    }
+    const r = resolvePendingLink();
+    return { ok: true, seq: r?.seq ?? linkSeq, resolution: r?.resolution ?? null };
+  });
+
+  handle("nido:export-save-dialog", async (event, args: { defaultName: string }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const opts = {
+      defaultPath: typeof args?.defaultName === "string" ? args.defaultName : "conversacion.md",
+    };
+    const r = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts);
+    return { ok: true, path: r.canceled || !r.filePath ? null : r.filePath };
+  });
+
+  handle("nido:export-write", async (_e, args: { path: string; content: string }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    if (typeof args?.path !== "string" || args.path.length === 0) {
+      return { ok: false, reason: "no-path" };
+    }
+    if (typeof args?.content !== "string") return { ok: false, reason: "no-content" };
+    await writeFile(args.path, args.content, "utf8");
+    return { ok: true };
+  });
+
+  handle("nido:export-drag-start", async (event, args: { fileName: string; content: string }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    if (typeof args?.fileName !== "string" || typeof args?.content !== "string") {
+      return { ok: false, reason: "bad-payload" };
+    }
+    const safeName = path.basename(args.fileName);
+    const dir = path.join(app.getPath("userData"), "export-tmp");
+    await mkdir(dir, { recursive: true });
+    const file = path.join(dir, safeName);
+    await writeFile(file, args.content, "utf8");
+    const iconCandidates = [
+      path.join(app.getAppPath(), "public", "mascot-nido.png"),
+      path.join(app.getAppPath(), "dist", "mascot-nido.png"),
+    ];
+    const iconPath = iconCandidates.find((p) => existsSync(p));
+    if (!iconPath) return { ok: false, reason: "no-icon" };
+    const icon = nativeImage.createFromPath(iconPath);
+    if (icon.isEmpty()) return { ok: false, reason: "no-icon" };
+    event.sender.startDrag({ file, icon });
+    return { ok: true };
   });
 
   // E10 (paso 6): las sesiones de investigación guardadas:
@@ -1834,6 +2659,13 @@ export async function installServices(): Promise<void> {
         await llamaEngine.unload().catch(() => undefined);
         return { ok: false, reason: "locked-during-load" };
       }
+      // A-20: la carga escribe el ajuste de modelo activo. Sin
+      // esta escritura el gestor activaba y el turno, que lee
+      // el activo de los ajustes en cada turno, volvía al
+      // modelo por defecto tras un reinicio: la elección de la
+      // persona se perdía. El fallo de la escritura no se
+      // traga: la carga se reporta fallida y se reintenta.
+      if (entry.kind === "llm") await setActiveModelId("llm", args.id);
       return await modelManagerData(true);
     } catch (err) {
       lastError = {
@@ -1867,6 +2699,9 @@ export async function installServices(): Promise<void> {
         await llamaEngine.unload().catch(() => undefined);
         return { ok: false, reason: "locked-during-load" };
       }
+      // A-20: el reintento escribe el mismo ajuste que la
+      // carga normal (ver nido:model-load).
+      if (entry.kind === "llm") await setActiveModelId("llm", args.id);
       return await modelManagerData(true);
     } catch (err) {
       return {
@@ -1879,7 +2714,7 @@ export async function installServices(): Promise<void> {
     }
   });
 
-  handle("nido:settings-set", async (_e, args: { personality?: string; memoryAutoSummarize?: boolean; memoryHistoryTurnThreshold?: number; memoryMaxSavedSessions?: number; memoryAutoGenerateTitles?: boolean; customSystemPrompt?: string; disabledTools?: unknown; noticesPermissionAsked?: boolean; noticesShowText?: boolean; noticesResident?: boolean; noticesAutostart?: boolean; voiceInputEnabled?: boolean; readAloudEnabled?: boolean; voiceSystemReserveEnabled?: boolean; deepResearchMode?: boolean }) => {
+  handle("nido:settings-set", async (_e, args: { personality?: string; memoryAutoSummarize?: boolean; memoryHistoryTurnThreshold?: number; memoryMaxSavedSessions?: number; memoryAutoGenerateTitles?: boolean; customSystemPrompt?: string; disabledTools?: unknown; noticesPermissionAsked?: boolean; noticesShowText?: boolean; noticesResident?: boolean; noticesAutostart?: boolean; voiceInputEnabled?: boolean; readAloudEnabled?: boolean; voiceSystemReserveEnabled?: boolean; deepResearchMode?: boolean; sendOnEnter?: boolean; fontScaleStep?: string }) => {
     // A-3 y A-7: las escrituras selladas exigen la sesión viva
     // (una escritura desde una lectura degradada reescribiría el
     // fichero sellado desde defaults) y su resultado se cobra:
@@ -1964,6 +2799,25 @@ export async function installServices(): Promise<void> {
       // turno lo honra en el mismo gesto, como en el móvil.
       if (typeof args?.deepResearchMode === "boolean") {
         await setDeepResearchMode(args.deepResearchMode);
+      }
+      // E11 (paso 1): el ajuste de envío persiste por el
+      // canal que ya existe (sin canal nuevo), en la forma
+      // del modo de investigación: la superficie lo lee al
+      // arrancar y el composer lo honra en el mismo gesto.
+      if (typeof args?.sendOnEnter === "boolean") {
+        await setSendOnEnter(args.sendOnEnter);
+      }
+      // E11 (paso 6): el escalón de tamaño persiste por el
+      // canal que ya existe (sin canal nuevo), validado
+      // contra los cinco valores del contrato.
+      if (
+        args?.fontScaleStep === "small" ||
+        args?.fontScaleStep === "compact" ||
+        args?.fontScaleStep === "standard" ||
+        args?.fontScaleStep === "large" ||
+        args?.fontScaleStep === "extra-large"
+      ) {
+        await setFontScale(args.fontScaleStep);
       }
       if (Array.isArray(args?.disabledTools)) {
         // Los permisos del agente: el cuarto campo del canal que
@@ -2408,6 +3262,38 @@ export async function installServices(): Promise<void> {
     return { ok: true };
   });
 
+  // O-12: el historial de acciones del agente, con la misma
+  // forma que los canales de memoria y tareas (sesión primero,
+  // fallo cerrado). La lista es la guardada en la base cifrada;
+  // el deshacer cobra sobre la entrada guardada; el borrado
+  // vacía el historial y no toca notas ni recordatorios.
+  handle("nido:action-log-list", async () => {
+    if (!session) return { ok: false, reason: "locked" };
+    const { listActions } = await import("../../src/agent/actionLogStore.js");
+    return { ok: true, actions: await listActions() };
+  });
+
+  handle("nido:action-log-undo", async (_e, args: { id?: number }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    if (typeof args?.id !== "number") return { ok: false, reason: "bad-args" };
+    const { listActions, undoAction } = await import("../../src/agent/actionLogStore.js");
+    const entry = (await listActions(500)).find((a) => a.id === args.id);
+    if (!entry) return { ok: false, reason: "not-found" };
+    const done = await undoAction(entry);
+    return done ? { ok: true } : { ok: false, reason: "not-actionable" };
+  });
+
+  handle("nido:action-log-clear", async () => {
+    if (!session) return { ok: false, reason: "locked" };
+    const { clearActions } = await import("../../src/agent/actionLogStore.js");
+    await clearActions();
+    // Como en el móvil: el registro en memoria se vacía con el
+    // guardado, para que las dos vistas del historial coincidan.
+    const { actionLog } = await import("../../src/agent/actionLog.js");
+    actionLog.clear();
+    return { ok: true };
+  });
+
   handle("nido:agenda-event-save", async (_e, args: {
     id?: string; title?: string; notes?: string; location?: string;
     startsAt?: number; endsAt?: number; allDay?: boolean;
@@ -2478,6 +3364,86 @@ export async function installServices(): Promise<void> {
     const { deleteContact } = await import("../../src/agent/memory/contactStore.js");
     await deleteContact(args.id);
     return { ok: true };
+  });
+
+  // Puerta .ics/.vcf: la importación por fichero de la
+  // Agenda (el CARGO 1 de AUDIT-CABLEADO-E7E8: los
+  // motores existían sin ningún llamante). La persona
+  // elige el fichero en el renderizador y su ruta llega
+  // por el argumento, como en documentos y paquetes;
+  // el principal lo lee él mismo, con el tope aplicado
+  // durante la lectura (el tamaño se mira antes de
+  // leer), y retiene el texto en el hueco de su clase
+  // con un testigo de un solo uso: el commit guarda
+  // exactamente lo que el resumen anunció.
+  handle("nido:agenda-import-preview", async (_e, args: { kind?: string; path?: string }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    const kind = args?.kind === "ics" || args?.kind === "vcf" ? args.kind : null;
+    if (!kind || typeof args?.path !== "string" || args.path.length === 0) {
+      return { ok: false, reason: "bad-args" };
+    }
+    const { ICS_LIMITS } = await import("../../src/agent/memory/calendarIcs.js");
+    const st = await stat(args.path).catch(() => null);
+    if (!st || !st.isFile()) return { ok: false, reason: "unreadable" };
+    if (st.size > ICS_LIMITS.maxBytes) {
+      // El mismo veredicto que el núcleo da sobre el
+      // texto, sin leer un solo byte del fichero.
+      pendingAgendaImports.delete(kind);
+      return {
+        ok: true,
+        token: null,
+        summary: agendaImportSummaryDto({
+          rejected: "El fichero pasa de 25 MB: no se importó nada.",
+          total: 0,
+          enterCount: 0,
+          recurring: 0,
+          alreadyPresent: 0,
+          discarded: [],
+          named: null,
+        }),
+      };
+    }
+    const text = await readFile(args.path, "utf8").catch(() => null);
+    if (text === null) return { ok: false, reason: "unreadable" };
+    const { raw } = await runAgendaImport(kind, text, false);
+    const summary = agendaImportSummaryDto(raw);
+    if (summary.rejectedCode || summary.rejectedText) {
+      pendingAgendaImports.delete(kind);
+      return { ok: true, token: null, summary };
+    }
+    const token = randomUUID();
+    pendingAgendaImports.set(kind, { token, text });
+    return { ok: true, token, summary };
+  });
+
+  handle("nido:agenda-import-commit", async (_e, args: { kind?: string; token?: string }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    const kind = args?.kind === "ics" || args?.kind === "vcf" ? args.kind : null;
+    if (!kind || typeof args?.token !== "string") return { ok: false, reason: "bad-token" };
+    const pending = pendingAgendaImports.get(kind);
+    if (!pending || pending.token !== args.token) return { ok: false, reason: "bad-token" };
+    pendingAgendaImports.delete(kind);
+    const { raw, inserted } = await runAgendaImport(kind, pending.text, true);
+    return { ok: true, inserted, summary: agendaImportSummaryDto(raw) };
+  });
+
+  // La exportación simétrica: el fichero entero de la
+  // clase, compuesto por el núcleo, para guardarlo por
+  // los canales de guardado ya expuestos.
+  handle("nido:agenda-export", async (_e, args: { kind?: string }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    const kind = args?.kind === "ics" || args?.kind === "vcf" ? args.kind : null;
+    if (!kind) return { ok: false, reason: "bad-args" };
+    if (kind === "ics") {
+      const { listEvents } = await import("../../src/agent/memory/calendarStore.js");
+      const { exportIcs } = await import("../../src/agent/memory/calendarIcs.js");
+      const events = await listEvents(0, Date.UTC(2100, 0, 1));
+      return { ok: true, content: exportIcs(events), defaultName: "nido-calendario.ics" };
+    }
+    const { listContacts } = await import("../../src/agent/memory/contactStore.js");
+    const { exportVcf } = await import("../../src/agent/memory/contactVcf.js");
+    const contacts = await listContacts();
+    return { ok: true, content: exportVcf(contacts), defaultName: "nido-contactos.vcf" };
   });
 
   handle("nido:pack-remove", async (_e, args: { filename: string }) => {

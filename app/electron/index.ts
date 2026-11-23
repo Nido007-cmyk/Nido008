@@ -19,7 +19,7 @@
  */
 import {app, dialog} from "electron";
 import {bootShell} from "./shell.ts";
-import {installServices} from "./services.ts";
+import {installServices, noteExternalLink, noteLinkFromArgv} from "./services.ts";
 import {residentEnabledSync} from "./noticeShell.ts";
 
 void (async () => {
@@ -44,5 +44,12 @@ void (async () => {
         app.quit();
         return;
     }
-    bootShell({singleInstance: true, residentEnabled: () => residentEnabledSync()});
+    bootShell({
+        singleInstance: true,
+        residentEnabled: () => residentEnabledSync(),
+        // E11 (paso 7): las dos llegadas del enlace: los
+        // argumentos de la segunda instancia y open-url.
+        onSecondInstanceArgv: (argv) => noteLinkFromArgv(argv),
+        onOpenUrl: (url) => noteExternalLink(url),
+    });
 })();

@@ -111,13 +111,34 @@ describe("IPC channel contract census (tanda 14)", () => {
     // investigación añaden dos canales (research-sessions
     // y research-session-delete); la reanudación viaja en
     // la carga de turn-send, sin canal nuevo.
-    expect(invoked.size).toBe(54);
+    // Re-firmado en E11 (paso 4): la exportación de la
+    // conversación añade tres canales (export-save-dialog,
+    // export-write y export-drag-start), uno por gesto
+    // expreso de la persona.
+    // Re-firmado en E11 (paso 7): la entrega del enlace
+    // retenido añade un canal (link-pending); la llegada
+    // en caliente avisa por el evento nido:link.
+    // Re-firmado en E11 (paso 9): la búsqueda global añade
+    // un canal (conversation-search) sobre el índice
+    // cifrado.
+    // Re-firmado en E11 (O-1·E11): la adopción del
+    // respaldo y la rotación añade dos canales
+    // (backup-export y vault-rotate-request).
+    // Re-firmado en la cadena de curas (acto 6, O-12):
+    // el historial de acciones añade tres canales
+    // (action-log-list, action-log-undo y
+    // action-log-clear) para la tarjeta de permisos.
+    // Re-firmado en la tanda PUERTA .ics/.vcf: la puerta
+    // de ficheros de la Agenda añade tres canales
+    // (agenda-import-preview, agenda-import-commit y
+    // agenda-export) sobre los motores del núcleo.
+    expect(invoked.size).toBe(67);
     expect(sent).toEqual(new Set(["nido:confirm-response", "nido:voice-dictation-audio"]));
     // Re-firmado en E8 (paso 6): el clic de la notificación
     // del sistema y las acciones de la bandeja emiten
     // nido:notices-show hacia el renderizador.
     expect(listened).toEqual(
-      new Set(["nido:turn-token", "nido:turn-phase", "nido:confirm-request", "nido:vault-locked", "nido:notices-show", "nido:voice-event", "nido:voice-asset-progress"]),
+      new Set(["nido:turn-token", "nido:turn-phase", "nido:confirm-request", "nido:vault-locked", "nido:notices-show", "nido:voice-event", "nido:voice-asset-progress", "nido:link"]),
     );
   });
 
@@ -210,7 +231,22 @@ describe("IPC channel contract census (tanda 14)", () => {
     // 64 → 66 en E10 (paso 6): researchSessions y
     // researchSessionDelete, la lista de investigaciones
     // guardadas y su borrado con doble toque.
-    expect(exposed.size).toBe(66);
+    // 66 → 69 en E11 (paso 4): exportSaveDialog, exportWrite
+    // y exportDragStart, los tres gestos de la exportación
+    // de la conversación.
+    // 69 → 71 en E11 (paso 7): linkPending y onLink, la
+    // recogida del enlace retenido y su aviso en caliente.
+    // 71 → 72 en E11 (paso 9): conversationSearch, la
+    // búsqueda global sobre el índice.
+    // 72 → 74 en E11 (O-1·E11): backupExport y
+    // vaultRotateRequest, los dos gestos de Seguridad.
+    // 74 → 77 en la cadena de curas (acto 6, O-12):
+    // actionLogList, actionLogUndo y actionLogClear,
+    // la mitad de historial de la tarjeta de permisos.
+    // 77 → 80 en la tanda PUERTA .ics/.vcf:
+    // agendaImportPreview, agendaImportCommit y
+    // agendaExport, la puerta de ficheros de la Agenda.
+    expect(exposed.size).toBe(80);
     expect([...typed].sort()).toEqual([...exposed].sort());
   });
 

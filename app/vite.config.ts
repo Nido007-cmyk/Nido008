@@ -21,7 +21,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // código heredado del móvil solo los importa de forma dinámica
 // tras sus costuras de plataforma (handlers.ts: Linking,
 // calendario, contactos, documentos), caminos que en PC no se
-// ejecutan (censo de imports dinámicos de src/: react-native,
+// ejecutan (censo de imports dinámicos de src/:
 // expo-calendar, expo-contacts, expo-document-picker,
 // expo-file-system); como externos, esos imports quedan en tiempo
 // de ejecución y el paquete no los arrastra.
@@ -42,7 +42,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // paquete de plataforma en tiempo de ejecución; empaquetarlo en
 // el bundle rompería su resolución del .node, como los demás
 // motores nativos de esta lista.
-const electronExternalModules = ["node-llama-cpp", "lifecycle-utils", "electron-updater", "better-sqlite3-multiple-ciphers", "react-native", "expo-calendar", "expo-contacts", "expo-document-picker", "expo-file-system", "@napi-rs/canvas", "tesseract.js", "pdfjs-dist", "pdfjs-dist/legacy/build/pdf.mjs", "sherpa-onnx-node"];
+const electronExternalModules = ["node-llama-cpp", "lifecycle-utils", "electron-updater", "better-sqlite3-multiple-ciphers", "expo-calendar", "expo-contacts", "expo-document-picker", "expo-file-system", "@napi-rs/canvas", "tesseract.js", "pdfjs-dist", "pdfjs-dist/legacy/build/pdf.mjs", "sherpa-onnx-node"];
 
 // https://vitejs.dev/config/
 export default defineConfig({

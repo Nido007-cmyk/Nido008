@@ -66,8 +66,12 @@ describe("dispatchToolCall", () => {
   });
 
   it("informa si la herramienta no está implementada", async () => {
+    // El ejemplo es una herramienta viva del catálogo despachada sin
+    // handler: ese es el camino de «no está implementada». (Era
+    // open_app hasta su retiro por la cura O-1; un nombre fuera del
+    // catálogo caería en la otra rama, «herramienta desconocida».)
     const out = await dispatchToolCall(
-      { name: "open_app", arguments: { link: "https://nido.example/x" } },
+      { name: "device_time", arguments: {} },
       {}
     );
     expect(out).toMatch(/no está implementada/);
@@ -357,5 +361,66 @@ describe("dispatchToolCallDetailed", () => {
       },
     );
     expect(seen).toEqual([{ tool: "delete_note", args: { id: "n1", title: "Receta" } }]);
+  });
+});
+
+describe("CONF-2: el asiento de una sensible rechazada en su puerta de handler", () => {
+  beforeEach(() => {
+    actionLog.clear();
+  });
+
+  // CONF-2 (BAJA de la auditoría de confirmaciones, §6): cuando la
+  // persona rechaza en la puerta del handler, `withConfirmation`
+  // devuelve su mensaje de cancelación como resultado ordinario y
+  // el despachador asentaba la entrada como «executed», aunque
+  // nada se ejecutó. La respuesta al usuario ya decía la verdad;
+  // lo que mentía era solo la entrada del registro.
+  it("el rechazo en el handler asienta «cancelled» y el handler no se ejecuta", async () => {
+    const { withConfirmation } = await import("./confirm.js");
+    let ejecutado = false;
+    const handler = withConfirmation(
+      "create_calendar_event",
+      async () => {
+        ejecutado = true;
+        return "Evento creado.";
+      },
+      async () => false,
+      (args) => ({
+        tool: "create_calendar_event",
+        title: "Crear evento",
+        message: `Crear «${String(args.title)}»`,
+        scope: "Alcance: solo este evento",
+      }),
+    );
+    const out = await dispatchToolCall(
+      { name: "create_calendar_event", arguments: { title: "Dentista", start: "2026-11-25T10:00:00.000Z" } },
+      { create_calendar_event: handler },
+    );
+    expect(ejecutado).toBe(false);
+    expect(out).toMatch(/no hice nada|did nothing|não fiz nada/i);
+    const entry = actionLog.list().find((e) => e.tool === "create_calendar_event");
+    expect(entry?.outcome).toBe("cancelled");
+  });
+
+  it("la misma sensible aprobada en su handler asienta «executed» (la guarda del reconocimiento)", async () => {
+    const { withConfirmation } = await import("./confirm.js");
+    const handler = withConfirmation(
+      "create_calendar_event",
+      async () => "Evento creado.",
+      async () => true,
+      (args) => ({
+        tool: "create_calendar_event",
+        title: "Crear evento",
+        message: `Crear «${String(args.title)}»`,
+        scope: "Alcance: solo este evento",
+      }),
+    );
+    const out = await dispatchToolCall(
+      { name: "create_calendar_event", arguments: { title: "Dentista", start: "2026-11-25T10:00:00.000Z" } },
+      { create_calendar_event: handler },
+    );
+    expect(out).toBe("Evento creado.");
+    const entry = actionLog.list().find((e) => e.tool === "create_calendar_event");
+    expect(entry?.outcome).toBe("executed");
   });
 });

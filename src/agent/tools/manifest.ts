@@ -123,24 +123,6 @@ export const LOCAL_TOOLS: ToolDefinition[] = [
     parameters: {},
   },
   {
-    name: "open_app",
-    description:
-      "Abre un enlace explícito fuera de NIDO (navegador, marcador, mensajes o correo). " +
-      "REQUIERE confirmación explícita del usuario. Solo esquemas permitidos: https, tel, sms, mailto " +
-      "(http se rechaza: sin cifrar). " +
-      "Cualquier otro esquema, enlace malformado o vacío se rechaza sin abrir nada.",
-    parameters: {
-      link: {
-        type: "string",
-        description:
-          // T-11 (P-10a): el hint prometía http y la descripción (y el
-          // clasificador) lo rechazan. Manda el clasificador.
-          "Enlace explícito a abrir (p.ej. https://ejemplo.com, tel:+15551234567). Solo https/tel/sms/mailto.",
-        required: true,
-      },
-    },
-  },
-  {
     name: "calculate",
     description:
       "Calculadora determinista: evalúa una expresión aritmética sin internet. " +
@@ -164,7 +146,7 @@ export const LOCAL_TOOLS: ToolDefinition[] = [
   },
   {
     name: "create_calendar_event",
-    description: "Crea un evento en el calendario del teléfono (permiso del usuario).",
+    description: "Crea un evento en el calendario de NIDO de esta computadora, guardado en su base cifrada. No toca el calendario del sistema.",
     parameters: {
       title: { type: "string", description: "Título del evento", required: true },
       start: { type: "string", description: "Inicio en ISO-8601 local, p.ej. «2026-09-27T10:00:00»", required: true, format: "iso-datetime" },
@@ -175,7 +157,7 @@ export const LOCAL_TOOLS: ToolDefinition[] = [
   },
   {
     name: "list_calendar_events",
-    description: "Lista eventos del calendario del teléfono en un rango de fechas.",
+    description: "Lista eventos del calendario de NIDO de esta computadora en un rango de fechas.",
     parameters: {
       from: { type: "string", description: "Desde, ISO-8601 (por defecto: ahora)", format: "iso-datetime" },
       to: { type: "string", description: "Hasta, ISO-8601 (por defecto: 7 días)", format: "iso-datetime" },
@@ -184,7 +166,7 @@ export const LOCAL_TOOLS: ToolDefinition[] = [
   },
   {
     name: "find_contact",
-    description: "Busca contactos del teléfono por nombre (permiso del usuario). No vuelca la agenda completa.",
+    description: "Busca por nombre en la agenda de NIDO de esta computadora, guardada en su base cifrada. No vuelca la agenda completa.",
     parameters: {
       query: { type: "string", description: "Nombre o parte del nombre a buscar", required: true },
     },
@@ -192,8 +174,10 @@ export const LOCAL_TOOLS: ToolDefinition[] = [
   {
     name: "read_picked_file",
     description:
-      "Pide al usuario elegir un archivo con el selector del sistema y lee su contenido como texto " +
-      "(máx. 200 KB). Sirve para analizar documentos, CSV o notas que el usuario te pase.",
+      "Lee el contenido como texto de un archivo que el usuario elija (máx. 200 KB). " +
+      "En PC el selector de archivos todavía no está disponible en esta etapa: la herramienta " +
+      "responde eso mismo y remite a importar el documento desde la Biblioteca de NIDO " +
+      "o a pegar su texto en el chat.",
     parameters: {},
   },
   {
@@ -212,7 +196,7 @@ export const LOCAL_TOOLS: ToolDefinition[] = [
       "numéricas (suma, promedio, min, max), valores de texto y primeras filas. " +
       "Soporta filter («producto=pan», «importe>100», combina con «;»), sort_by («-columna» = descendente) y top_n.",
     parameters: {
-      text: { type: "string", description: "Contenido de la tabla (p.ej. lo leído con read_picked_file)", required: true },
+      text: { type: "string", description: "Contenido de la tabla (p.ej. el texto de un CSV que el usuario te pase)", required: true },
       filter: { type: "string", description: "Filtros «columna=valor», separados por «;» (opcional)" },
       sort_by: { type: "string", description: "Columna para ordenar; «-col» = descendente (opcional)" },
       top_n: { type: "number", description: "Filas a mostrar (por defecto 5, máx. 20)", max: 20 },

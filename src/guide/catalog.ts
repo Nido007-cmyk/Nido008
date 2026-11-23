@@ -250,6 +250,22 @@ export const lessons: GuideLessonDecl[] = [
     ],
     examples: [{ route: "model-judged-tone" }],
   },
+  {
+    // E11 (paleta M-2): nace con la paleta crecida, en la
+    // misma tanda que la construye.
+    id: "paleta-de-comandos",
+    module: "la-app",
+    labels: ["pcSurface.palettePlaceholder", "pcSurface.paletteEmpty"],
+    examples: [{ route: "model-judged" }],
+  },
+  {
+    // E11 (paso 1 y paso 6): nace con el mapa de atajos y
+    // su hoja, en la misma tanda que los construye.
+    id: "atajos-de-teclado",
+    module: "la-app",
+    labels: ["pcSurface.shortcutsTitle"],
+    examples: [{ route: "model-judged" }],
+  },
 ];
 
 /**
