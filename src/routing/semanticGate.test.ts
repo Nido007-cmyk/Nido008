@@ -67,10 +67,10 @@ describe("puerta por significado", () => {
     expect(r.filter((x) => !x.danger && verdict(BGE, x))).toEqual([]);
   });
 
-  it("la lista de palabras sola, en el mismo examen: 4 de 45 (por eso existe esta capa)", () => {
+  it("la lista de palabras sola, en el mismo examen: 5 de 45 (por eso existe esta capa)", () => {
     const r = rows(E5);
     const lexical = (q: string) => isHealthQuestion(q) || isEmergencySituation(q);
-    expect(r.filter((x) => x.danger && lexical(x.text)).length).toBe(4);
+    expect(r.filter((x) => x.danger && lexical(x.text)).length).toBe(5);
     expect(r.filter((x) => !x.danger && lexical(x.text))).toEqual([]);
   });
 

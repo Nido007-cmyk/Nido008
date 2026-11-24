@@ -58,6 +58,7 @@ vi.mock("./shell.ts", async () => {
 
 import { installServices } from "./services.ts";
 import { llamaEngine } from "../../src/inference/LlamaEngine.js";
+import { sceneSkipped } from "../../src/test/sceneGate.js";
 
 const event = { sender: {}, senderFrame: { url: "nido://app/index.html" } };
 
@@ -67,7 +68,12 @@ function call(channel: string, args?: unknown): Promise<{ ok: boolean; reason?: 
   return fn(event, args) as Promise<{ ok: boolean; reason?: string }>;
 }
 
+const SCENE_OFF = sceneSkipped("modelLoadGuard", [
+  path.join(process.cwd(), "models", "qwen3-0.6b-q4km.gguf"),
+]);
+
 beforeAll(async () => {
+  if (SCENE_OFF) return;
   // La siembra va por enlace duro desde un temporal en el
   // mismo sistema de ficheros que los genuinos: desde el
   // paso 4 de E4, la mitad de lectura de D-3 rechaza por
@@ -91,10 +97,11 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(() => {
+  if (SCENE_OFF) return;
   rmSync(harness.userData, { recursive: true, force: true });
 });
 
-describe("Pieza 2 de la carcasa: los canales de carga cobran la sesión (H-CARGA-A)", () => {
+describe.skipIf(SCENE_OFF)("Pieza 2 de la carcasa: los canales de carga cobran la sesión (H-CARGA-A)", () => {
   it("con la bóveda bloqueada, model-load responde locked sin cargar", async () => {
     const r = await call("nido:model-load", { id: "qwen3-0.6b-q4km" });
     expect(r).toEqual({ ok: false, reason: "locked" });

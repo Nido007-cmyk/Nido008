@@ -66,6 +66,13 @@ export interface Notice {
   repeat: NoticeRepeat | null;
   /** Epoch ms de la próxima ocurrencia: derivado de baseLocal+repeat. */
   nextFireAt: number;
+  /**
+   * La columna `ends_at` guarda dos cosas con la misma
+   * forma: en un temporizador, su fin absoluto; en una
+   * fila con repetición que la trae (la serie de un
+   * evento, CARGO-2), el fin de la serie: ningún avance
+   * pasa de este instante.
+   */
   endsAt: number | null;
   state: NoticeState;
   snoozeUntil: number | null;
@@ -613,6 +620,16 @@ export async function advanceAfterFire(
       const base = parseBaseLocal(row.base_local);
       if (!base) return null;
       const next = nextOccurrence(base, repeat, new Date(firedAt)).getTime();
+      // CARGO-2: la serie con fin (`ends_at`) se cierra
+      // al pasar de él, con la misma forma terminal que
+      // la fila de una vez; sin fin, idéntico a siempre.
+      if (row.ends_at != null && next > row.ends_at) {
+        await db.runAsync(
+          "UPDATE notices SET state = 'fired', last_fired_at = ? WHERE id = ?",
+          [firedAt, id],
+        );
+        return rowToNotice({ ...row, state: "fired", last_fired_at: firedAt });
+      }
       await db.runAsync(
         "UPDATE notices SET next_fire_at = ?, last_fired_at = ? WHERE id = ?",
         [next, firedAt, id],
@@ -694,11 +711,19 @@ export async function markMissed(id: string): Promise<boolean> {
  * más reciente). Devuelve la ocurrencia presentada y el
  * conteo, o null si la fila no es una serie armada o aún no
  * debe nada.
+ *
+ * CARGO-2: si la fila trae fin de serie (`ends_at`), la
+ * caminata se capa en él: las debidas se cuentan solo
+ * mientras no lo pasan, y si la siguiente ya lo pasa la
+ * serie se cierra (`done`) en la misma transacción; si
+ * la primera debida ya lo pasa, se cierra sin presentar
+ * nada y se devuelve null.
  */
 export async function advanceSeriesAfterMiss(
   id: string,
   nowMs: number,
 ): Promise<{ presentedAt: number; skipped: number; nextFireAt: number } | null> {
+  let closedAtEnd = false;
   const result = await writeTransaction(async (db) => {
     const row = await db.getFirstAsync<NoticeRow>(
       "SELECT * FROM notices WHERE id = ?",
@@ -711,21 +736,43 @@ export async function advanceSeriesAfterMiss(
     if (!base) return null;
     let cursor = row.next_fire_at;
     if (cursor > nowMs) return null;
+    // CARGO-2: la caminata se capa en el fin de la serie
+    // (`ends_at`) cuando la fila lo trae: las debidas se
+    // cuentan solo mientras no lo pasan.
+    const endsAt = row.ends_at;
     let count = 0;
     let latest = cursor;
     while (cursor <= nowMs && count < 10000) {
+      if (endsAt != null && cursor > endsAt) break;
       count++;
       latest = cursor;
       cursor = nextOccurrence(base, repeat, new Date(cursor)).getTime();
     }
+    if (count === 0) {
+      // La primera debida ya pasa del fin: la serie se
+      // cierra sin presentar nada.
+      await db.runAsync("UPDATE notices SET state = 'done' WHERE id = ?", [id]);
+      closedAtEnd = true;
+      return null;
+    }
     const skipped = count - 1;
-    await db.runAsync(
-      "UPDATE notices SET next_fire_at = ?, missed_count = missed_count + ? WHERE id = ?",
-      [cursor, skipped, id],
-    );
+    if (endsAt != null && cursor > endsAt) {
+      // La caminata llegó al fin: la serie se cierra en
+      // la misma transacción, con su conteo asentado.
+      await db.runAsync(
+        "UPDATE notices SET state = 'done', missed_count = missed_count + ? WHERE id = ?",
+        [skipped, id],
+      );
+      closedAtEnd = true;
+    } else {
+      await db.runAsync(
+        "UPDATE notices SET next_fire_at = ?, missed_count = missed_count + ? WHERE id = ?",
+        [cursor, skipped, id],
+      );
+    }
     return { presentedAt: latest, skipped, nextFireAt: cursor };
   });
-  if (result) await syncAgendaAfterWrite();
+  if (result || closedAtEnd) await syncAgendaAfterWrite();
   return result;
 }
 

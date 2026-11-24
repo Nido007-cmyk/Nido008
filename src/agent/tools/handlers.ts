@@ -632,8 +632,18 @@ export const listCalendarEventsHandler: ToolHandler = async (args) => {
   const limit = Number(args.limit) > 0 ? Math.min(Math.floor(Number(args.limit)), 50) : 20;
   try {
     const { listEvents } = await import("../memory/calendarStore.js");
-    const events = await listEvents(from.getTime(), to.getTime());
-    const hidden = Math.max(0, events.length - limit);
+    const { expandEvents } = await import("../memory/eventSeries.js");
+    // CARGO-2: la herramienta nombra las ocurrencias por
+    // su fecha, no solo la primera fecha de la serie: se
+    // trae todo lo que empieza antes del fin del rango
+    // (una serie se ancla en su primera fecha y sus
+    // ocurrencias pueden caer dentro aunque ella quede
+    // fuera) y la expansión decide lo que cae en el
+    // rango. Lo que el tope corta se suma a lo no
+    // enseñado: la línea de «… y N más» dice la verdad.
+    const fetched = await listEvents(0, to.getTime());
+    const { events, truncatedSeries } = expandEvents(fetched, from.getTime(), to.getTime());
+    const hidden = Math.max(0, events.length - limit) + truncatedSeries;
     const upcoming = events
       .slice(0, limit)
       .map((e) => {

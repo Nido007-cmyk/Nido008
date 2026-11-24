@@ -8,7 +8,7 @@
 
 import { createCipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { copyFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -123,6 +123,7 @@ describe("T-3 · restauración desde el respaldo", () => {
       restoreBackup({
         srcPath: backupPath,
         dir: dirB,
+        vaultDir: dirB,
         providers: [new PasswordCustodyProvider(PASS_B)],
         noticeAccepted: false,
         backupPassword: PASS_BK,
@@ -139,6 +140,7 @@ describe("T-3 · restauración desde el respaldo", () => {
     const result = await restoreBackup({
       srcPath: backupPath,
       dir: dirB,
+      vaultDir: dirB,
       providers: [new PasswordCustodyProvider(PASS_B)],
       session: sessionB,
       noticeAccepted: true,
@@ -256,7 +258,7 @@ describe("arreglos ATAQUE-4 · duplicados, lista blanca, rollback con sidecars, 
     ]);
     expect(() => readBackupContainer(dup)).toThrow(BackupError);
     await expect(
-      restoreBackup({ srcPath: dup, dir: victim.dir, providers: [new PasswordCustodyProvider(PASS_V)], noticeAccepted: true }),
+      restoreBackup({ srcPath: dup, dir: victim.dir, vaultDir: victim.dir, providers: [new PasswordCustodyProvider(PASS_V)], noticeAccepted: true }),
     ).rejects.toThrow(BackupError);
     expect(rowsOf(victim.dir, victim.dek)).toEqual(["dato-victima-d3"]);
     expect(readdirSync(victim.dir).some((n) => n.includes("pre-restore-bak"))).toBe(false);
@@ -272,7 +274,7 @@ describe("arreglos ATAQUE-4 · duplicados, lista blanca, rollback con sidecars, 
       { path: "nido-rotation-staging.json", data: dbBytes }, // Carga de base válida, nombre prohibido.
     ]);
     await expect(
-      restoreBackup({ srcPath: forged, dir: victim.dir, providers: [new PasswordCustodyProvider(PASS_V)], noticeAccepted: true }),
+      restoreBackup({ srcPath: forged, dir: victim.dir, vaultDir: victim.dir, providers: [new PasswordCustodyProvider(PASS_V)], noticeAccepted: true }),
     ).rejects.toThrow(BackupError);
     expect(existsSync(path.join(victim.dir, "nido-rotation-staging.json"))).toBe(false);
     expect(rowsOf(victim.dir, victim.dek)).toEqual(["dato-victima-d7"]);
@@ -302,7 +304,7 @@ describe("arreglos ATAQUE-4 · duplicados, lista blanca, rollback con sidecars, 
 
     // La restauración sustituye y falla al final: sin proveedores no hay re-envoltura.
     await expect(
-      restoreBackup({ srcPath: backupPath, dir: victimDir, providers: [], noticeAccepted: true, backupPassword: PASS_BK }),
+      restoreBackup({ srcPath: backupPath, dir: victimDir, vaultDir: victimDir, providers: [], noticeAccepted: true, backupPassword: PASS_BK }),
     ).rejects.toThrow(BackupError);
     // El rollback devolvió principal, -wal y bóveda: las DOS filas viven.
     const { dek } = await unlockVaultWith(victimDir, [new PasswordCustodyProvider(PASS_V)]);
@@ -322,6 +324,7 @@ describe("arreglos ATAQUE-4 · duplicados, lista blanca, rollback con sidecars, 
       restoreBackup({
         srcPath: backupPath,
         dir: victim.dir,
+        vaultDir: victim.dir,
         providers: [new ProveedorMentiroso(PASS_V)],
         noticeAccepted: true,
         backupPassword: PASS_BK,
@@ -337,6 +340,7 @@ describe("arreglos ATAQUE-4 · duplicados, lista blanca, rollback con sidecars, 
     const result = await restoreBackup({
       srcPath: backupPath,
       dir: victim.dir,
+      vaultDir: victim.dir,
       providers: [new PasswordCustodyProvider(PASS_V)],
       noticeAccepted: true,
       backupPassword: PASS_BK,
@@ -499,6 +503,7 @@ describe("A-3 · formato 2 (keyWrap) y M-3 · bases huérfanas en el destino", (
     const result = await restoreBackup({
       srcPath: backupV2,
       dir: dest.dir,
+      vaultDir: dest.dir,
       providers: [new PasswordCustodyProvider(PASS_D)],
       noticeAccepted: true,
       backupPassword: PASS_BK,
@@ -518,6 +523,7 @@ describe("A-3 · formato 2 (keyWrap) y M-3 · bases huérfanas en el destino", (
       restoreBackup({
         srcPath: backupV2Solo,
         dir: dest.dir,
+        vaultDir: dest.dir,
         providers: [new PasswordCustodyProvider(PASS_D)],
         noticeAccepted: true,
         backupPassword: "contrasena-equivocada · prueba",
@@ -534,6 +540,7 @@ describe("A-3 · formato 2 (keyWrap) y M-3 · bases huérfanas en el destino", (
       restoreBackup({
         srcPath: backupV2Solo,
         dir: dest.dir,
+        vaultDir: dest.dir,
         providers: [new PasswordCustodyProvider(PASS_D)],
         noticeAccepted: true,
       }),
@@ -574,6 +581,7 @@ describe("A-3 · formato 2 (keyWrap) y M-3 · bases huérfanas en el destino", (
     const result = await restoreBackup({
       srcPath: legado,
       dir: dest.dir,
+      vaultDir: dest.dir,
       providers: [new PasswordCustodyProvider(PASS_D)],
       noticeAccepted: true,
     });
@@ -610,6 +618,7 @@ describe("A-3 · formato 2 (keyWrap) y M-3 · bases huérfanas en el destino", (
     const err = await restoreBackup({
       srcPath: backupV2Solo,
       dir: dest.dir,
+      vaultDir: dest.dir,
       providers: [new PasswordCustodyProvider(PASS_D)],
       noticeAccepted: true,
       backupPassword: PASS_BK,
@@ -626,6 +635,7 @@ describe("A-3 · formato 2 (keyWrap) y M-3 · bases huérfanas en el destino", (
     const result = await restoreBackup({
       srcPath: backupV2Solo,
       dir: dest.dir,
+      vaultDir: dest.dir,
       providers: [new PasswordCustodyProvider(PASS_D)],
       noticeAccepted: true,
       backupPassword: PASS_BK,
@@ -640,6 +650,7 @@ describe("A-3 · formato 2 (keyWrap) y M-3 · bases huérfanas en el destino", (
     const result = await restoreBackup({
       srcPath: backupV2Solo,
       dir: dest.dir,
+      vaultDir: dest.dir,
       providers: [new PasswordCustodyProvider(PASS_D)],
       noticeAccepted: true,
       backupPassword: PASS_BK,
@@ -657,6 +668,7 @@ describe("A-3 · formato 2 (keyWrap) y M-3 · bases huérfanas en el destino", (
     const result = await restoreBackup({
       srcPath: backupV2,
       dir: dest.dir,
+      vaultDir: dest.dir,
       providers: [new PasswordCustodyProvider(PASS_D)],
       noticeAccepted: true,
       backupPassword: PASS_BK,
@@ -756,6 +768,7 @@ describe("B-7 · el mínimo en el respaldo: al crearlo sí, al restaurarlo no", 
     const result = await restoreBackup({
       srcPath: container,
       dir: dirDest,
+      vaultDir: dirDest,
       providers: [new PasswordCustodyProvider(PASS_E)],
       noticeAccepted: true,
       backupPassword: CORTA,
@@ -766,5 +779,433 @@ describe("B-7 · el mínimo en el respaldo: al crearlo sí, al restaurarlo no", 
     const dbR = openSecureDatabase(path.join(dirDest, DB), dekDest);
     expect((dbR.prepare("SELECT v FROM t").get() as { v: string }).v).toBe(CANARIO_B7);
     dbR.close();
+  });
+});
+
+describe("Forma A · núcleo del respaldo: la pareja sobre la base (userData)", () => {
+  const PASS_O = "contrasena-origen-casa · prueba";
+  const PASS_D = "contrasena-destino-casa · prueba";
+  const MEM = "store/nido_memory.db";
+  const SEA = "store/nido_search.db";
+  const KNO = "knowledge/nido_knowledge.db";
+  const CAN_MEM = "CANARIO-CASA-MEMORIA::la memoria de la casa";
+  const CAN_SEA = "CANARIO-CASA-BUSQUEDA::el índice de la casa";
+  const CAN_KNO = "CANARIO-CASA-CONOCIMIENTO::el conocimiento de la casa";
+  const extraDirs: string[] = [];
+
+  interface Casa {
+    base: string;
+    vault: string;
+    dek: Buffer;
+  }
+
+  /**
+   * Una casa con la forma del diseño: la base (userData)
+   * con vault/, store/ y knowledge/, la bóveda dentro de
+   * vault/ y las bases dadas abiertas con su DEK y con
+   * sus canarios dentro.
+   */
+  async function makeCasa(pass: string, dbs: Array<{ name: string; canario: string }>): Promise<Casa> {
+    const base = await mkdtemp(path.join(os.tmpdir(), "nido-casa-"));
+    extraDirs.push(base);
+    const vault = path.join(base, "vault");
+    mkdirSync(path.join(base, "store"), { recursive: true });
+    mkdirSync(path.join(base, "knowledge"), { recursive: true });
+    mkdirSync(vault, { recursive: true });
+    await initializeVault(vault, new PasswordCustodyProvider(pass));
+    const s = await VaultSession.unlock(vault, [new PasswordCustodyProvider(pass)]);
+    for (const { name, canario } of dbs) {
+      const db = openSecureDatabase(path.join(base, name), s.dek);
+      db.exec("CREATE TABLE t (v TEXT NOT NULL)");
+      db.prepare("INSERT INTO t VALUES (?)").run(canario);
+      db.close();
+    }
+    const dek = Buffer.from(s.dek);
+    s.lock();
+    return { base, vault, dek };
+  }
+
+  function rowsOfCasa(base: string, dek: Buffer, name: string): string[] {
+    const db = openSecureDatabase(path.join(base, name), dek);
+    const rows = db.prepare("SELECT v FROM t ORDER BY rowid").all() as Array<{ v: string }>;
+    db.close();
+    return rows.map((r) => r.v);
+  }
+
+  /** Huella de cada fichero de la base y de su primer nivel: la foto para probar «intacto al byte». */
+  function hashesRec(base: string): Map<string, string> {
+    const out = new Map<string, string>();
+    const walk = (abs: string, prefix: string) => {
+      for (const dent of readdirSync(abs, { withFileTypes: true })) {
+        const rel = prefix + dent.name;
+        if (dent.isDirectory()) {
+          if (prefix === "") walk(path.join(abs, dent.name), `${rel}/`);
+        } else {
+          out.set(rel, createHash("sha256").update(readFileSync(path.join(abs, dent.name))).digest("hex"));
+        }
+      }
+    };
+    walk(base, "");
+    return out;
+  }
+
+  /** Constructor v1 local: los de los describes de arriba viven en su scope y no se comparten. */
+  function buildContainerV1(dest: string, keyHex: string, entries: Array<{ path: string; data: Buffer }>): void {
+    const manifest = {
+      format: "nido-pc-backup",
+      version: 1,
+      createdAt: "2026-11-16T00:00:00.000Z",
+      app: "nido-pc",
+      databaseKeyHex: keyHex,
+      entries: entries.map((e) => ({
+        path: e.path,
+        bytes: e.data.length,
+        sha256: createHash("sha256").update(e.data).digest("hex"),
+        sha256Kind: "bytes",
+      })),
+    };
+    const header = Buffer.from(JSON.stringify(manifest), "utf8");
+    const len = Buffer.alloc(4);
+    len.writeUInt32LE(header.length, 0);
+    writeFileSync(dest, Buffer.concat([Buffer.from("NID1", "latin1"), len, header, ...entries.map((e) => e.data)]));
+  }
+
+  afterAll(async () => {
+    for (const d of extraDirs) await rm(d, { recursive: true, force: true });
+  });
+
+  it("la forma nueva restaura entera: las tres bases viajan con nombre de base y el resultado declara las rutas efectivas", HEAVY, async () => {
+    const origen = await makeCasa(PASS_O, [
+      { name: MEM, canario: CAN_MEM },
+      { name: SEA, canario: CAN_SEA },
+      { name: KNO, canario: CAN_KNO },
+    ]);
+    const sO = await VaultSession.unlock(origen.vault, [new PasswordCustodyProvider(PASS_O)]);
+    const bk = path.join(origen.base, "casa.nidbackup");
+    const manifest = await createBackup({
+      dir: origen.base,
+      dbNames: [MEM, SEA, KNO],
+      session: sO,
+      destPath: bk,
+      backupPassword: PASS_BK,
+    });
+    sO.lock();
+    expect(manifest.entries.map((e) => e.path)).toContain(MEM);
+    expect(manifest.entries.map((e) => e.path)).toContain(SEA);
+    expect(manifest.entries.map((e) => e.path)).toContain(KNO);
+    const destino = await makeCasa(PASS_D, [{ name: MEM, canario: "dato-propio-del-destino-casa" }]);
+    const result = await restoreBackup({
+      srcPath: bk,
+      dir: destino.base,
+      vaultDir: destino.vault,
+      providers: [new PasswordCustodyProvider(PASS_D)],
+      noticeAccepted: true,
+      backupPassword: PASS_BK,
+    });
+    expect(result.restored).toEqual([MEM, SEA, KNO]);
+    const { dek } = await unlockVaultWith(destino.vault, [new PasswordCustodyProvider(PASS_D)]);
+    expect(dek.equals(origen.dek)).toBe(true);
+    expect(rowsOfCasa(destino.base, dek, MEM)).toEqual([CAN_MEM]);
+    expect(rowsOfCasa(destino.base, dek, SEA)).toEqual([CAN_SEA]);
+    expect(rowsOfCasa(destino.base, dek, KNO)).toEqual([CAN_KNO]);
+  });
+
+  it("el respaldo histórico (dir = la bóveda, nombres ../…) restaura sobre la base: la propiedad del dirimen", HEAVY, async () => {
+    const origen = await makeCasa(PASS_O, [
+      { name: MEM, canario: CAN_MEM },
+      { name: KNO, canario: CAN_KNO },
+    ]);
+    const sO = await VaultSession.unlock(origen.vault, [new PasswordCustodyProvider(PASS_O)]);
+    const bk = path.join(origen.base, "historico.nidbackup");
+    // La llamada histórica exacta de la carcasa de E11: el
+    // directorio de la bóveda y los nombres relativos a ella.
+    const manifest = await createBackup({
+      dir: origen.vault,
+      dbNames: ["../store/nido_memory.db", "../knowledge/nido_knowledge.db"],
+      session: sO,
+      destPath: bk,
+      backupPassword: PASS_BK,
+    });
+    sO.lock();
+    expect(manifest.entries.map((e) => e.path)).toContain("../store/nido_memory.db");
+    expect(manifest.entries.map((e) => e.path)).toContain("../knowledge/nido_knowledge.db");
+    const destino = await makeCasa(PASS_D, [{ name: MEM, canario: "dato-propio-del-destino-casa" }]);
+    const result = await restoreBackup({
+      srcPath: bk,
+      dir: destino.base,
+      vaultDir: destino.vault,
+      providers: [new PasswordCustodyProvider(PASS_D)],
+      noticeAccepted: true,
+      backupPassword: PASS_BK,
+    });
+    expect(result.restored).toEqual([MEM, KNO]);
+    const { dek } = await unlockVaultWith(destino.vault, [new PasswordCustodyProvider(PASS_D)]);
+    expect(dek.equals(origen.dek)).toBe(true);
+    expect(rowsOfCasa(destino.base, dek, MEM)).toEqual([CAN_MEM]);
+    expect(rowsOfCasa(destino.base, dek, KNO)).toEqual([CAN_KNO]);
+  });
+
+  it("el respaldo histórico en grafía Windows (..\\store\\…) restaura igual", HEAVY, async () => {
+    const origen = await makeCasa(PASS_O, [
+      { name: MEM, canario: CAN_MEM },
+      { name: KNO, canario: CAN_KNO },
+    ]);
+    const sO = await VaultSession.unlock(origen.vault, [new PasswordCustodyProvider(PASS_O)]);
+    const bk = path.join(origen.base, "historico-base.nidbackup");
+    await createBackup({
+      dir: origen.vault,
+      dbNames: ["../store/nido_memory.db", "../knowledge/nido_knowledge.db"],
+      session: sO,
+      destPath: bk,
+      backupPassword: PASS_BK,
+    });
+    sO.lock();
+    // El mismo contenedor con los nombres de la cabecera
+    // reescritos a la grafía de Windows: las huellas son
+    // sobre la carga y no cambian.
+    const raw = readFileSync(bk);
+    const headerLen = raw.readUInt32LE(4);
+    const manifest = JSON.parse(raw.subarray(8, 8 + headerLen).toString("utf8")) as {
+      entries: Array<{ path: string }>;
+    };
+    for (const e of manifest.entries) e.path = e.path.replaceAll("/", "\\");
+    const header = Buffer.from(JSON.stringify(manifest), "utf8");
+    const len = Buffer.alloc(4);
+    len.writeUInt32LE(header.length, 0);
+    const win = path.join(origen.base, "historico-win.nidbackup");
+    writeFileSync(win, Buffer.concat([raw.subarray(0, 4), len, header, raw.subarray(8 + headerLen)]));
+    const destino = await makeCasa(PASS_D, [{ name: MEM, canario: "dato-propio-del-destino-casa" }]);
+    const result = await restoreBackup({
+      srcPath: win,
+      dir: destino.base,
+      vaultDir: destino.vault,
+      providers: [new PasswordCustodyProvider(PASS_D)],
+      noticeAccepted: true,
+      backupPassword: PASS_BK,
+    });
+    expect(result.restored).toEqual([MEM, KNO]);
+    const { dek } = await unlockVaultWith(destino.vault, [new PasswordCustodyProvider(PASS_D)]);
+    expect(rowsOfCasa(destino.base, dek, MEM)).toEqual([CAN_MEM]);
+    expect(rowsOfCasa(destino.base, dek, KNO)).toEqual([CAN_KNO]);
+  });
+
+  it("el temporal de verificación no deja resto en la base", HEAVY, async () => {
+    const origen = await makeCasa(PASS_O, [
+      { name: MEM, canario: CAN_MEM },
+      { name: KNO, canario: CAN_KNO },
+    ]);
+    const sO = await VaultSession.unlock(origen.vault, [new PasswordCustodyProvider(PASS_O)]);
+    const bk = path.join(origen.base, "casa.nidbackup");
+    await createBackup({
+      dir: origen.base,
+      dbNames: [MEM, KNO],
+      session: sO,
+      destPath: bk,
+      backupPassword: PASS_BK,
+    });
+    sO.lock();
+    const destino = await makeCasa(PASS_D, [{ name: MEM, canario: "dato-propio-del-destino-casa" }]);
+    await restoreBackup({
+      srcPath: bk,
+      dir: destino.base,
+      vaultDir: destino.vault,
+      providers: [new PasswordCustodyProvider(PASS_D)],
+      noticeAccepted: true,
+      backupPassword: PASS_BK,
+    });
+    const resto = readdirSync(destino.base).filter((n) => n.startsWith(".restore-check-"));
+    expect(resto).toEqual([]);
+  });
+
+  it("huérfana sobre la base: se nombra por su ruta (knowledge/nido_knowledge.db) y el destino queda intacto al byte", HEAVY, async () => {
+    const origen = await makeCasa(PASS_O, [{ name: MEM, canario: CAN_MEM }]);
+    const sO = await VaultSession.unlock(origen.vault, [new PasswordCustodyProvider(PASS_O)]);
+    const bk = path.join(origen.base, "casa.nidbackup");
+    await createBackup({
+      dir: origen.base,
+      dbNames: [MEM],
+      session: sO,
+      destPath: bk,
+      backupPassword: PASS_BK,
+    });
+    sO.lock();
+    const destino = await makeCasa(PASS_D, [
+      { name: MEM, canario: "dato-propio-del-destino-casa" },
+      { name: KNO, canario: "base-huerfana-de-la-casa" },
+    ]);
+    const antes = hashesRec(destino.base);
+    const err = await restoreBackup({
+      srcPath: bk,
+      dir: destino.base,
+      vaultDir: destino.vault,
+      providers: [new PasswordCustodyProvider(PASS_D)],
+      noticeAccepted: true,
+      backupPassword: PASS_BK,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BackupError);
+    expect((err as Error).message).toContain(KNO);
+    expect(hashesRec(destino.base)).toEqual(antes);
+  });
+
+  it("control de huérfanas sobre la base: todo lo gestionado viaja y la restauración sustituye en store/ y knowledge/", HEAVY, async () => {
+    const origen = await makeCasa(PASS_O, [
+      { name: MEM, canario: CAN_MEM },
+      { name: KNO, canario: CAN_KNO },
+    ]);
+    const sO = await VaultSession.unlock(origen.vault, [new PasswordCustodyProvider(PASS_O)]);
+    const bk = path.join(origen.base, "casa.nidbackup");
+    await createBackup({
+      dir: origen.base,
+      dbNames: [MEM, KNO],
+      session: sO,
+      destPath: bk,
+      backupPassword: PASS_BK,
+    });
+    sO.lock();
+    const destino = await makeCasa(PASS_D, [
+      { name: MEM, canario: "dato-propio-del-destino-casa" },
+      { name: KNO, canario: "conocimiento-propio-del-destino" },
+    ]);
+    const result = await restoreBackup({
+      srcPath: bk,
+      dir: destino.base,
+      vaultDir: destino.vault,
+      providers: [new PasswordCustodyProvider(PASS_D)],
+      noticeAccepted: true,
+      backupPassword: PASS_BK,
+    });
+    expect(result.restored).toEqual([MEM, KNO]);
+    const { dek } = await unlockVaultWith(destino.vault, [new PasswordCustodyProvider(PASS_D)]);
+    expect(rowsOfCasa(destino.base, dek, MEM)).toEqual([CAN_MEM]);
+    expect(rowsOfCasa(destino.base, dek, KNO)).toEqual([CAN_KNO]);
+  });
+
+  it("la subida doble sigue muerta: ../../etc/passwd se rechaza en la lectura", async () => {
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "nido-casa-mal-"));
+    extraDirs.push(scratch);
+    const c = path.join(scratch, "doble.nidbackup");
+    buildContainerV1(c, exportDatabaseKey(randomBytes(32)), [{ path: "../../etc/passwd", data: Buffer.from("x") }]);
+    expect(() => readBackupContainer(c)).toThrow(/ruta insegura/);
+  });
+
+  it("la subida interior sigue muerta: store/../../etc/passwd se rechaza en la lectura", async () => {
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "nido-casa-mal-"));
+    extraDirs.push(scratch);
+    const c = path.join(scratch, "interior.nidbackup");
+    buildContainerV1(c, exportDatabaseKey(randomBytes(32)), [{ path: "store/../../etc/passwd", data: Buffer.from("x") }]);
+    expect(() => readBackupContainer(c)).toThrow(/ruta insegura/);
+  });
+
+  it("la absoluta sigue muerta en sus dos grafías: /etc/passwd y C:\\Windows\\evil.db", async () => {
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "nido-casa-mal-"));
+    extraDirs.push(scratch);
+    const keyHex = exportDatabaseKey(randomBytes(32));
+    const c1 = path.join(scratch, "abs-posix.nidbackup");
+    buildContainerV1(c1, keyHex, [{ path: "/etc/passwd", data: Buffer.from("x") }]);
+    expect(() => readBackupContainer(c1)).toThrow(/ruta insegura/);
+    const c2 = path.join(scratch, "abs-win.nidbackup");
+    buildContainerV1(c2, keyHex, [{ path: "C:\\Windows\\evil.db", data: Buffer.from("x") }]);
+    expect(() => readBackupContainer(c2)).toThrow(/ruta insegura/);
+  });
+
+  it("el duplicado efectivo (store/x.db y ../store/x.db, el mismo destino) se rechaza en la resolución y el destino queda intacto", HEAVY, async () => {
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "nido-casa-mal-"));
+    extraDirs.push(scratch);
+    const c = path.join(scratch, "dup-efectivo.nidbackup");
+    const data = Buffer.from("carga-cualquiera");
+    buildContainerV1(c, exportDatabaseKey(randomBytes(32)), [
+      { path: "store/x.db", data },
+      { path: "../store/x.db", data },
+    ]);
+    const destino = await makeCasa(PASS_D, [{ name: MEM, canario: "dato-intacto-de-la-casa" }]);
+    const antes = hashesRec(destino.base);
+    const err = await restoreBackup({
+      srcPath: c,
+      dir: destino.base,
+      vaultDir: destino.vault,
+      providers: [new PasswordCustodyProvider(PASS_D)],
+      noticeAccepted: true,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BackupError);
+    expect((err as Error).message).toContain("duplicada");
+    expect(hashesRec(destino.base)).toEqual(antes);
+  });
+
+  it("el duplicado canónico (store\\x.db y store/x.db, dos grafías del mismo nombre) se rechaza en la lectura", async () => {
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "nido-casa-mal-"));
+    extraDirs.push(scratch);
+    const c = path.join(scratch, "dup-canonico.nidbackup");
+    const data = Buffer.from("carga-cualquiera");
+    buildContainerV1(c, exportDatabaseKey(randomBytes(32)), [
+      { path: "store\\x.db", data },
+      { path: "store/x.db", data },
+    ]);
+    expect(() => readBackupContainer(c)).toThrow(/duplicada/);
+  });
+
+  it("la lista blanca manda también con carpetas: un .json con carpeta muere por la lista y un marcador sin su base también", HEAVY, async () => {
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "nido-casa-mal-"));
+    extraDirs.push(scratch);
+    const keyHex = exportDatabaseKey(randomBytes(32));
+    const destino = await makeCasa(PASS_D, [{ name: MEM, canario: "dato-propio-del-destino-casa" }]);
+    const c1 = path.join(scratch, "lista.nidbackup");
+    buildContainerV1(c1, keyHex, [{ path: "store/evil.json", data: Buffer.from("{}") }]);
+    const err1 = await restoreBackup({
+      srcPath: c1,
+      dir: destino.base,
+      vaultDir: destino.vault,
+      providers: [new PasswordCustodyProvider(PASS_D)],
+      noticeAccepted: true,
+    }).catch((e: unknown) => e);
+    expect(err1).toBeInstanceOf(BackupError);
+    expect((err1 as Error).message).toContain("lista blanca");
+    expect((err1 as Error).message).not.toContain("ruta insegura");
+    const c2 = path.join(scratch, "marcador.nidbackup");
+    buildContainerV1(c2, keyHex, [{ path: "store/x.db.format.json", data: Buffer.from("{}") }]);
+    const err2 = await restoreBackup({
+      srcPath: c2,
+      dir: destino.base,
+      vaultDir: destino.vault,
+      providers: [new PasswordCustodyProvider(PASS_D)],
+      noticeAccepted: true,
+    }).catch((e: unknown) => e);
+    expect(err2).toBeInstanceOf(BackupError);
+    expect((err2 as Error).message).toContain("sin su base");
+  });
+
+  it("el segmento con puntos dentro no es una subida: a..b.db restaura con normalidad", HEAVY, async () => {
+    const CAN_PUNTOS = "CANARIO-PUNTOS::el fichero de los dos puntos";
+    const dirO = await mkdtemp(path.join(os.tmpdir(), "nido-casa-puntos-"));
+    extraDirs.push(dirO);
+    await initializeVault(dirO, new PasswordCustodyProvider(PASS_O));
+    const sO = await VaultSession.unlock(dirO, [new PasswordCustodyProvider(PASS_O)]);
+    const db = openSecureDatabase(path.join(dirO, "a..b.db"), sO.dek);
+    db.exec("CREATE TABLE t (v TEXT NOT NULL)");
+    db.prepare("INSERT INTO t VALUES (?)").run(CAN_PUNTOS);
+    db.close();
+    const bk = path.join(dirO, "puntos.nidbackup");
+    await createBackup({
+      dir: dirO,
+      dbNames: ["a..b.db"],
+      session: sO,
+      destPath: bk,
+      backupPassword: PASS_BK,
+    });
+    sO.lock();
+    expect(() => readBackupContainer(bk)).not.toThrow();
+    const dirD = await mkdtemp(path.join(os.tmpdir(), "nido-casa-puntos-d-"));
+    extraDirs.push(dirD);
+    await initializeVault(dirD, new PasswordCustodyProvider(PASS_D));
+    const result = await restoreBackup({
+      srcPath: bk,
+      dir: dirD,
+      vaultDir: dirD,
+      providers: [new PasswordCustodyProvider(PASS_D)],
+      noticeAccepted: true,
+      backupPassword: PASS_BK,
+    });
+    expect(result.restored).toEqual(["a..b.db"]);
+    const { dek } = await unlockVaultWith(dirD, [new PasswordCustodyProvider(PASS_D)]);
+    expect(rowsOfCasa(dirD, dek, "a..b.db")).toEqual([CAN_PUNTOS]);
   });
 });

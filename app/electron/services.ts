@@ -102,8 +102,18 @@ import {
 } from "../../src/services/conversationSearch.js";
 import {
   exportVaultBackup,
+  inspectVaultBackup,
+  restoreVaultBackup,
   rotateVaultKeys,
 } from "../../src/security/backupCaller.js";
+import {
+  BackupError,
+  BackupTooNewError,
+  readBackupContainer,
+  type BackupManifest,
+} from "../../src/security/backup.js";
+import { wipeAllState, wipeInterrupted } from "../../src/security/vaultWipe.js";
+import { closeDatabase } from "../../src/security/databaseManager.js";
 import { recoverPendingRotation } from "../../src/security/keyRotation.js";
 import { embeddingEngine, setEmbeddingModelsDir } from "../../src/rag/embed.js";
 import { activeEmbeddingModel } from "../../src/rag/embeddingSwitch.js";
@@ -757,6 +767,41 @@ async function onLocked(): Promise<void> {
   }
 }
 
+/**
+ * Superficies de bóveda (S-1 + PAQ-2): el desmontaje
+ * entero que precede a tocar los ficheros de la bóveda
+ * (restaurar un respaldo, borrar todo). Es la secuencia
+ * de onLocked() esperada entera — el turno en vuelo se
+ * drena, los proveedores y directorios se desregistran,
+ * la base de conocimiento se cierra y los motores se
+ * descargan — y después la sesión se bloquea (su DEK se
+ * destruye; el oyente vuelve a entrar en onLocked, que
+ * ya no tiene nada que hacer). Dos mangos que onLocked
+ * no cierra se cierran aquí expresamente, porque son
+ * ficheros que la restauración sustituye y el borrado
+ * elimina: el del índice de búsqueda (su cierre vive en
+ * la apertura siguiente, y aquí no hay apertura
+ * siguiente en este proceso) y el de la base de memoria
+ * de databaseManager. Sin este desmontaje, en Windows
+ * un fichero abierto no se puede mover y la app podría
+ * seguir sirviendo el fichero viejo desde un mango
+ * fantasma. La sesión no vuelve en este proceso: tras
+ * la cirugía, la app se reinicia o queda bloqueada.
+ */
+async function dismantleVaultForSurgery(): Promise<void> {
+  const sess = session;
+  if (!sess) return;
+  await onLocked();
+  sess.lock();
+  try {
+    searchDb?.close();
+  } catch {
+    /* ya cerrado */
+  }
+  searchDb = null;
+  await closeDatabase().catch(() => undefined);
+}
+
 // ---------------------------------------------------------------------
 // E11 (paso 7) · Los enlaces nido:// que llegan de fuera
 // ---------------------------------------------------------------------
@@ -862,6 +907,27 @@ function managedDbNames(): string[] {
   return candidates
     .filter((p) => existsSync(p))
     .map((p) => path.relative(d.vault, p));
+}
+
+/**
+ * Las mismas bases gestionadas, con su nombre relativo a
+ * la BASE (userData): la forma que el canal de exportar
+ * sirve desde la tanda breve de núcleo del respaldo
+ * (Forma A), porque la pareja de respaldo resuelve los
+ * nombres dentro de la base. La gemela relativa a la
+ * bóveda (managedDbNames) queda intacta: es el contrato
+ * de la rotación, que trabaja anclada en la bóveda.
+ */
+function managedDbNamesFromBase(): string[] {
+  const d = dirs();
+  const candidates = [
+    path.join(d.store, "nido_memory.db"),
+    path.join(d.store, "nido_search.db"),
+    path.join(d.knowledge, "nido_knowledge.db"),
+  ];
+  return candidates
+    .filter((p) => existsSync(p))
+    .map((p) => path.relative(d.base, p));
 }
 
 /** El desenlace de la rotación del último desbloqueo, para la superficie: done | recovered | failed | null. */
@@ -2128,6 +2194,22 @@ export async function installServices(): Promise<void> {
   // un enlace en sus argumentos, queda retenido antes de
   // que exista ventana, para entregarlo tras el desbloqueo.
   noteLinkFromArgv(process.argv);
+  // Superficies de bóveda (PAQ-2): si un borrado total
+  // quedó a mitad, su marcador durable sigue en la base
+  // y el borrado se completa AQUÍ, antes de crear
+  // directorios, de leer las prefs y de que la app
+  // enseñe nada (la recuperación de la forma del móvil,
+  // R13). Si ni así se completa, el marcador queda
+  // puesto y el siguiente arranque lo reintenta: un
+  // estado a medio borrar nunca se sirve como si fuera
+  // el primer día ni como si fuera el de antes.
+  if (wipeInterrupted(dirs().base)) {
+    try {
+      wipeAllState(dirs().base);
+    } catch {
+      /* el marcador queda puesto: el siguiente arranque reintenta */
+    }
+  }
   await mkdir(dirs().vault, { recursive: true });
   await mkdir(dirs().store, { recursive: true });
   await mkdir(dirs().knowledge, { recursive: true });
@@ -2462,8 +2544,8 @@ export async function installServices(): Promise<void> {
     }
     try {
       const manifest = await exportVaultBackup({
-        dir: dirs().vault,
-        dbNames: managedDbNames(),
+        dir: dirs().base,
+        dbNames: managedDbNamesFromBase(),
         session,
         destPath: args.destPath,
         backupPassword: args.backupPassword,
@@ -2505,6 +2587,152 @@ export async function installServices(): Promise<void> {
     app.relaunch();
     app.exit(0);
     return { ok: true };
+  });
+
+  // Superficies de bóveda (S-1): la vuelta del respaldo.
+  // La tarjeta ya exportaba y rotaba, y su letra prometía
+  // restaurar; el motor de E2 estaba completo y probado
+  // pero ningún canal lo alcanzaba. La forma es la del
+  // móvil y la de la puerta .ics/.vcf: primero la vista
+  // previa (elegir el fichero y enseñar qué trae, sin
+  // escribir nada) y después el gesto confirmado.
+  handle("nido:backup-restore-preview", async (_e, args: { srcPath: string }) => {
+    if (!session) return { ok: false, reason: "locked" };
+    if (typeof args?.srcPath !== "string" || args.srcPath.length === 0 || !existsSync(args.srcPath)) {
+      return { ok: false, reason: "unreadable" };
+    }
+    try {
+      // No escribe nada ni retiene nada: el gesto de
+      // restaurar vuelve a leer el fichero entero por la
+      // vía del núcleo, que verifica las huellas antes de
+      // tocar el destino; si el fichero cambia entre la
+      // vista previa y el gesto, manda la verificación
+      // del gesto.
+      return { ok: true, ...inspectVaultBackup(args.srcPath) };
+    } catch (err) {
+      if (err instanceof BackupTooNewError) return { ok: false, reason: "too-new" };
+      if (err instanceof BackupError) return { ok: false, reason: "corrupt" };
+      return { ok: false, reason: "unreadable" };
+    }
+  });
+
+  handle("nido:backup-restore", async (_e, args: { srcPath: string; backupPassword?: string; vaultPassword: string; noticeAccepted: boolean }) => {
+      if (!session) return { ok: false, reason: "locked" };
+      // La aceptación la exige el principal, antes de leer
+      // nada: no es un detalle de la interfaz.
+      if (args?.noticeAccepted !== true) return { ok: false, reason: "notice-required" };
+      if (typeof args?.srcPath !== "string" || args.srcPath.length === 0) {
+        return { ok: false, reason: "unreadable" };
+      }
+      // Re-autenticación, en la forma de la rotación: la
+      // credencial escrita debe desenvolver la DEK de la
+      // sesión; si no, no se pide nada más.
+      if (typeof args?.vaultPassword !== "string" || args.vaultPassword.length === 0) {
+        return { ok: false, reason: "reauth-failed" };
+      }
+      try {
+        const { dek } = await unlockVaultWith(dirs().vault, [
+          new PasswordCustodyProvider(args.vaultPassword),
+        ]);
+        if (!dek.equals(session.dek)) return { ok: false, reason: "reauth-failed" };
+      } catch {
+        return { ok: false, reason: "reauth-failed" };
+      }
+      // Pre-vuelo sin tocar el destino: el contenedor se
+      // lee y verifica entero (huellas incluidas), la
+      // versión se dirime y, en un v2, la contraseña de
+      // respaldo se prueba contra la envoltura AQUÍ, para
+      // que una contraseña mala falle antes del
+      // desmontaje y el destino quede intacto al byte; el
+      // núcleo re-verifica todo en el gesto mismo, así
+      // que lo que el pre-vuelo aprueba no se da por
+      // hecho: se vuelve a comprobar al sustituir.
+      try {
+        const { manifest } = readBackupContainer(args.srcPath);
+        if (manifest.version === 2) {
+          if (typeof args?.backupPassword !== "string" || args.backupPassword.length === 0) {
+            return { ok: false, reason: "backup-password-required" };
+          }
+          try {
+            const dek = await new PasswordCustodyProvider(args.backupPassword).unwrap(
+              (manifest as BackupManifest).keyWrap,
+            );
+            dek.fill(0);
+          } catch {
+            return { ok: false, reason: "backup-password-wrong" };
+          }
+        }
+      } catch (err) {
+        if (err instanceof BackupTooNewError) return { ok: false, reason: "too-new" };
+        if (err instanceof BackupError) return { ok: false, reason: "corrupt" };
+        return { ok: false, reason: "unreadable" };
+      }
+      // Desmontaje entero: ningún mango vivo sobre los
+      // ficheros que se van a sustituir. La sesión se
+      // bloquea aquí y no vuelve en este proceso.
+      await dismantleVaultForSurgery();
+      try {
+        const result = await restoreVaultBackup({
+          dir: dirs().base,
+          vaultDir: dirs().vault,
+          srcPath: args.srcPath,
+          providers: [new PasswordCustodyProvider(args.vaultPassword)],
+          backupPassword: args.backupPassword,
+        });
+        // La salida de la rotación: la respuesta no
+        // vuelve, el proceso sale. Al reabrir, todo abre
+        // con la contraseña de siempre, porque la DEK
+        // restaurada quedó envuelta con la custodia local.
+        app.relaunch();
+        app.exit(0);
+        return { ok: true, legacy: result.legacyCleartextKey };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (message.startsWith("la contraseña de respaldo no abre este respaldo")) {
+          return { ok: false, reason: "backup-password-wrong" };
+        }
+        const ORPHAN_PREFIX = "el destino guarda bases que no vienen en el respaldo: ";
+        if (message.startsWith(ORPHAN_PREFIX)) {
+          const names = message.slice(ORPHAN_PREFIX.length).split(". Si se restaura")[0].split(", ");
+          return { ok: false, reason: "orphans", names };
+        }
+        return { ok: false, reason: "restore-failed", message };
+      }
+  });
+
+  // Superficies de bóveda (PAQ-2): borrar todo. La
+  // aceptación del alcance y la re-autenticación las
+  // exige el principal; el desmontaje es el de
+  // restaurar; la primitiva es la extendida
+  // (vaultWipe.ts), nunca la de un solo fichero. Si
+  // quedan restos, la app NO se reinicia fingiendo
+  // éxito: el marcador queda puesto y el próximo
+  // arranque completa el borrado antes de enseñar nada.
+  handle("nido:vault-wipe", async (_e, args: { password: string; scopeAccepted: boolean }) => {
+      if (!vaultExists()) return { ok: false, reason: "no-vault" };
+      if (!session) return { ok: false, reason: "locked" };
+      if (args?.scopeAccepted !== true) return { ok: false, reason: "scope-required" };
+      if (typeof args?.password !== "string" || args.password.length === 0) {
+        return { ok: false, reason: "reauth-failed" };
+      }
+      try {
+        const { dek } = await unlockVaultWith(dirs().vault, [
+          new PasswordCustodyProvider(args.password),
+        ]);
+        if (!dek.equals(session.dek)) return { ok: false, reason: "reauth-failed" };
+      } catch {
+        return { ok: false, reason: "reauth-failed" };
+      }
+      await dismantleVaultForSurgery();
+      const leftovers = wipeAllState(dirs().base);
+      if (leftovers.length > 0) {
+        return { ok: false, reason: "wipe-incomplete", names: leftovers };
+      }
+      // Al reabrir no hay bóveda: la app enseña su primer
+      // día, el flujo de creación que ya existe.
+      app.relaunch();
+      app.exit(0);
+      return { ok: true };
   });
 
   handle("nido:conversation-search", async (_e, args: { query: string }) => {
@@ -3101,7 +3329,19 @@ export async function installServices(): Promise<void> {
     const { readNoticeAgenda } = await import("../../src/agent/memory/noticeAgenda.js");
     const { noticeOwnText } = await import("../../src/agent/memory/noticeDispatcher.js");
     const now = Date.now();
-    const events = await listEvents(now - 31 * 86400_000, now + 366 * 86400_000);
+    const fromMs = now - 31 * 86400_000;
+    const toMs = now + 366 * 86400_000;
+    // CARGO-2: la ventana enseñada es la de siempre; lo
+    // que cambia es que las series se expanden dentro de
+    // ella (el motor único de eventSeries) y cada fila
+    // declara la clave de su repetición, para que la
+    // vista la pinte sin interpretar la RRULE.
+    const { expandEvents, parseStoredRule } = await import("../../src/agent/memory/eventSeries.js");
+    const repeatKeyByRepeat = { day: "repeatDay", week: "repeatWeek", month: "repeatMonth", year: "repeatYear" } as const;
+    const events = expandEvents(await listEvents(fromMs, toMs), fromMs, toMs).events.map((e) => {
+      const rule = parseStoredRule(e.rrule);
+      return { ...e, repeatKey: rule ? repeatKeyByRepeat[rule.repeat] : null };
+    });
     const armed = await listArmed();
     const nextByRef = new Map<string, number>();
     for (const n of armed) {

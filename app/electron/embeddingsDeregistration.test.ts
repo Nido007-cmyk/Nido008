@@ -58,8 +58,10 @@ import { installServices } from "./services.ts";
 import { embeddingEngine } from "../../src/rag/embed.js";
 import { llamaEngine } from "../../src/inference/LlamaEngine.js";
 import { getDb } from "../../src/rag/db.js";
+import { sceneSkipped } from "../../src/test/sceneGate.js";
 
 const E5_GENUINE = process.env.NIDO_E5_GENUINE ?? "multilingual-e5-small-q8_0.gguf";
+const SCENE_OFF = sceneSkipped("embeddingsDeregistration", [E5_GENUINE]);
 
 const event = { sender: {}, senderFrame: { url: "nido://app/index.html" } };
 
@@ -79,6 +81,7 @@ async function waitFor(fn: () => Promise<boolean>, ms = 20_000): Promise<boolean
 }
 
 beforeAll(async () => {
+  if (SCENE_OFF) return;
   // La siembra va por enlace duro desde un temporal en el
   // mismo sistema de ficheros que los genuinos: desde el
   // paso 4 de E4, la mitad de lectura de D-3 rechaza por
@@ -97,10 +100,11 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(() => {
+  if (SCENE_OFF) return;
   rmSync(harness.userData, { recursive: true, force: true });
 });
 
-describe("Pieza 3 de la carcasa: el desregistro del proveedor al bloquear (H-EMB-A)", () => {
+describe.skipIf(SCENE_OFF)("Pieza 3 de la carcasa: el desregistro del proveedor al bloquear (H-EMB-A)", () => {
   it("tras un ciclo de bloqueo, el proveedor queda en null en la misma lectura que los demás nulos del §8.9", async () => {
     const created = await call("nido:vault-create", { password: "sonda-embeddings-14" });
     expect(created.ok).toBe(true);

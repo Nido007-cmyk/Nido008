@@ -120,11 +120,18 @@ verified downloads, the encrypted memory, the calendar, contacts
 and reminders, calendar and contact import and export in .ics
 and .vcf, scheduled tasks, the document library, on-device
 voice (dictation and read-aloud), deep research with its saved
-reports and the built-in guide. In development right now: the
-last stage of the first version, on the way to the first alpha.
+reports and the built-in guide. New in this snapshot: you can
+restore a backup and erase everything from the Security screen,
+the emergency gate now catches a fall told in the first person
+and the place where it happened, and imported recurring events
+keep the end of their series in your reminders.
 
-At the last verified milestone, the test battery ran 7,365 tests:
-7,352 passing, 13 expected failures and no unexpected failures.
+At the last verified milestone, the test battery ran 7,428 tests:
+7,415 passing, 13 expected failures and no unexpected failures.
+
+The public CI runs the full battery on what this repository
+ships: the suites that need the house's own model files declare
+their skip by name, and everything else runs.
 
 NIDO PC is early alpha software. It can fail, and it will change.
 What every version promises is fewer failures than the one before

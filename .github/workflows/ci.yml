@@ -31,5 +31,10 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm ci --prefix app
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
       - run: npm run typecheck
       - run: npm test
+        env:
+          NIDO_TEST_ALLOW_MISSING_RESOURCES: "1"

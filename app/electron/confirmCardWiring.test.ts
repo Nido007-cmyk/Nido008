@@ -83,6 +83,7 @@ import { installServices } from "./services.ts";
 import { llamaEngine } from "../../src/inference/LlamaEngine.js";
 import * as memoryStore from "../../src/agent/memory/memoryStore.js";
 import { evaluateAction } from "../../src/agent/policy/policyEngine.js";
+import { sceneSkipped } from "../../src/test/sceneGate.js";
 
 const PASSWORD = "sonda-conf1-20";
 const NOTA_1 = "Receta de la abuela";
@@ -135,7 +136,12 @@ async function titulosDeNotas(): Promise<string[]> {
 let cargaDelCable: Record<string, unknown> | null = null;
 let idNota1 = "";
 
+const SCENE_OFF = sceneSkipped("confirmCardWiring", [
+  path.join(process.cwd(), "models", "qwen2.5-1.5b-instruct-q4km.gguf"),
+]);
+
 beforeAll(async () => {
+  if (SCENE_OFF) return;
   const fixtureBase = path.join(process.cwd(), "..", "nido-fixture-tmp");
   mkdirSync(fixtureBase, { recursive: true });
   harness.userData = mkdtempSync(path.join(fixtureBase, "nido-conf1-"));
@@ -149,10 +155,11 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(() => {
+  if (SCENE_OFF) return;
   rmSync(harness.userData, { recursive: true, force: true });
 });
 
-describe("CONF-1: la tarjeta de confirmación enseña lo que se aprueba", () => {
+describe.skipIf(SCENE_OFF)("CONF-1: la tarjeta de confirmación enseña lo que se aprueba", () => {
   it("la escena: la bóveda nace, el 1.5B queda residente y las dos notas se siembran", async () => {
     const created = await call<{ ok: boolean }>("nido:vault-create", { password: PASSWORD });
     expect(created.ok).toBe(true);

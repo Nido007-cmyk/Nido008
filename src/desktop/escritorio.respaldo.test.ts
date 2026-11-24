@@ -99,6 +99,7 @@ describe("escritorio.respaldo · el llamante de O-1·E11", () => {
         ]);
         await restoreBackup({
           dir: dirB,
+          vaultDir: dirB,
           srcPath: destPath,
           session: sessionB,
           providers: [new PasswordCustodyProvider(PASS_B)],

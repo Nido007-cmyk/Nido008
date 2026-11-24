@@ -164,6 +164,7 @@ import {
   type MemorySettings,
 } from "../../src/models/settings.js";
 import { setSummarizeEngine } from "../../src/services/summarize.js";
+import { sceneSkipped } from "../../src/test/sceneGate.js";
 
 const PASSWORD = "sonda-fui10-20";
 const ENSAYO = "Escribe un ensayo breve sobre la fotosíntesis.";
@@ -420,7 +421,12 @@ async function asentarTurnosAbiertos(): Promise<void> {
   turnosAbiertos.length = 0;
 }
 
+const SCENE_OFF = sceneSkipped("turnSendDoor", [
+  path.join(process.cwd(), "models", "qwen2.5-1.5b-instruct-q4km.gguf"),
+]);
+
 beforeAll(async () => {
+  if (SCENE_OFF) return;
   const fixtureBase = path.join(process.cwd(), "..", "nido-fixture-tmp");
   mkdirSync(fixtureBase, { recursive: true });
   harness.userData = mkdtempSync(path.join(fixtureBase, "nido-turn-door-"));
@@ -434,10 +440,11 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(() => {
+  if (SCENE_OFF) return;
   rmSync(harness.userData, { recursive: true, force: true });
 });
 
-describe("F-UI-10 (a-i): la puerta del envío cobra el vuelo en el manejador", () => {
+describe.skipIf(SCENE_OFF)("F-UI-10 (a-i): la puerta del envío cobra el vuelo en el manejador", () => {
   it("la escena: la bóveda nace y el 1.5B queda residente", async () => {
     const created = await call("nido:vault-create", { password: PASSWORD });
     expect(created.ok).toBe(true);
@@ -556,7 +563,7 @@ describe("F-UI-10 (a-i): la puerta del envío cobra el vuelo en el manejador", (
   }, 900_000);
 });
 
-describe("La pieza del turno perdido al bloquear: el par retenido se sella al desbloquear (forma c)", () => {
+describe.skipIf(SCENE_OFF)("La pieza del turno perdido al bloquear: el par retenido se sella al desbloquear (forma c)", () => {
   it("el par sobrevive al bloqueo: conversación existente, tras su historial intacto", async () => {
     await esperarQuieto(registroPrevio!.promise, 300_000);
     // La historia previa, guardada y sellada: un turno corto
@@ -713,7 +720,7 @@ describe("La pieza del turno perdido al bloquear: el par retenido se sella al de
 // la trae igual).
 // ---------------------------------------------------------------------
 
-describe("A-U6: el texto parcial de un turno parado con el botón se asienta con su marca", () => {
+describe.skipIf(SCENE_OFF)("A-U6: el texto parcial de un turno parado con el botón se asienta con su marca", () => {
   it("la parada sin bloqueo: el par asentado en la misma sesión trae el texto emitido y su marca stopped", async () => {
     await esperarQuieto(registroPrevio!.promise, 300_000);
     const marca = marcaChunks();
@@ -783,7 +790,7 @@ describe("A-U6: el texto parcial de un turno parado con el botón se asienta con
 // enseñan cuando el título está vacío.
 // ---------------------------------------------------------------------
 
-describe("Cableado, pieza 2 (campos de memoria): el umbral, la poda y los títulos gobiernan", () => {
+describe.skipIf(SCENE_OFF)("Cableado, pieza 2 (campos de memoria): el umbral, la poda y los títulos gobiernan", () => {
   const RESUMEN = "Resumen de escena (motor falso de la batería).";
   const QB = "¿Cuál es la capital de España? Contesta en una frase.";
   const TA1 =
@@ -1141,7 +1148,7 @@ describe("Cableado, pieza 2 (campos de memoria): el umbral, la poda y los títul
 // recibe: este bloque no abre ningún turno.
 // ---------------------------------------------------------------------
 
-describe("Cura §6: el libro del gestor y el motor no divergen al bloquear", () => {
+describe.skipIf(SCENE_OFF)("Cura §6: el libro del gestor y el motor no divergen al bloquear", () => {
   const ID = "qwen2.5-1.5b-instruct-q4km";
 
   type ModelsReply = {

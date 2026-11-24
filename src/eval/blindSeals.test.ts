@@ -36,12 +36,13 @@
  */
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { BLIND_SET, BLIND_SET_VERSION, type BlindQuestion } from "./blindSet.js";
 import { BLIND_SET_2, BLIND_SET_2_VERSION } from "./blindSet2.js";
 import { BLIND_SET_3, BLIND_SET_3_VERSION } from "./blindSet3.js";
 import { BLIND_SET_4, BLIND_SET_4_VERSION } from "./blindSet4.js";
+import { sceneSkipped } from "../test/sceneGate.js";
 
 function readRepoText(rel: string): string {
   return readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
@@ -124,8 +125,22 @@ const SETS: Array<{ version: string; set: BlindQuestion[] }> = [
   { version: BLIND_SET_4_VERSION, set: BLIND_SET_4 },
 ];
 
+const runnerA = fileURLToPath(new URL("../../scripts/blindRunA.ts", import.meta.url));
+const runnerB = fileURLToPath(new URL("../../scripts/blindRunB.ts", import.meta.url));
+const aperturaDoc = fileURLToPath(new URL("../../estudios/E3-J10-APERTURA.md", import.meta.url));
+
+// La puerta de escena de la batería, con granularidad por
+// caso: una sola llamada con los tres papeles (un solo aviso
+// que nombra a todo lo que falta, y el lanzamiento ruidoso
+// de siempre si la corrida no declaró el salto) y una
+// bandera por grupo, porque los tres casos no dependen de
+// los mismos papeles.
+sceneSkipped("blindSeals", [runnerA, runnerB, aperturaDoc]);
+const RUNNERS_OFF = !existsSync(runnerA) || !existsSync(runnerB);
+const DOC_OFF = !existsSync(aperturaDoc);
+
 describe("blindSeals · el triángulo de sellos (H-2)", () => {
-  it("las dos tablas SIGNED_SEALS casan entre sí, entrada a entrada", () => {
+  it.skipIf(RUNNERS_OFF)("las dos tablas SIGNED_SEALS casan entre sí, entrada a entrada", () => {
     const a = parseRunnerSeals(readRepoText("../../scripts/blindRunA.ts"), "blindRunA.ts");
     const b = parseRunnerSeals(readRepoText("../../scripts/blindRunB.ts"), "blindRunB.ts");
     expect(Object.keys(a).sort()).toEqual(Object.keys(b).sort());
@@ -134,7 +149,7 @@ describe("blindSeals · el triángulo de sellos (H-2)", () => {
     }
   });
 
-  it("las tablas casan con el documento firmado", () => {
+  it.skipIf(RUNNERS_OFF || DOC_OFF)("las tablas casan con el documento firmado", () => {
     const a = parseRunnerSeals(readRepoText("../../scripts/blindRunA.ts"), "blindRunA.ts");
     const b = parseRunnerSeals(readRepoText("../../scripts/blindRunB.ts"), "blindRunB.ts");
     const signed = parseDocumentSeals(readRepoText("../../estudios/E3-J10-APERTURA.md"));
@@ -144,7 +159,7 @@ describe("blindSeals · el triángulo de sellos (H-2)", () => {
     }
   });
 
-  it("los sellos firmados recomputan sobre los conjuntos vivos", () => {
+  it.skipIf(DOC_OFF)("los sellos firmados recomputan sobre los conjuntos vivos", () => {
     const signed = parseDocumentSeals(readRepoText("../../estudios/E3-J10-APERTURA.md"));
     for (const { version, set } of SETS) {
       expect(sealOf(set), `conjunto ${version} recomputado`).toBe(signed[version]);

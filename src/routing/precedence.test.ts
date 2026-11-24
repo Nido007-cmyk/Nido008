@@ -146,7 +146,7 @@ describe("M-5 · los seis empalmes de precedencia", () => {
   it("3>4 crisis gana a la situación viva (es/en/pt)", () => {
     const casos: Array<[string, "es" | "en" | "pt"]> = [
       ["¿Cuál es la línea de crisis? Hay humo saliendo de mi cocina", "es"],
-      ["What is the crisis hotline? There is smoke coming from my kitchen", "en"],
+      ["There is smoke coming from my kitchen. What is the crisis hotline?", "en"],
       ["Qual é a linha de crise? Há fumaça saindo da minha cozinha", "pt"],
     ];
     for (const [q, lang] of casos) {

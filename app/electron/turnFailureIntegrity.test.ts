@@ -105,6 +105,7 @@ vi.mock("./shell.ts", async () => {
 
 import { installServices } from "./services.ts";
 import { llamaEngine } from "../../src/inference/LlamaEngine.js";
+import { sceneSkipped } from "../../src/test/sceneGate.js";
 
 const PASSWORD = "sonda-n1-25";
 const ENSAYO = "Escribe un ensayo breve sobre la fotosíntesis.";
@@ -206,7 +207,12 @@ function instalarEspia(): void {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const SCENE_OFF = sceneSkipped("turnFailureIntegrity", [
+  path.join(process.cwd(), "models", "qwen2.5-1.5b-instruct-q4km.gguf"),
+]);
+
 beforeAll(async () => {
+  if (SCENE_OFF) return;
   const fixtureBase = path.join(process.cwd(), "..", "nido-fixture-tmp");
   mkdirSync(fixtureBase, { recursive: true });
   harness.userData = mkdtempSync(path.join(fixtureBase, "nido-turn-n1-"));
@@ -229,10 +235,11 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(() => {
+  if (SCENE_OFF) return;
   rmSync(harness.userData, { recursive: true, force: true });
 });
 
-describe("N1: el mensaje de la persona no se pierde si la generación falla", () => {
+describe.skipIf(SCENE_OFF)("N1: el mensaje de la persona no se pierde si la generación falla", () => {
   it("la escena: la bóveda nace y el 1.5B queda residente", async () => {
     const created = await call("nido:vault-create", { password: PASSWORD });
     expect(created.ok).toBe(true);

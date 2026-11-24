@@ -79,6 +79,7 @@ vi.mock("./shell.ts", async () => {
 });
 
 import { installServices } from "./services.ts";
+import { sceneSkipped } from "../../src/test/sceneGate.js";
 
 const PASSWORD = "sonda-loop2-ficha";
 
@@ -107,7 +108,12 @@ function call<T>(channel: string, args?: unknown): Promise<T> {
   return fn(event, args) as Promise<T>;
 }
 
+const SCENE_OFF = sceneSkipped("modelBootstrapBreakdown", [
+  path.join(process.cwd(), "models", "qwen3-0.6b-q4km.gguf"),
+]);
+
 beforeAll(async () => {
+  if (SCENE_OFF) return;
   const fixtureBase = path.join(process.cwd(), "..", "nido-fixture-tmp");
   mkdirSync(fixtureBase, { recursive: true });
   harness.userData = mkdtempSync(path.join(fixtureBase, "nido-loop2-ficha-"));
@@ -126,10 +132,11 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(() => {
+  if (SCENE_OFF) return;
   rmSync(harness.userData, { recursive: true, force: true });
 });
 
-describe("§5 · la cuenta de la ficha en arranque limpio", () => {
+describe.skipIf(SCENE_OFF)("§5 · la cuenta de la ficha en arranque limpio", () => {
   it("el payload de nido:bootstrap trae la cuenta del modelo instalado, sin cargarlo", async () => {
     const boot = await call<BootReply>("nido:bootstrap");
     expect(boot.ok).toBe(true);

@@ -8,7 +8,7 @@
 >
 > It is inspired by the way Anthropic wrote [Claude's constitution](https://www.anthropic.com/constitution) (January 2026): few firm rules, each one explained, and judgment for everything else. It is not an Anthropic text and is not endorsed by Anthropic.
 >
-> It builds on [the architectural principles](NIDO_PRINCIPLES.md) and does not replace them. The checks for each firm rule are listed in `docs/constitution-rules.json`.
+> It builds on [the architectural principles](NIDO_PRINCIPLES.md) and does not replace them. The checks for each firm rule are listed in `docs/constitution-rules.json` and verified by CI (`scripts/check-constitution.mjs`).
 
 ---
 

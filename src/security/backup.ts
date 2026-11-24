@@ -41,7 +41,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { moveDurable, writeFileDurable } from "./durableFs.js";
 import {
@@ -149,7 +149,7 @@ export function normalizeBackupKey(input: string): Buffer {
 }
 
 export interface BackupManifestEntry {
-  /** Ruta relativa dentro del respaldo (nombre de fichero, sin carpetas). */
+  /** Ruta relativa a la base (userData); la lectura admite también la forma legada con una subida (`../store/…`), el ancla histórica en la bóveda. */
   path: string;
   bytes: number;
   sha256: string;
@@ -179,7 +179,52 @@ export interface BackupManifestV1 {
 }
 
 const sha256Hex = (buf: Buffer) => createHash("sha256").update(buf).digest("hex");
+
+/**
+ * La regla de UN segmento de nombre de entrada (la constante de
+ * E2, con oficio nuevo desde la tanda breve de núcleo del
+ * respaldo): un segmento empieza en alfanumérico y sigue con
+ * letras, dígitos, punto, guion y guion bajo. Juzga segmentos, no
+ * nombres enteros: el `..` como subcadena dentro de un segmento
+ * (`a..b.db`) no es una subida y entra; la subida se juzga como
+ * segmento en entryPathSegments.
+ */
 const SAFE_ENTRY_PATH = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * La gramática de un nombre de entrada (tanda breve de núcleo
+ * del respaldo, Forma A; el hallazgo en
+ * cadena-prep/ACTO-0-BOVEDA-HALLAZGO.md): parte el nombre por
+ * `/` o `\` — las dos grafías que path.relative pudo escribir,
+ * la de la plataforma y la de Windows — y admite el nombre
+ * plano (`nido.db`), el relativo a la base
+ * (`store/nido_memory.db`) y la forma legada con UNA sola
+ * subida en primera posición (`../store/…`, el ancla histórica
+ * en la bóveda). Todo lo demás se rechaza con el mensaje de
+ * siempre: cadena vacía, ruta absoluta (el segmento inicial
+ * vacío de `/etc/passwd`), prefijo de unidad (`C:` y su
+ * familia, con rechazo expreso), segmento vacío (separador
+ * doblado o final: `store//x`, `store/`), segmento `.`, un
+ * `..` fuera de la primera posición o sin un segmento útil
+ * detrás, y cualquier segmento fuera de la clase sellada.
+ * Devuelve los segmentos; la forma canónica del nombre es
+ * `segmentos.join("/")`.
+ */
+function entryPathSegments(raw: string): string[] {
+  const insegura = () => new BackupError(`el respaldo trae una ruta insegura: ${raw}`);
+  if (typeof raw !== "string" || raw.length === 0) throw insegura();
+  if (/^[A-Za-z]:/.test(raw)) throw insegura();
+  const segments = raw.split(/[/\\]/);
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg === "..") {
+      if (i !== 0 || segments.length < 2) throw insegura();
+      continue;
+    }
+    if (!SAFE_ENTRY_PATH.test(seg)) throw insegura();
+  }
+  return segments;
+}
 
 /**
  * La envoltura de clave de un manifiesto v2 se valida ENTERA en la
@@ -255,11 +300,10 @@ export function readBackupContainer(srcPath: string): ReadContainer {
   }
   const payloads = new Map<string, Buffer>();
   const seenPaths = new Set<string>();
+  const seenCanonical = new Set<string>();
   let offset = 8 + headerLen;
   for (const entry of manifest.entries ?? []) {
-    if (!SAFE_ENTRY_PATH.test(entry.path) || entry.path.includes("..")) {
-      throw new BackupError(`el respaldo trae una ruta insegura: ${entry.path}`);
-    }
+    const canonical = entryPathSegments(entry.path).join("/");
     // D-3 (ATAQUE4-P2, de F-08/F-08b): un manifiesto con dos entradas
     // del mismo nombre es malformado por definición. Sin este rechazo,
     // la segunda carga sobrescribe a la primera en el mapa y, en la
@@ -269,13 +313,20 @@ export function readBackupContainer(srcPath: string): ReadContainer {
       throw new BackupError(`el manifiesto trae la entrada ${entry.path} duplicada: respaldo malformado`);
     }
     seenPaths.add(entry.path);
+    // La misma entrada en dos grafías (`store\x.db` y `store/x.db`)
+    // es el mismo nombre canónico: malformado también, cobrado
+    // aquí, en la lectura. El mapa se indexa por la canónica.
+    if (seenCanonical.has(canonical)) {
+      throw new BackupError(`el manifiesto trae la entrada ${entry.path} duplicada: respaldo malformado`);
+    }
+    seenCanonical.add(canonical);
     if (entry.sha256Kind !== "bytes") throw new BackupError(`huella de clase desconocida en ${entry.path}`);
     const slice = raw.subarray(offset, offset + entry.bytes);
     if (slice.length !== entry.bytes) throw new BackupError(`el respaldo está truncado en ${entry.path}`);
     if (sha256Hex(slice) !== entry.sha256) {
       throw new BackupError(`la huella de ${entry.path} no coincide: respaldo manipulado o corrupto`);
     }
-    payloads.set(entry.path, Buffer.from(slice));
+    payloads.set(canonical, Buffer.from(slice));
     offset += entry.bytes;
   }
   if (offset !== raw.length) throw new BackupError("el respaldo trae bytes de más tras la última entrada");
@@ -337,19 +388,33 @@ export async function createBackup(opts: {
 }
 
 /**
- * Restaura un respaldo sobre el directorio dado. Orden: aviso aceptado
- * → contenedor verificado entero → la DEK se desenvuelve con la
- * contraseña de respaldo (v2; en v1 se lee de la cabecera, vía legada)
- * → lista blanca → comprobación previa de destino (M-3) → cada base
- * del respaldo abre con su clave (en temporal) → sustitución atómica
- * con rollback → re-envoltura de la DEK restaurada con la custodia
- * local → la sesión, si está abierta, adopta la DEK restaurada.
+ * Restaura un respaldo sobre la BASE dada (el directorio de
+ * userData). Orden: aviso aceptado → contenedor verificado entero
+ * → la DEK se desenvuelve con la contraseña de respaldo (v2; en v1
+ * se lee de la cabecera, vía legada) → resolución de cada nombre a
+ * su ruta efectiva dentro de la base → lista blanca →
+ * comprobación previa de destino (M-3) → cada base del respaldo
+ * abre con su clave (en un árbol temporal bajo la base) →
+ * sustitución atómica con rollback → re-envoltura de la DEK
+ * restaurada con la custodia local, que vive en la bóveda
+ * (`vaultDir`) → la sesión, si está abierta, adopta la DEK
+ * restaurada.
  * El resultado declara si el respaldo era de la vía legada
  * (`legacyCleartextKey`): un v1 trae su clave en claro y se dice.
  */
 export async function restoreBackup(opts: {
   srcPath: string;
+  /** La base (userData): los nombres del respaldo resuelven dentro de ella. */
   dir: string;
+  /**
+   * El directorio de la bóveda: la custodia vive en vault/,
+   * FUERA de la base. Obligatorio y sin defecto a propósito:
+   * un olvido tiene que ser un error de compilación, no una
+   * restauración que re-envuelve la clave en el sitio
+   * equivocado. En la batería plana de E2, vaultDir === dir
+   * es la verdad de aquel diseño.
+   */
+  vaultDir: string;
   providers: readonly KeyCustodyProvider[];
   session?: VaultSession;
   /** El aviso de restauración debe aceptarse ANTES de ejecutar. */
@@ -357,7 +422,7 @@ export async function restoreBackup(opts: {
   /** La contraseña de respaldo (solo v2): sin ella no se desenvuelve nada. */
   backupPassword?: string;
 }): Promise<{ restored: string[]; custodyLevel: CustodyLevel; legacyCleartextKey: boolean }> {
-  const { srcPath, dir, providers, session } = opts;
+  const { srcPath, dir, vaultDir, providers, session } = opts;
   if (!opts.noticeAccepted) {
     throw new BackupError(`aviso de restauración no aceptado: ${restoreNoticeText()}`);
   }
@@ -379,28 +444,63 @@ export async function restoreBackup(opts: {
     restoredDek = normalizeBackupKey(manifest.databaseKeyHex);
     legacyCleartextKey = true;
   }
-  const dbEntries = manifest.entries.filter((e) => !e.path.endsWith(".format.json"));
   const stamp = randomBytes(4).toString("hex");
+
+  // RESOLUCIÓN (Forma A): cada nombre del manifiesto ya viene
+  // canonizado por la lectura; aquí se resuelve a su ruta
+  // EFECTIVA dentro de la base: la forma legada pierde su única
+  // subida (su ancla era la bóveda, que cuelga de la base) y la
+  // forma nueva ya es relativa a la base. Desde aquí la función
+  // solo mira rutas efectivas: la lista blanca, la comprobación
+  // de huérfanas, el temporal, la sustitución y el resultado
+  // hablan de ellas. Dos nombres con el mismo destino
+  // (`store/x.db` y `../store/x.db`) son el malformado de D-3
+  // cobrado en esta capa, antes de tocar el destino; y la
+  // contención dentro de la base se AFIRMA por entrada (la ruta
+  // resuelta, estrictamente dentro de la base resuelta) aunque
+  // la gramática la haga verdad por construcción: es la red
+  // bajo la gramática, y la composición del destino en la
+  // sustitución queda cubierta por ella.
+  const baseResolved = path.resolve(dir);
+  const effective = new Map<string, Buffer>();
+  const effectiveOrder: string[] = [];
+  for (const entry of manifest.entries) {
+    const canonical = entryPathSegments(entry.path).join("/");
+    const eff = canonical.startsWith("../") ? canonical.slice(3) : canonical;
+    if (effective.has(eff)) {
+      throw new BackupError(`el manifiesto trae la entrada ${entry.path} duplicada: respaldo malformado`);
+    }
+    const dest = path.resolve(baseResolved, eff);
+    if (dest === baseResolved || !dest.startsWith(baseResolved + path.sep)) {
+      throw new BackupError(`el respaldo trae una ruta insegura: ${entry.path}`);
+    }
+    effective.set(eff, payloads.get(canonical) as Buffer);
+    effectiveOrder.push(eff);
+  }
+  const dbEffective = effectiveOrder.filter((p) => !p.endsWith(".format.json"));
 
   // LISTA BLANCA (arreglo ATAQUE4-P5, de D-7/F-13d): solo se escriben
   // las bases del respaldo y los marcadores de formato DE esas bases.
   // Cualquier otro nombre (un .json ajeno como el staging de rotación,
   // la propia bóveda, un sidecar suelto) se rechaza aquí, en la
   // verificación previa, antes de tocar el destino: un respaldo no
-  // puede plantar ficheros que la app no espera.
-  for (const entry of manifest.entries) {
-    if (entry.path.endsWith(".format.json")) {
-      const base = entry.path.slice(0, -".format.json".length);
-      if (!payloads.has(base)) {
-        throw new BackupError(`el respaldo trae el marcador ${entry.path} sin su base: fuera de la lista blanca`);
+  // puede plantar ficheros que la app no espera. Se juzga sobre las
+  // rutas EFECTIVAS: el marcador `<efectiva>.format.json` exige su
+  // base efectiva, así que un marcador que viaja en el otro ancla
+  // que su base queda fuera de la lista.
+  for (const eff of effectiveOrder) {
+    if (eff.endsWith(".format.json")) {
+      const base = eff.slice(0, -".format.json".length);
+      if (!effective.has(base)) {
+        throw new BackupError(`el respaldo trae el marcador ${eff} sin su base: fuera de la lista blanca`);
       }
     } else if (
-      entry.path.endsWith(".json") ||
-      entry.path.endsWith("-wal") ||
-      entry.path.endsWith("-shm") ||
-      entry.path.endsWith("-journal")
+      eff.endsWith(".json") ||
+      eff.endsWith("-wal") ||
+      eff.endsWith("-shm") ||
+      eff.endsWith("-journal")
     ) {
-      throw new BackupError(`el respaldo trae una entrada fuera de la lista blanca de restauración: ${entry.path}`);
+      throw new BackupError(`el respaldo trae una entrada fuera de la lista blanca de restauración: ${eff}`);
     }
   }
 
@@ -413,16 +513,32 @@ export async function restoreBackup(opts: {
   // nunca la borra ni la re-cifra por su cuenta. Base gestionada =
   // fichero con su marcador `<base>.format.json` al lado; no lo son
   // la bóveda, el staging de rotación ni los restos de operaciones
-  // (temporales y respaldos de la propia restauración).
-  const restoredNames = new Set(dbEntries.map((e) => e.path));
+  // (temporales y respaldos de la propia restauración). El escaneo
+  // corre SOBRE LA BASE: la recorre y recorre cada subdirectorio
+  // inmediato (UN nivel: store/, knowledge/ y la propia vault/),
+  // saltando los nombres que empiezan por punto (los temporales
+  // de la casa, `.restore-check-…` entre ellos). La identidad de
+  // una base gestionada es su ruta relativa a la base con `/`, y
+  // el rechazo la nombra por ella (`knowledge/nido_knowledge.db`);
+  // las exclusiones de siempre se aplican al SEGMENTO FINAL del
+  // nombre, y la definición de base gestionada no cambia.
+  const restoredNames = new Set(dbEffective);
   const orphans: string[] = [];
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".format.json")) continue;
-    const base = name.slice(0, -".format.json".length);
-    if (base === VAULT_BLOB_FILE || base === ROTATION_STAGING_FILE) continue;
-    if (base.endsWith(".pre-restore-bak") || base.includes(".tmp-") || base.includes(".restore-tmp-")) continue;
-    if (!existsSync(path.join(dir, base))) continue;
-    if (!restoredNames.has(base)) orphans.push(base);
+  const scanLevel = (absDir: string, prefix: string) => {
+    for (const name of readdirSync(absDir)) {
+      if (!name.endsWith(".format.json")) continue;
+      const base = name.slice(0, -".format.json".length);
+      if (base === VAULT_BLOB_FILE || base === ROTATION_STAGING_FILE) continue;
+      if (base.endsWith(".pre-restore-bak") || base.includes(".tmp-") || base.includes(".restore-tmp-")) continue;
+      if (!existsSync(path.join(absDir, base))) continue;
+      const identity = prefix + base;
+      if (!restoredNames.has(identity)) orphans.push(identity);
+    }
+  };
+  scanLevel(dir, "");
+  for (const dent of readdirSync(dir, { withFileTypes: true })) {
+    if (dent.name.startsWith(".")) continue;
+    if (dent.isDirectory()) scanLevel(path.join(dir, dent.name), `${dent.name}/`);
   }
   if (orphans.length > 0) {
     throw new BackupError(
@@ -433,24 +549,31 @@ export async function restoreBackup(opts: {
   }
 
   // Verificación previa: cada base abre con la clave del respaldo,
-  // desde un temporal, antes de tocar el destino.
-  for (const entry of dbEntries) {
-    const tmpPath = path.join(dir, `.restore-check-${stamp}-${entry.path}`);
-    writeFileSync(tmpPath, payloads.get(entry.path) as Buffer);
-    try {
-      const db = rawOpenEncrypted(tmpPath, restoredDek);
+  // desde un temporal, antes de tocar el destino. El temporal es
+  // un ÁRBOL por corrida bajo la base (`.restore-check-<stamp>/`
+  // con la ruta efectiva dentro): los sidecars de la apertura
+  // caen dentro del árbol, la limpieza es el árbol entero en un
+  // finally y ningún resto queda en la base, lo acierte o lo
+  // falle la verificación.
+  const checkRoot = path.join(dir, `.restore-check-${stamp}`);
+  try {
+    for (const eff of dbEffective) {
+      const tmpPath = path.join(checkRoot, eff);
+      mkdirSync(path.dirname(tmpPath), { recursive: true });
+      writeFileSync(tmpPath, effective.get(eff) as Buffer);
       try {
-        verifyHandle(db);
-      } finally {
-        db.close();
+        const db = rawOpenEncrypted(tmpPath, restoredDek);
+        try {
+          verifyHandle(db);
+        } finally {
+          db.close();
+        }
+      } catch (err) {
+        throw new BackupError(`la base ${eff} del respaldo no abre con su clave: ${(err as Error).message}`);
       }
-    } catch (err) {
-      throw new BackupError(`la base ${entry.path} del respaldo no abre con su clave: ${(err as Error).message}`);
-    } finally {
-      rmSync(tmpPath, { force: true });
-      rmSync(`${tmpPath}-wal`, { force: true });
-      rmSync(`${tmpPath}-shm`, { force: true });
     }
+  } finally {
+    rmSync(checkRoot, { recursive: true, force: true });
   }
 
   // Sustitución atómica con red de rollback. El rollback devuelve el
@@ -466,12 +589,16 @@ export async function restoreBackup(opts: {
     sidecars: Array<{ src: string; bak: string }>;
   }
   const backups: SubBackup[] = [];
-  const blobPath = vaultBlobPath(dir);
+  const blobPath = vaultBlobPath(vaultDir);
   const prevBlobRaw = existsSync(blobPath) ? readFileSync(blobPath) : null;
   let provider: KeyCustodyProvider;
   try {
-    for (const entry of manifest.entries) {
-      const dest = path.join(dir, entry.path);
+    for (const eff of effectiveOrder) {
+      const dest = path.join(dir, eff);
+      // El área de la ruta efectiva puede no existir en una base
+      // recién nacida (una instalación de prueba sin store/
+      // todavía): se crea antes de escribir cada destino.
+      mkdirSync(path.dirname(dest), { recursive: true });
       const sub: SubBackup = { dest, bak: null, sidecars: [] };
       backups.push(sub);
       // Primero los sidecars del original a su propio respaldo: dejan
@@ -489,14 +616,15 @@ export async function restoreBackup(opts: {
         moveDurable(dest, sub.bak);
       }
       const tmp = `${dest}.restore-tmp-${stamp}`;
-      writeFileDurable(dest, payloads.get(entry.path) as Buffer, { tmpPath: tmp, mode: 0o600 });
+      writeFileDurable(dest, effective.get(eff) as Buffer, { tmpPath: tmp, mode: 0o600 });
     }
     // Re-envoltura local VERIFICADA desenvolviendo lo recién guardado
     // (ATAQUE4-P3, de D-4): la bóveda de este PC pasa a guardar la DEK
     // restaurada con la credencial de este PC, y si la comprobación
-    // falla la restauración entera se deshace.
+    // falla la restauración entera se deshace. La custodia vive en
+    // la bóveda (vaultDir), fuera de la base.
     provider = await selectCustodyProvider(providers);
-    await writeVaultBlobVerified(dir, provider, restoredDek);
+    await writeVaultBlobVerified(vaultDir, provider, restoredDek);
   } catch (err) {
     // Rollback: fuera lo restaurado, vuelta a lo guardado (principal,
     // sidecars y blob de custodia, byte a byte).
@@ -526,5 +654,5 @@ export async function restoreBackup(opts: {
   // respaldo venía de un PC con TPM, el nivel baja y se dice. Y declara
   // si el respaldo era de la vía legada (A-3): un v1 traía su clave en
   // claro dentro del fichero, y quien restaura tiene que saberlo.
-  return { restored: dbEntries.map((e) => e.path), custodyLevel: provider.id, legacyCleartextKey };
+  return { restored: dbEffective, custodyLevel: provider.id, legacyCleartextKey };
 }

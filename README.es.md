@@ -128,12 +128,20 @@ contactos y los recordatorios, la importación y exportación de
 calendario y contactos en .ics y .vcf, las tareas programadas, la
 biblioteca de documentos, la voz en el dispositivo (dictado y
 lectura en voz alta), la investigación profunda con sus informes
-guardados y la guía integrada. En desarrollo ahora mismo: la
-última etapa de la primera versión, camino de la primera alfa.
+guardados y la guía integrada. Nuevo en esta foto: ya puedes
+restaurar un respaldo y borrar todo desde la pantalla de
+Seguridad, la puerta de emergencias reconoce la caída contada en
+primera persona y el lugar donde pasó, y los eventos recurrentes
+importados guardan el fin de su serie en tus avisos.
 
-En el último hito verificado, la batería de pruebas corrió 7.365
-pruebas: 7.352 en verde, 13 fallos esperados y ningún fallo
+En el último hito verificado, la batería de pruebas corrió 7.428
+pruebas: 7.415 en verde, 13 fallos esperados y ningún fallo
 inesperado.
+
+La CI pública corre la batería entera sobre lo que este
+repositorio publica: las suites que necesitan los archivos de
+modelos de la casa declaran su salto por su nombre, y todo lo
+demás corre.
 
 NIDO PC es software en alfa temprana. Puede fallar, y va a
 cambiar. Lo que cada versión promete es menos fallos que la

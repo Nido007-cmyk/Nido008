@@ -132,7 +132,12 @@ describe("IPC channel contract census (tanda 14)", () => {
     // de ficheros de la Agenda añade tres canales
     // (agenda-import-preview, agenda-import-commit y
     // agenda-export) sobre los motores del núcleo.
-    expect(invoked.size).toBe(67);
+    // Re-firmado en la tanda SUPERFICIES DE BÓVEDA:
+    // restaurar y borrar añaden tres canales
+    // (backup-restore-preview, backup-restore y
+    // vault-wipe) sobre el motor de respaldo de E2 y la
+    // primitiva extendida de borrado.
+    expect(invoked.size).toBe(70);
     expect(sent).toEqual(new Set(["nido:confirm-response", "nido:voice-dictation-audio"]));
     // Re-firmado en E8 (paso 6): el clic de la notificación
     // del sistema y las acciones de la bandeja emiten
@@ -246,7 +251,10 @@ describe("IPC channel contract census (tanda 14)", () => {
     // 77 → 80 en la tanda PUERTA .ics/.vcf:
     // agendaImportPreview, agendaImportCommit y
     // agendaExport, la puerta de ficheros de la Agenda.
-    expect(exposed.size).toBe(80);
+    // 80 → 83 en la tanda SUPERFICIES DE BÓVEDA:
+    // backupRestorePreview, backupRestore y vaultWipe,
+    // los tres gestos nuevos de Seguridad.
+    expect(exposed.size).toBe(83);
     expect([...typed].sort()).toEqual([...exposed].sort());
   });
 

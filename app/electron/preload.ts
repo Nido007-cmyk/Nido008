@@ -117,6 +117,13 @@ contextBridge.exposeInMainWorld("nido", {
     backupExport: (args: unknown) => ipcRenderer.invoke("nido:backup-export", args),
     vaultRotateRequest: (args: unknown) =>
       ipcRenderer.invoke("nido:vault-rotate-request", args),
+    // Superficies de bóveda (S-1 + PAQ-2): la vuelta del
+    // respaldo (vista previa y gesto) y el borrado total,
+    // los tres gestos nuevos de la pestaña Seguridad.
+    backupRestorePreview: (args: unknown) =>
+      ipcRenderer.invoke("nido:backup-restore-preview", args),
+    backupRestore: (args: unknown) => ipcRenderer.invoke("nido:backup-restore", args),
+    vaultWipe: (args: unknown) => ipcRenderer.invoke("nido:vault-wipe", args),
     onLink: (cb: (payload: {seq?: number}) => void) => {
         const listener = (_event: unknown, payload: {seq?: number}) => cb(payload ?? {});
         ipcRenderer.on("nido:link", listener as never);

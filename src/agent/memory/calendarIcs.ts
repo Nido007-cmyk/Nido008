@@ -138,7 +138,7 @@ function parsePropLine(line: string): Prop | null {
 }
 
 /** Instante de un valor DTSTART/DTEND/UNTIL; null si no casa con el subconjunto. */
-function parseDateValue(
+export function parseDateValue(
   value: string,
   isDate: boolean,
 ): { ms: number; allDay: boolean } | null {
@@ -199,7 +199,7 @@ const RRULE_FREQS: Record<string, ReminderRepeat> = {
 };
 
 /** Cuenta ocurrencias de la serie en la ventana, con el tope de la firma. */
-function countOccurrences(
+export function countOccurrences(
   startsAt: number,
   repeat: ReminderRepeat,
   count: number | null,

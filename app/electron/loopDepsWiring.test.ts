@@ -85,6 +85,7 @@ vi.mock("./shell.ts", async () => {
 import { installServices } from "./services.ts";
 import { llamaEngine } from "../../src/inference/LlamaEngine.js";
 import * as memoryStore from "../../src/agent/memory/memoryStore.js";
+import { sceneSkipped } from "../../src/test/sceneGate.js";
 
 const PASSWORD = "sonda-cable1-20";
 const NOTA_ABUELA = "Receta de la abuela";
@@ -140,7 +141,12 @@ async function enviar(conversationId: string, text: string): Promise<TurnReply> 
   return reply;
 }
 
+const SCENE_OFF = sceneSkipped("loopDepsWiring", [
+  path.join(process.cwd(), "models", "qwen2.5-1.5b-instruct-q4km.gguf"),
+]);
+
 beforeAll(async () => {
+  if (SCENE_OFF) return;
   const fixtureBase = path.join(process.cwd(), "..", "nido-fixture-tmp");
   mkdirSync(fixtureBase, { recursive: true });
   harness.userData = mkdtempSync(path.join(fixtureBase, "nido-cable1-"));
@@ -154,10 +160,11 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(() => {
+  if (SCENE_OFF) return;
   rmSync(harness.userData, { recursive: true, force: true });
 });
 
-describe("CABLE-1: las rutas de memoria del bucle, vivas en el chat de producción", () => {
+describe.skipIf(SCENE_OFF)("CABLE-1: las rutas de memoria del bucle, vivas en el chat de producción", () => {
   it("la escena: la bóveda nace, el 1.5B queda residente y la memoria se siembra", async () => {
     const created = await call<{ ok: boolean }>("nido:vault-create", { password: PASSWORD });
     expect(created.ok).toBe(true);

@@ -62,9 +62,11 @@ vi.mock("./shell.ts", async () => {
 
 import { installServices } from "./services.ts";
 import { embeddingEngine } from "../../src/rag/embed.js";
+import { sceneSkipped } from "../../src/test/sceneGate.js";
 
 const E5_SHA256 = "802c868f57ccddd2e0c80645c3db1cb96a1aa50986a057cbaee2526f6e474cde";
 const E5_GENUINE = process.env.NIDO_E5_GENUINE ?? "multilingual-e5-small-q8_0.gguf";
+const SCENE_OFF = sceneSkipped("embeddingsRegistration", [E5_GENUINE]);
 
 const event = { sender: {}, senderFrame: { url: "nido://app/index.html" } };
 
@@ -75,6 +77,7 @@ function call(channel: string, args?: unknown): Promise<{ ok: boolean; reason?: 
 }
 
 beforeAll(async () => {
+  if (SCENE_OFF) return;
   // La siembra va por enlace duro desde un temporal en el
   // mismo sistema de ficheros que los genuinos: desde el
   // paso 4 de E4, la mitad de lectura de D-3 rechaza por
@@ -93,10 +96,11 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(() => {
+  if (SCENE_OFF) return;
   rmSync(harness.userData, { recursive: true, force: true });
 });
 
-describe("Pieza 3 de la carcasa: el registro del proveedor de embeddings (H-EMB-A)", () => {
+describe.skipIf(SCENE_OFF)("Pieza 3 de la carcasa: el registro del proveedor de embeddings (H-EMB-A)", () => {
   it("tras el desbloqueo, el proveedor registrado carga el e5 activo y el motor queda residente", async () => {
     const created = await call("nido:vault-create", { password: "sonda-embeddings-14" });
     expect(created.ok).toBe(true);

@@ -96,6 +96,7 @@ vi.mock("./shell.ts", async () => {
 
 import { installServices } from "./services.ts";
 import { DESKTOP_CATALOG } from "../../src/core/catalog.ts";
+import { sceneSkipped } from "../../src/test/sceneGate.js";
 
 const event = { sender: {}, senderFrame: { url: "nido://app/index.html" } };
 
@@ -137,7 +138,12 @@ async function waitFor(cond: () => boolean, timeoutMs: number, label: string): P
 
 const realFetch = globalThis.fetch;
 
+const SCENE_OFF = sceneSkipped("modelListSequence", [
+  path.join(process.cwd(), "models", "qwen2.5-1.5b-instruct-q4km.gguf"),
+]);
+
 beforeAll(async () => {
+  if (SCENE_OFF) return;
   const fixtureBase = path.join(process.cwd(), "..", "nido-fixture-tmp");
   mkdirSync(fixtureBase, { recursive: true });
   harness.userData = mkdtempSync(path.join(fixtureBase, "nido-list-sequence-"));
@@ -155,11 +161,12 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(() => {
+  if (SCENE_OFF) return;
   globalThis.fetch = realFetch;
   rmSync(harness.userData, { recursive: true, force: true });
 });
 
-describe("AU-2 · el principal dice la verdad y la foto vieja viene fechada (guardas)", () => {
+describe.skipIf(SCENE_OFF)("AU-2 · el principal dice la verdad y la foto vieja viene fechada (guardas)", () => {
   it("la foto vieja existe y viene fechada de antes: emitida antes de la activación, su tarjeta del 1.5B no dice activa", async () => {
     const created = await call("nido:vault-create", { password: "sonda-secuencia-lista" });
     expect(created.ok).toBe(true);
@@ -296,7 +303,7 @@ describe("AU-2 · el principal dice la verdad y la foto vieja viene fechada (gua
   }, 60_000);
 });
 
-describe("AU-2 · la vista no aplica fotos viejas sobre operaciones nuevas", () => {
+describe.skipIf(SCENE_OFF)("AU-2 · la vista no aplica fotos viejas sobre operaciones nuevas", () => {
   const appSrc = readFileSync(path.join(process.cwd(), "app", "src", "App", "App.tsx"), "utf8");
   const tabStart = appSrc.indexOf("function ModelsTab(");
   // El cuerpo de ModelsTab, cortado donde nace el siguiente

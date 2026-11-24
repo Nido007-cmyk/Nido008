@@ -62,6 +62,7 @@ vi.mock("./shell.ts", async () => {
 
 import { installServices } from "./services.ts";
 import { getActiveModelId } from "../../src/models/settings.ts";
+import { sceneSkipped } from "../../src/test/sceneGate.js";
 
 const event = { sender: {}, senderFrame: { url: "nido://app/index.html" } };
 
@@ -77,7 +78,12 @@ const ID = "qwen3-0.6b-q4km";
 const PASSWORD = "sonda-a20-activo";
 const realFetch = globalThis.fetch;
 
+const SCENE_OFF = sceneSkipped("modelActiveSetting", [
+  path.join(process.cwd(), "models", "qwen3-0.6b-q4km.gguf"),
+]);
+
 beforeAll(async () => {
+  if (SCENE_OFF) return;
   const fixtureBase = path.join(process.cwd(), "..", "nido-fixture-tmp");
   mkdirSync(fixtureBase, { recursive: true });
   harness.userData = mkdtempSync(path.join(fixtureBase, "nido-a20-activo-"));
@@ -90,11 +96,12 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(() => {
+  if (SCENE_OFF) return;
   globalThis.fetch = realFetch;
   rmSync(harness.userData, { recursive: true, force: true });
 });
 
-describe("A-20 · cargar un modelo escribe el ajuste de activo", () => {
+describe.skipIf(SCENE_OFF)("A-20 · cargar un modelo escribe el ajuste de activo", () => {
   it("tras nido:model-load, el activo leído de vuelta es el modelo cargado", async () => {
     const r = await call("nido:model-load", { id: ID });
     expect(r.ok).toBe(true);

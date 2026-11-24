@@ -163,6 +163,13 @@ interface AgendaEventRow {
   allDay: boolean;
   rrule: string | null;
   alertOffsetMin: number | null;
+  // CARGO-2: la expansión del principal marca las
+  // ocurrencias que no son la primera fecha de su serie
+  // (se pintan sin botones) y declara la clave de la
+  // repetición de la serie, resuelta aquí con la letra
+  // de la Agenda.
+  occurrence?: boolean;
+  repeatKey?: string | null;
 }
 interface AgendaNoticeRow {
   id: string;
@@ -613,6 +620,30 @@ interface NidoBridge {
     entries?: string[];
   }>;
   vaultRotateRequest(args: { password: string }): Promise<{ ok: boolean; reason?: string }>;
+  // Superficies de bóveda (S-1 + PAQ-2): la vuelta del
+  // respaldo (vista previa y gesto) y el borrado total.
+  // La vista previa anuncia la versión del formato,
+  // cuándo se hizo y qué bases trae; el gesto y el
+  // borrado responden con su razón cuando no salen.
+  backupRestorePreview(args: { srcPath: string }): Promise<{
+    ok: boolean;
+    reason?: string;
+    version?: number;
+    createdAt?: string;
+    entries?: string[];
+    legacy?: boolean;
+  }>;
+  backupRestore(args: {
+    srcPath: string;
+    backupPassword?: string;
+    vaultPassword: string;
+    noticeAccepted: boolean;
+  }): Promise<{ ok: boolean; reason?: string; legacy?: boolean; names?: string[]; message?: string }>;
+  vaultWipe(args: { password: string; scopeAccepted: boolean }): Promise<{
+    ok: boolean;
+    reason?: string;
+    names?: string[];
+  }>;
   onLink(cb: (payload: { seq?: number }) => void): () => void;
   onNoticesShow(cb: (p: { target?: string }) => void): () => void;
   checkForUpdates(): Promise<unknown>;
@@ -4440,6 +4471,22 @@ function AgendaView({ boot, contactId, noticesSignal }: { boot: Boot; contactId:
   while (cells.length % 7 !== 0) cells.push(null);
   const eventsOn = (dayNum: number) =>
     events.filter((e) => agendaDay(e.startsAt) === `${cursor.y}-${pad2(cursor.m + 1)}-${pad2(dayNum)}`);
+  // CARGO-2: la etiqueta de repetición de una serie, con
+  // las claves que el principal declara en cada fila.
+  const repeatLabel = (key: string | null | undefined): string | null => {
+    switch (key) {
+      case "repeatDay":
+        return AG("repeatDay");
+      case "repeatWeek":
+        return AG("repeatWeek");
+      case "repeatMonth":
+        return AG("repeatMonth");
+      case "repeatYear":
+        return AG("repeatYear");
+      default:
+        return null;
+    }
+  };
 
   return (
     <div className="view-scroll">
@@ -4653,35 +4700,38 @@ function AgendaView({ boot, contactId, noticesSignal }: { boot: Boot; contactId:
               )}
               {visibleEvents.length === 0 && <p style={{ color: "var(--muted)" }}>{AG("emptyEvents")}</p>}
               {visibleEvents.map((e) => (
-                <div key={e.id} className="row-line">
+                <div key={`${e.id}@${e.startsAt}`} className="row-line">
                   <span>
                     {e.title}
                     <span style={{ color: "var(--muted)", display: "block", fontSize: "0.85em" }}>
                       {agendaWhen(e.startsAt, e.allDay)}
                       {e.location ? ` · ${e.location}` : ""}
+                      {repeatLabel(e.repeatKey) ? ` · ${repeatLabel(e.repeatKey)}` : ""}
                     </span>
                   </span>
-                  <span style={{ display: "flex", gap: 6 }}>
-                    <button
-                      title={AG("edit")}
-                      onClick={() =>
-                        setEventDraft({
-                          id: e.id,
-                          title: e.title,
-                          date: agendaDay(e.startsAt),
-                          start: agendaTime(e.startsAt),
-                          end: agendaTime(e.endsAt),
-                          allDay: e.allDay,
-                          place: e.location,
-                          notes: e.notes,
-                          alert: e.alertOffsetMin == null ? "none" : String(e.alertOffsetMin),
-                        })
-                      }
-                    >
-                      {AG("edit")}
-                    </button>
-                    {deleteButton("ev", e.id)}
-                  </span>
+                  {!e.occurrence && (
+                    <span style={{ display: "flex", gap: 6 }}>
+                      <button
+                        title={AG("edit")}
+                        onClick={() =>
+                          setEventDraft({
+                            id: e.id,
+                            title: e.title,
+                            date: agendaDay(e.startsAt),
+                            start: agendaTime(e.startsAt),
+                            end: agendaTime(e.endsAt),
+                            allDay: e.allDay,
+                            place: e.location,
+                            notes: e.notes,
+                            alert: e.alertOffsetMin == null ? "none" : String(e.alertOffsetMin),
+                          })
+                        }
+                      >
+                        {AG("edit")}
+                      </button>
+                      {deleteButton("ev", e.id)}
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
@@ -5413,14 +5463,20 @@ function VoiceSection({ boot, refresh }: { boot: Boot; refresh: () => Promise<vo
 
 // ---------------------------------------------------------------------
 // E11 (O-1·E11) · El respaldo y la rotación en Seguridad,
-// dentro de la sesión de la bóveda: dos gestos expresos
+// dentro de la sesión de la bóveda: los gestos expresos
 // de la persona y ninguno más. El respaldo pide su
 // contraseña propia (distinta de la de la bóveda) y el
 // destino en el diálogo de guardar; la rotación pide la
 // credencial otra vez y su confirmación, y termina en
 // reinicio: se ejecuta al desbloquear, antes de abrir
-// ninguna base. Con la bóveda bloqueada la tarjeta ni se
-// ofrece (la monta solo la sesión abierta).
+// ninguna base. Restaurar (S-1) elige el fichero, lo
+// enseña antes de tocar nada (la vista previa del
+// principal) y solo sustituye con la aceptación del
+// aviso y las dos contraseñas, terminando también en
+// reinicio. Borrar todo (PAQ-2) vive en su propia
+// tarjeta, debajo de esta. Con la bóveda bloqueada las
+// tarjetas ni se ofrecen (las monta solo la sesión
+// abierta).
 // ---------------------------------------------------------------------
 
 function VaultBackupCard({
@@ -5461,6 +5517,86 @@ function VaultBackupCard({
       .catch(() => null);
     // Si la app no salió, la petición fue rechazada.
     if (r && !r.ok) setRotateNote(P("vaultRotateReauthFailed"));
+  };
+
+  // Restaurar (S-1): elegir el fichero trae primero la
+  // vista previa del principal (qué trae, cuándo se
+  // hizo, si es del formato antiguo); solo con la vista
+  // previa buena se enseñan el aviso y los campos, y el
+  // botón exige además la aceptación y las contraseñas.
+  const restoreFileRef = useRef<HTMLInputElement | null>(null);
+  const [restorePath, setRestorePath] = useState<string | null>(null);
+  const [restorePreview, setRestorePreview] = useState<{
+    version: number;
+    createdAt: string;
+    entries: string[];
+    legacy: boolean;
+  } | null>(null);
+  const [restoreBackupPassword, setRestoreBackupPassword] = useState("");
+  const [restoreVaultPassword, setRestoreVaultPassword] = useState("");
+  const [restoreConfirm, setRestoreConfirm] = useState(false);
+  const [restoreNote, setRestoreNote] = useState<string | null>(null);
+
+  const restoreFailNote = (reason?: string, names?: string[], message?: string): string => {
+    switch (reason) {
+      case "backup-password-wrong":
+        return P("vaultRestoreWrongBackupPassword");
+      case "backup-password-required":
+        return P("vaultRestorePasswordRequired");
+      case "reauth-failed":
+        return P("vaultRestoreReauthFailed");
+      case "too-new":
+        return P("vaultRestoreTooNew");
+      case "orphans":
+        return fill(P("vaultRestoreOrphans"), { names: (names ?? []).join(", ") });
+      case "corrupt":
+      case "unreadable":
+        return P("vaultRestoreCorrupt");
+      default:
+        return message ?? P("vaultRestoreFailed");
+    }
+  };
+
+  const onRestoreFile = async (f: File | null) => {
+    if (!f) return;
+    setRestoreNote(null);
+    setRestorePreview(null);
+    setRestorePath(null);
+    setRestoreConfirm(false);
+    const p = window.nido.docFilePath(f);
+    if (!p) {
+      setRestoreNote(P("vaultRestoreCorrupt"));
+      return;
+    }
+    const r = await window.nido.backupRestorePreview({ srcPath: p }).catch(() => null);
+    if (!r || !r.ok) {
+      setRestoreNote(restoreFailNote(r?.reason));
+      return;
+    }
+    setRestorePath(p);
+    setRestorePreview({
+      version: r.version ?? 0,
+      createdAt: r.createdAt ?? "",
+      entries: r.entries ?? [],
+      legacy: r.legacy ?? false,
+    });
+  };
+
+  const doRestore = async () => {
+    if (!restorePath || !restorePreview) return;
+    const r = await window.nido
+      .backupRestore({
+        srcPath: restorePath,
+        backupPassword:
+          restorePreview.version === 2 && restoreBackupPassword.length > 0
+            ? restoreBackupPassword
+            : undefined,
+        vaultPassword: restoreVaultPassword,
+        noticeAccepted: restoreConfirm,
+      })
+      .catch(() => null);
+    // Si la app no salió, el gesto fue rechazado.
+    if (r && !r.ok) setRestoreNote(restoreFailNote(r.reason, r.names, r.message));
   };
 
   return (
@@ -5510,6 +5646,135 @@ function VaultBackupCard({
         {P("vaultRotateButton")}
       </button>
       {rotateNote && <p>{rotateNote}</p>}
+      <h3>{P("vaultRestoreTitle")}</h3>
+      <p>{P("vaultRestoreBody")}</p>
+      <input
+        ref={restoreFileRef}
+        type="file"
+        accept=".nidbackup"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const f = e.target.files?.[0] ?? null;
+          e.target.value = "";
+          void onRestoreFile(f);
+        }}
+      />
+      <button className="btn" onClick={() => restoreFileRef.current?.click()}>
+        {P("vaultRestorePick")}
+      </button>
+      {restorePreview && restorePath && (
+        <>
+          <p>
+            {fill(P("vaultRestoreFile"), {
+              name: restorePath.split(/[\\/]/).pop() ?? restorePath,
+              date: restorePreview.createdAt,
+              entries: restorePreview.entries.join(", "),
+            })}
+          </p>
+          {restorePreview.legacy && <p>{P("vaultRestoreLegacy")}</p>}
+          {restorePreview.version === 2 && (
+            <div className="field">
+              <span>{P("vaultRestoreBackupPassword")}</span>
+              <input
+                type="password"
+                value={restoreBackupPassword}
+                onChange={(e) => setRestoreBackupPassword(e.target.value)}
+                autoComplete="off"
+              />
+            </div>
+          )}
+          <div className="field">
+            <span>{P("vaultRotatePassword")}</span>
+            <input
+              type="password"
+              value={restoreVaultPassword}
+              onChange={(e) => setRestoreVaultPassword(e.target.value)}
+              autoComplete="current-password"
+            />
+          </div>
+          <div className="row-line">
+            <span>{P("vaultRestoreConfirm")}</span>
+            <input
+              type="checkbox"
+              checked={restoreConfirm}
+              onChange={(e) => setRestoreConfirm(e.target.checked)}
+            />
+          </div>
+          <button
+            className="btn"
+            disabled={
+              !restoreConfirm ||
+              restoreVaultPassword.length === 0 ||
+              (restorePreview.version === 2 && restoreBackupPassword.length === 0)
+            }
+            onClick={() => void doRestore()}
+          >
+            {P("vaultRestoreButton")}
+          </button>
+        </>
+      )}
+      {restoreNote && <p>{restoreNote}</p>}
+    </div>
+  );
+}
+
+/** Borrar todo (PAQ-2): la tarjeta hermana de la del
+ * respaldo, en la misma pestaña y bajo la misma
+ * condición (la sesión abierta). Enseña el alcance
+ * entero antes del gesto, pide la credencial otra vez
+ * y la aceptación expresa, y termina en reinicio: al
+ * reabrir no hay bóveda y la app enseña su primer día.
+ * Si el borrado no se completa, la nota lo dice con lo
+ * que quedó: el marcador durable hace que la app lo
+ * termine al abrirse. */
+function VaultWipeCard({ P }: { P: (k: string) => string }) {
+  const [wipePassword, setWipePassword] = useState("");
+  const [wipeConfirm, setWipeConfirm] = useState(false);
+  const [wipeNote, setWipeNote] = useState<string | null>(null);
+
+  const doWipe = async () => {
+    const r = await window.nido
+      .vaultWipe({ password: wipePassword, scopeAccepted: wipeConfirm })
+      .catch(() => null);
+    // Si la app no salió, el gesto fue rechazado.
+    if (r && !r.ok) {
+      if (r.reason === "wipe-incomplete") {
+        setWipeNote(fill(P("vaultWipeIncomplete"), { names: (r.names ?? []).join(", ") }));
+      } else {
+        setWipeNote(P("vaultWipeReauthFailed"));
+      }
+    }
+  };
+
+  return (
+    <div className="card vault-wipe-card">
+      <h3>{P("vaultWipeTitle")}</h3>
+      <p>{P("vaultWipeBody")}</p>
+      <div className="field">
+        <span>{P("vaultRotatePassword")}</span>
+        <input
+          type="password"
+          value={wipePassword}
+          onChange={(e) => setWipePassword(e.target.value)}
+          autoComplete="current-password"
+        />
+      </div>
+      <div className="row-line">
+        <span>{P("vaultWipeConfirm")}</span>
+        <input
+          type="checkbox"
+          checked={wipeConfirm}
+          onChange={(e) => setWipeConfirm(e.target.checked)}
+        />
+      </div>
+      <button
+        className="btn"
+        disabled={!wipeConfirm || wipePassword.length === 0}
+        onClick={() => void doWipe()}
+      >
+        {P("vaultWipeButton")}
+      </button>
+      {wipeNote && <p>{wipeNote}</p>}
     </div>
   );
 }
@@ -5689,7 +5954,10 @@ function SettingsView({
             </div>
           )}
           {tab === "security" && boot.vault.unlocked && (
-            <VaultBackupCard P={P} rotationOutcome={boot.rotationOutcome ?? null} />
+            <>
+              <VaultBackupCard P={P} rotationOutcome={boot.rotationOutcome ?? null} />
+              <VaultWipeCard P={P} />
+            </>
           )}
           {tab === "tone" && (
             <div className="card">

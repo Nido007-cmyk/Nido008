@@ -28,11 +28,13 @@ import {
 import {
   buildNotice,
   deleteNoticesByRefWithin,
+  deriveNextFireAt,
   insertNoticeWithin,
   syncAgendaAfterWrite,
   toBaseLocal,
   type NoticeDb,
 } from "./noticeStore.js";
+import { lastOccurrenceAt, parseStoredRule } from "./eventSeries.js";
 
 export type CalendarOrigin = "chat" | "ui" | "ics";
 
@@ -54,6 +56,13 @@ export interface CalendarEvent {
   origin: CalendarOrigin;
   createdAt: number;
   updatedAt: number;
+  /**
+   * Solo en memoria, nunca una columna: lo pone la
+   * expansión (eventSeries) en las copias de una serie
+   * que no son su primera fecha, para que la vista las
+   * pinte sin botones de editar ni borrar.
+   */
+  occurrence?: boolean;
 }
 
 interface CalendarEventRow {
@@ -119,6 +128,35 @@ async function armEventNoticeWithin(
   await deleteNoticesByRefWithin(db, "event", ev.id);
   if (ev.alertOffsetMin == null) return;
   const fireAt = ev.startsAt - ev.alertOffsetMin * 60_000;
+  // CARGO-2: si el evento trae una regla interpretable,
+  // su aviso es UNA fila de la cola con la repetición y
+  // el fin de la serie en `endsAt` (el instante de
+  // disparo de la última ocurrencia): la maquinaria de
+  // series de la cola lo avanza y lo cierra. Una serie
+  // ya acabada no se arma: no hace ruido de una
+  // ocurrencia que no va a sonar.
+  const rule = parseStoredRule(ev.rrule);
+  if (rule) {
+    const last = lastOccurrenceAt(ev);
+    if (last == null) return;
+    const endsAt = last - ev.alertOffsetMin * 60_000;
+    const baseLocal = toBaseLocal(new Date(fireAt));
+    if (deriveNextFireAt(baseLocal, rule.repeat, now) > endsAt) return;
+    const notice = buildNotice(
+      {
+        kind: "event",
+        refId: ev.id,
+        body: { title: ev.title, startsAt: ev.startsAt },
+        baseLocal,
+        repeat: rule.repeat,
+        endsAt,
+        now,
+      },
+      now,
+    );
+    await insertNoticeWithin(db, notice);
+    return;
+  }
   const notice = buildNotice(
     {
       kind: "event",
